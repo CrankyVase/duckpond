@@ -1,0 +1,18 @@
+{
+  "name": "duckpond-web",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "svelte": "^5.35.0",
+    "vite": "^6.3.5"
+  },
+  "dependencies": {
+    "marked": "^15.0.12"
+  }
+}
