@@ -1,6 +1,7 @@
 <script>
   import { api } from '../lib/api.js';
   import { app, checkAuth } from '../lib/state.svelte.js';
+  import Duck from './Duck.svelte';
 
   let username = $state('');
   let password = $state('');
@@ -28,7 +29,7 @@
 
 <div class="wrap">
   <form class="card slide-up" onsubmit={submit}>
-    <div class="logo">🦆</div>
+    <div class="logo"><Duck px={4} bob /></div>
     <h1>DuckPond</h1>
     {#if app.setupNeeded}
       <p class="hint">First run — create the owner account.</p>
@@ -50,7 +51,7 @@
     background: var(--bg-raised); border: 1px solid var(--border);
     border-radius: 16px; padding: 32px;
   }
-  .logo { font-size: 40px; text-align: center; }
+  .logo { display: flex; justify-content: center; }
   h1 { margin: 0 0 8px; font-size: 22px; text-align: center; font-weight: 600; }
   .hint { margin: 0; color: var(--text-dim); font-size: 13px; text-align: center; }
   .error { margin: 0; color: var(--red); font-size: 13px; }

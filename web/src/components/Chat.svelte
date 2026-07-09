@@ -1,13 +1,18 @@
 <script>
   import { api, sse } from '../lib/api.js';
   import {
-    app, childrenMap, deepestLeaf, loadConversations, refreshContext, visiblePath,
+    app, childrenMap, deepestLeaf, loadConversations, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
+  import Duck from './Duck.svelte';
   import Message from './Message.svelte';
+  import ArrowDown from '@lucide/svelte/icons/arrow-down';
+  import ArrowUp from '@lucide/svelte/icons/arrow-up';
+  import Square from '@lucide/svelte/icons/square';
 
   let input = $state('');
   let scroller = $state(null);
-  let stream = null;          // { abort }
+  let atBottom = $state(true);
+  let stream = null;
   let raf = 0;
   let pendText = '';
   let pendThink = '';
@@ -22,11 +27,14 @@
 
   function nearBottom() {
     if (!scroller) return true;
-    return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
+    return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
   }
-  function scrollToBottom(force = false) {
-    if (scroller && (force || nearBottom())) scroller.scrollTop = scroller.scrollHeight;
+  function scrollToBottom(force = false, smooth = false) {
+    if (scroller && (force || nearBottom())) {
+      scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    }
   }
+  function onScroll() { atBottom = nearBottom(); }
 
   // rAF-batched flush: SSE deltas accumulate in plain vars, one state write per frame.
   function scheduleFlush() {
@@ -79,13 +87,12 @@
     } catch (err) {
       if (app.streaming) app.streaming.error = String(err.message ?? err);
     } finally {
-      // if the stream ended without a done event (abort/error), keep partial text visible
       if (app.streaming) {
         if (app.streaming.text || app.streaming.error) {
           app.conv.messages.push({
             id: `tmp-${Date.now()}`, conv_id: app.conv.id,
             parent_id: app.conv.active_leaf_id, role: 'assistant',
-            content: app.streaming.text + (app.streaming.error ? `\n\n> ⚠ ${app.streaming.error}` : '\n\n> ⚠ stopped'),
+            content: app.streaming.text + (app.streaming.error ? `\n\n> ${app.streaming.error}` : '\n\n> stopped'),
             pinned: 0,
           });
         }
@@ -106,7 +113,6 @@
   function stop() { stream?.abort(); }
 
   function onEdit(msg, newContent) {
-    // branch: new user message under the same parent
     run({ content: newContent, parentId: msg.parent_id ?? null });
   }
   function onRegenerate(msg) { run({ regenerateFrom: msg.id }); }
@@ -114,6 +120,17 @@
   async function onPin(msg) {
     const r = await api(`/api/messages/${msg.id}/pin`, { method: 'POST', body: { pinned: !msg.pinned } });
     msg.pinned = r.pinned ? 1 : 0;
+  }
+
+  async function onDelete(msg) {
+    if (typeof msg.id !== 'number') { // unsaved partial (stopped stream) — just drop locally
+      app.conv.messages = app.conv.messages.filter((m) => m.id !== msg.id);
+      return;
+    }
+    const kids = kidsMap.get(msg.id)?.length ?? 0;
+    if (!confirm(kids ? 'Delete this message and everything after it?' : 'Delete this message?')) return;
+    await api(`/api/messages/${msg.id}`, { method: 'DELETE' });
+    await openConversation(app.conv.id); // refetch: leaf may have retracted
   }
 
   async function onBranch(siblingId) {
@@ -126,71 +143,120 @@
   function composerKey(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   }
+  function autoGrow(e) {
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px';
+  }
 </script>
 
 <div class="chat">
-  <div class="scroll" bind:this={scroller}>
+  <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="thread">
       {#if !path.length && !busy}
         <div class="empty slide-up">
-          <div class="big">🦆</div>
+          <Duck px={5} bob />
           <p>Pick a model up top and say something.</p>
         </div>
       {/if}
-      {#each path as m (m.id)}
-        <Message msg={m} siblings={siblingsOf(m)}
-          onedit={onEdit} onregenerate={onRegenerate} onpin={onPin} onbranch={onBranch} />
+      {#each path as m, i (m.id)}
+        <Message msg={m} siblings={siblingsOf(m)} last={i === path.length - 1 && !busy}
+          onedit={onEdit} onregenerate={onRegenerate} onpin={onPin}
+          onbranch={onBranch} ondelete={onDelete} />
       {/each}
       {#if app.streaming}
         <Message streaming
           msg={{ role: 'assistant', content: app.streaming.text, thinking: app.streaming.thinking || null, pinned: 0 }} />
         <div class="status">
           {#if app.streaming.loading}
-            <span class="pulse">loading {app.conv?.model_id}…</span>
+            <span class="shimmer">loading {app.conv?.model_id}…</span>
           {:else if app.streaming.tokS}
             <span class="mono">{app.streaming.tokS.toFixed(1)} tok/s · {app.streaming.n} tok</span>
-          {:else}
-            <span class="pulse">thinking…</span>
           {/if}
         </div>
       {/if}
+      <div class="pad"></div>
     </div>
   </div>
 
-  <div class="composer">
-    <textarea rows="1" placeholder="Message… (Enter to send, Shift+Enter for newline)"
-      bind:value={input} onkeydown={composerKey} disabled={!app.conv}
-      style="height:auto" oninput={(e) => { e.target.style.height = 'auto'; e.target.style.height = Math.min(220, e.target.scrollHeight) + 'px'; }}
-    ></textarea>
-    {#if busy}
-      <button class="stop" onclick={stop} title="Stop generating">■</button>
-    {:else}
-      <button class="primary go" onclick={send} disabled={!input.trim() || !app.conv}>↑</button>
+  <div class="dock">
+    {#if !atBottom}
+      <button class="tobottom fade-in" onclick={() => scrollToBottom(true, true)} title="Jump to latest">
+        <ArrowDown size={16} />
+      </button>
     {/if}
+    <div class="composer" class:active={busy}>
+      <textarea rows="1" placeholder="Message DuckPond…"
+        bind:value={input} onkeydown={composerKey} oninput={autoGrow}
+        disabled={!app.conv}></textarea>
+      {#if busy}
+        <button class="send stop" onclick={stop} title="Stop generating">
+          <Square size={13} fill="currentColor" />
+        </button>
+      {:else}
+        <button class="send" class:ready={input.trim()} onclick={send}
+          disabled={!input.trim() || !app.conv} title="Send (Enter)">
+          <ArrowUp size={17} />
+        </button>
+      {/if}
+    </div>
+    <div class="finehint">Shift+Enter for a new line · edits &amp; retries branch, nothing is lost</div>
   </div>
 </div>
 
 <style>
-  .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; height: 100%; }
-  .scroll { flex: 1; overflow-y: auto; }
-  .thread { max-width: 820px; margin: 0 auto; padding: 24px 20px 12px; display: flex; flex-direction: column; gap: 10px; }
-  .empty { text-align: center; color: var(--text-dim); margin-top: 18vh; }
-  .empty .big { font-size: 52px; margin-bottom: 8px; }
-  .status { font-size: 12px; color: var(--text-faint); padding-left: 42px; }
+  .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-padding-bottom: 40px; }
+  .thread { max-width: 760px; margin: 0 auto; padding: 20px 24px 0; }
+  .pad { height: 24px; }
+  .empty {
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    color: var(--text-dim); margin-top: 16vh;
+  }
+  .status { font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 42px; min-height: 20px; }
   .mono { font-family: var(--mono); }
-  .pulse { animation: pulse 1.4s ease infinite; }
-  @keyframes pulse { 50% { opacity: 0.45; } }
+  .shimmer {
+    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    animation: shimmer 1.6s linear infinite;
+  }
+  @keyframes shimmer { to { background-position: -200% 0; } }
 
+  .dock { position: relative; max-width: 760px; width: 100%; margin: 0 auto; padding: 4px 24px 10px; }
+  .tobottom {
+    position: absolute; top: -46px; left: 50%; transform: translateX(-50%);
+    color: var(--text-dim);
+    width: 36px; height: 36px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: var(--bg-raised); border: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+  }
   .composer {
-    max-width: 820px; width: 100%; margin: 0 auto;
-    display: flex; gap: 8px; align-items: flex-end;
-    padding: 8px 20px 18px;
+    display: flex; align-items: flex-end; gap: 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    padding: 8px 8px 8px 18px;
+    transition: border-color 180ms ease, box-shadow 180ms ease;
   }
-  textarea {
-    flex: 1; resize: none; max-height: 220px;
-    border-radius: 14px; padding: 11px 14px;
-    background: var(--bg-raised);
+  .composer:focus-within { border-color: var(--accent-dim); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .composer textarea {
+    flex: 1; resize: none; max-height: 200px;
+    background: none; border: none; box-shadow: none; padding: 6px 0;
+    line-height: 1.5;
   }
-  .go, .stop { width: 40px; height: 40px; border-radius: 12px; font-size: 16px; flex-shrink: 0; }
-  .stop { color: var(--red); border-color: var(--red); }
+  .composer textarea:focus { box-shadow: none; }
+  .send {
+    width: 36px; height: 36px; border-radius: 50%;
+    display: grid; place-items: center; flex-shrink: 0;
+    background: var(--bg-hover); border: none;
+    opacity: 0.6; transition: background 150ms ease, opacity 150ms ease;
+  }
+  .send { color: var(--text-dim); }
+  .send.ready { background: var(--accent); color: #141005; opacity: 1; }
+  .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; }
+  .finehint {
+    text-align: center; font-size: 11px; color: var(--text-faint);
+    padding-top: 7px; user-select: none;
+  }
 </style>

@@ -128,6 +128,62 @@ export const ICONS = {
 };
 ICONS.pinOn.map = ICONS.pin.map;
 
+// action-row icons (grey; hover color handled in CSS via opacity)
+ICONS.pencil = {
+  palette: { P: grey },
+  map: [
+    '......PP.',
+    '.....PPPP',
+    '....PPPP.',
+    '...PPPP..',
+    '..PPPP...',
+    '.PPPP....',
+    'PPP......',
+    'P........',
+  ],
+};
+ICONS.trash = {
+  palette: { P: grey },
+  map: [
+    '...PPP...',
+    '.PPPPPPP.',
+    '..PPPPP..',
+    '..P.P.P..',
+    '..P.P.P..',
+    '..P.P.P..',
+    '..PPPPP..',
+    '...PPP...',
+  ],
+};
+ICONS.copy = {
+  palette: { P: grey },
+  map: [
+    '...PPPPPP.',
+    '...P....P.',
+    '...P....P.',
+    'PPPPPP..P.',
+    'P....P..P.',
+    'P....PPPP.',
+    'P....P....',
+    'P....P....',
+    'PPPPPP....',
+  ],
+};
+ICONS.retry = {
+  palette: { P: grey },
+  map: [
+    '...PPPP...',
+    '..PP..PP..',
+    '.PP....PP.',
+    '.P.....PPP',
+    '.P......P.',
+    '.P.....PP.',
+    '.PP....P..',
+    '..PP..PP..',
+    '...PPPP...',
+  ],
+};
+
 // Merge horizontal runs of same-colored pixels into single rects.
 export function buildRects(map, palette) {
   const rects = [];

@@ -141,6 +141,28 @@ export default async function chatRoutes(app) {
     return { ok: true, pinned: !!pinned };
   });
 
+  // Delete a message AND its whole subtree (replies/branches under it).
+  // If the active leaf was inside the subtree, the path retracts to the parent.
+  app.delete('/api/messages/:id', async (req, reply) => {
+    const msg = db.prepare(`
+      SELECT m.*, c.active_leaf_id, c.user_id FROM messages m
+      JOIN conversations c ON c.id = m.conv_id
+      WHERE m.id = ? AND c.user_id = ?`).get(req.params.id, req.user.id);
+    if (!msg) return reply.code(404).send({ error: 'not found' });
+    const subtree = db.prepare(`
+      WITH RECURSIVE sub(id) AS (
+        SELECT id FROM messages WHERE id = ?
+        UNION ALL
+        SELECT m.id FROM messages m JOIN sub s ON m.parent_id = s.id
+      ) SELECT id FROM sub`).all(msg.id).map((r) => r.id);
+    db.transaction(() => {
+      if (subtree.includes(msg.active_leaf_id)) setLeaf(msg.conv_id, msg.parent_id ?? null);
+      const del = db.prepare(`DELETE FROM messages WHERE id IN (${subtree.map(() => '?').join(',')})`);
+      del.run(...subtree);
+    })();
+    return { ok: true, deleted: subtree.length };
+  });
+
   // The main event: send a user message (or regenerate) and stream the reply.
   // body: { content?, parentId?, regenerateFrom? } — exactly one of content|regenerateFrom.
   app.post('/api/conversations/:id/chat', async (req, reply) => {
