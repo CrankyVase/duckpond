@@ -59,16 +59,31 @@ export default async function authRoutes(app) {
   app.get('/api/auth/me', async (req, reply) => {
     const user = sessionUser(req.cookies?.dp_session);
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
-    const { default_model_id } = db.prepare('SELECT default_model_id FROM users WHERE id = ?').get(user.id);
-    return { id: user.id, username: user.username, role: user.role, default_model_id };
+    const row = db.prepare(
+      'SELECT default_model_id, allow_image_gen, image_quality FROM users WHERE id = ?',
+    ).get(user.id);
+    return {
+      id: user.id, username: user.username, role: user.role,
+      default_model_id: row.default_model_id,
+      allow_image_gen: !!row.allow_image_gen,
+      image_quality: row.image_quality,
+    };
   });
 
   // per-user preferences that must survive across browsers (e.g. default model)
   app.patch('/api/auth/me', { preHandler: requireAuth }, async (req) => {
-    const { default_model_id } = req.body ?? {};
+    const { default_model_id, allow_image_gen, image_quality } = req.body ?? {};
     if (default_model_id !== undefined) {
       db.prepare('UPDATE users SET default_model_id = ? WHERE id = ?')
         .run(default_model_id || null, req.user.id);
+    }
+    if (allow_image_gen !== undefined) {
+      db.prepare('UPDATE users SET allow_image_gen = ? WHERE id = ?')
+        .run(allow_image_gen ? 1 : 0, req.user.id);
+    }
+    if (image_quality !== undefined && ['fast', 'medium', 'high'].includes(image_quality)) {
+      db.prepare('UPDATE users SET image_quality = ? WHERE id = ?')
+        .run(image_quality, req.user.id);
     }
     return { ok: true };
   });

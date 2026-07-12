@@ -30,7 +30,7 @@ export async function generateImage(form) {
   studio.job = {
     prompt: form.prompt, phase: 'starting', step: null, steps: null,
     image: 1, n: form.n ?? 1, preview: null, images: [], enhanced: null,
-    error: null, finished: false,
+    error: null, finished: false, model: null,
   };
   const job = studio.job; // the $state proxy — mutations must go through it
   const s = sse('/api/images/generate', form, (ev) => {
@@ -45,6 +45,7 @@ export async function generateImage(form) {
     } else if (ev.type === 'done') {
       job.images = ev.images ?? [];
       if (ev.enhanced_prompt) job.enhanced = ev.enhanced_prompt;
+      job.model = ev.model_used ?? null;
       job.phase = 'done';
       loadGallery();
     } else if (ev.type === 'error') {

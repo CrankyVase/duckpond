@@ -4,6 +4,7 @@
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
+  import ImageIcon from '@lucide/svelte/icons/image';
   import KeyRound from '@lucide/svelte/icons/key-round';
   import LinkIcon from '@lucide/svelte/icons/link';
   import Palette from '@lucide/svelte/icons/palette';
@@ -56,6 +57,20 @@
     await api('/api/auth/me', { method: 'PATCH', body: { default_model_id: v } });
     if (app.user) app.user.default_model_id = v;
     toast(v ? `New chats start on ${v}` : 'New chats reuse the last model', 'ok');
+  }
+
+  async function toggleImageGen() {
+    const v = !app.user?.allow_image_gen;
+    await api('/api/auth/me', { method: 'PATCH', body: { allow_image_gen: v } });
+    if (app.user) app.user.allow_image_gen = v;
+    toast(v ? 'The model can generate images again' : 'Image generation disabled for the model', 'ok');
+  }
+
+  async function setImageQuality(e) {
+    const v = e.target.value;
+    await api('/api/auth/me', { method: 'PATCH', body: { image_quality: v } });
+    if (app.user) app.user.image_quality = v;
+    toast(`Image quality set to ${v}`, 'ok');
   }
 
   async function probe() {
@@ -314,6 +329,26 @@
           </button>
         </div>
       {/each}
+    </section>
+
+    <!-- image generation -->
+    <section>
+      <div class="stitle"><ImageIcon size={13} />Image generation</div>
+      <div class="row">
+        <div class="rlabel"><div class="rt">Let the model generate images</div><div class="rd">in-chat generate_image tool, on top of the Images tab</div></div>
+        <button class="tog" class:on={app.user?.allow_image_gen} role="switch" aria-checked={app.user?.allow_image_gen}
+          onclick={toggleImageGen}>
+          <span class="knob"></span>
+        </button>
+      </div>
+      <div class="row">
+        <div class="rlabel"><div class="rt">Quality</div><div class="rd">steps vs. speed — applies everywhere images get generated</div></div>
+        <select value={app.user?.image_quality ?? 'medium'} onchange={setImageQuality}>
+          <option value="fast">Fast</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
     </section>
 
     <!-- account -->

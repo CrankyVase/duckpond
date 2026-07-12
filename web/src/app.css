@@ -172,6 +172,7 @@ input[type='range']::-moz-range-thumb {
 .md a:hover { text-decoration: underline; }
 .md hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
 .md img { max-width: 100%; border-radius: 10px; }
+.md img + em { display: block; margin-top: 4px; font-size: 11.5px; color: var(--text-faint); font-style: normal; }
 
 /* user-adjustable density/size hooks (set on <html> by prefs) */
 html[data-fontsize='small'] .md, html[data-fontsize='small'] .ububble { font-size: 14px; }

@@ -4,7 +4,7 @@ import { createReadStream, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
-import { bridgeGet, generateViaBridge, IMAGES_DIR } from '../imagegen.js';
+import { bridgeGet, generateViaBridge, getUserImagePrefs, IMAGES_DIR, stepsForQuality } from '../imagegen.js';
 
 export default async function imageRoutes(app) {
   app.addHook('preHandler', requireAuth);
@@ -59,7 +59,9 @@ export default async function imageRoutes(app) {
 
     try {
       const r = await generateViaBridge({
-        userId: req.user.id, prompt, model, size, steps, n, negative, enhance,
+        userId: req.user.id, prompt, model, size,
+        steps: steps ?? stepsForQuality(getUserImagePrefs(req.user.id).quality),
+        n, negative, enhance,
         onProgress: send,
       });
       send({ type: 'done', images: r.images, enhanced_prompt: r.enhanced, model_used: r.model_used });

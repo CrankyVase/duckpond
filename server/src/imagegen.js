@@ -15,6 +15,22 @@ const BRIDGE = process.env.IMAGE_BRIDGE_URL ?? 'http://127.0.0.1:8765';
 export const IMAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'images');
 mkdirSync(IMAGES_DIR, { recursive: true });
 
+// quality presets: the only knob is steps (the real speed/quality lever) —
+// size stays a separate, user-chosen framing decision
+export const QUALITY_PRESETS = {
+  fast: { steps: 10 },
+  medium: { steps: 25 },
+  high: { steps: 40 },
+};
+export function stepsForQuality(quality) {
+  return QUALITY_PRESETS[quality]?.steps ?? QUALITY_PRESETS.medium.steps;
+}
+
+export function getUserImagePrefs(userId) {
+  const row = db.prepare('SELECT allow_image_gen, image_quality FROM users WHERE id = ?').get(userId);
+  return { allowed: !!(row?.allow_image_gen ?? 1), quality: row?.image_quality ?? 'medium' };
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Bridge jobs block for many minutes; fetch's default timeouts would kill the

@@ -6,7 +6,7 @@ import http from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
-import { generateViaBridge } from '../imagegen.js';
+import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { streamChat } from '../llama.js';
 import { fetchPage, searchWeb } from '../websearch.js';
 import {
@@ -233,9 +233,10 @@ export async function execTool(run, ws, name, args) {
       try {
         const r = await generateViaBridge({
           userId: run.user_id, prompt: args.prompt, size: args.size ?? '1024x1024',
+          steps: stepsForQuality(getUserImagePrefs(run.user_id).quality),
         });
         for (const im of r.images) {
-          emit(run.id, 'image', { image_id: im.id, url: im.url, prompt: args.prompt });
+          emit(run.id, 'image', { image_id: im.id, url: im.url, prompt: args.prompt, model: r.model_used });
         }
         return `Image generated and already shown to the user (${r.images.map((im) => im.url).join(', ')}). Do not repeat the URL; just reference the image briefly.`;
       } catch (err) {
@@ -330,13 +331,15 @@ export function releaseRunAbort(runId) { runAborts.delete(runId); }
 // tool calls (→ {status:'final', ...}), the signal aborts (→ 'aborted'), or the
 // step budget runs out (→ 'steplimit'). `firstResult` lets a caller hand in an
 // already-streamed first response so the loop picks up from its tool calls.
-export async function agentLoop({ run, ws, messages, model, genParams = {}, abortSignal, firstResult = null }) {
+export async function agentLoop({
+  run, ws, messages, model, genParams = {}, abortSignal, firstResult = null, tools = AGENT_TOOLS,
+}) {
   for (let step = 0; step < MAX_STEPS; step++) {
     if (abortSignal?.aborted) return { status: 'aborted' };
     trimHistory(messages);
     const res = (step === 0 && firstResult) ? firstResult : await streamChat({
       model, messages,
-      params: { tools: AGENT_TOOLS, tool_choice: 'auto', ...genParams },
+      params: { tools, tool_choice: 'auto', ...genParams },
       abortSignal,
       onDelta: (text, meta) => {
         if (text) emit(run.id, 'delta', { text }, { store: false });

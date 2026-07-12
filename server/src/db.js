@@ -161,6 +161,10 @@ try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /
 // chat agent mode: an assistant message can embed an agent run; a conversation
 // keeps one workspace so follow-up tasks continue on the same files
 try { db.exec('ALTER TABLE messages ADD COLUMN run_id INTEGER'); } catch { /* exists */ }
+// image generation preferences: can the model reach for generate_image at
+// all, and which quality/speed preset drives its default step count
+try { db.exec("ALTER TABLE users ADD COLUMN allow_image_gen INTEGER NOT NULL DEFAULT 1"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN image_quality TEXT NOT NULL DEFAULT 'medium'"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE conversations ADD COLUMN workspace_id INTEGER'); } catch { /* exists */ }
 
 export function nowSec() { return Math.floor(Date.now() / 1000); }
