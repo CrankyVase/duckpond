@@ -382,6 +382,25 @@ export const DUCK = {
     '.....O...O......',
     '................',
   ],
+  // talking — mouth cracks open mid-word, alternates with the plain idle frame
+  talk2: [
+    '................',
+    '.........WWWW...',
+    '........WWWWWW..',
+    '........WWWKWW..',
+    '........WWWWWWOO',
+    '........WWWWWo..',
+    '.........WWWW..D',
+    '.........WWWW...',
+    'WW.....WWWWWW...',
+    'WW...WWWWWWWW...',
+    'WWWWWWWWWWWWW...',
+    '.WWWWWWWWWWWW...',
+    '..WWWWWWWWWWw...',
+    '....WWWWWWWw....',
+    '.....O...O......',
+    '................',
+  ],
   // idle filler: a little quack, sound burst above the bill
   quack1: [
     '.............Q..',

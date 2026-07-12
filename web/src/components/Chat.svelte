@@ -274,7 +274,7 @@
     : (app.streaming.liveTool || app.streaming.events?.length) ? 'code'
     : (app.streaming.thinking && !app.streaming.text) ? 'thinkhard'
     : app.streaming.loading ? 'think'
-    : 'idle');
+    : 'talk');
 
   function onEdit(msg, newContent) {
     run({ content: newContent, parentId: msg.parent_id ?? null });

@@ -7,6 +7,7 @@
   //   thinkhard — mortarboard on, tassel swinging (deep reasoning)
   //   search    — magnifying glass up, lens glint alternating
   //   image     — tiny easel + canvas, brush dabbing
+  //   talk      — plain reply streaming: a steady bob, mouth cracks open now and then
   // Filler moods (idle only, chosen at random for a couple seconds at a time):
   //   stretch, preen, quack
   import { DUCK } from '../lib/pixel.js';
@@ -21,13 +22,14 @@
     thinkhard: [DUCK.thinkcap1, DUCK.thinkcap2],
     search: [DUCK.search1, DUCK.search2],
     image: [DUCK.image1, DUCK.image2],
+    talk: [DUCK.idle, DUCK.talk2],
     stretch: [DUCK.stretch1, DUCK.stretch2],
     preen: [DUCK.preen1, DUCK.preen2],
     quack: [DUCK.quack1, DUCK.quack2],
   };
   const SPEED = {
     swim: 700, code: 220, think: 650, thinkhard: 900,
-    search: 500, image: 600, stretch: 450, preen: 500, quack: 260,
+    search: 500, image: 600, talk: 420, stretch: 450, preen: 500, quack: 260,
   };
   const FILLERS = ['stretch', 'preen', 'quack'];
 
@@ -93,7 +95,7 @@
 
 <style>
   .duck { display: inline-block; line-height: 0; }
-  .bob, .duck.think, .duck.thinkhard, .duck.image,
+  .bob, .duck.think, .duck.thinkhard, .duck.image, .duck.talk,
   .duck.stretch, .duck.preen, .duck.quack { animation: bob 2.6s ease-in-out infinite; }
   .duck.swim, .duck.search { animation: sway 3.4s ease-in-out infinite; }
   @keyframes bob {
