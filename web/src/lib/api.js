@@ -1,10 +1,20 @@
+// A 401 on any call means the session died server-side (logout elsewhere,
+// account deleted, expiry). Announce it so the app can kick to the login
+// screen without waiting for a manual refresh.
+function announceUnauthorized() {
+  window.dispatchEvent(new CustomEvent('dp:unauthorized'));
+}
+
 export async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: opts.body ? { 'content-type': 'application/json' } : {},
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401) throw Object.assign(new Error('unauthorized'), { status: 401 });
+  if (res.status === 401) {
+    announceUnauthorized();
+    throw Object.assign(new Error('unauthorized'), { status: 401 });
+  }
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
     throw Object.assign(new Error(j.error ?? `HTTP ${res.status}`), { status: res.status, ...j });
@@ -24,6 +34,7 @@ export function sse(path, body, onEvent) {
       signal: ctrl.signal,
     });
     if (!res.ok || !res.body) {
+      if (res.status === 401) announceUnauthorized();
       const j = await res.json().catch(() => ({}));
       throw new Error(j.error ?? `HTTP ${res.status}`);
     }

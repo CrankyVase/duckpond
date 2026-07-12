@@ -1,0 +1,221 @@
+<script>
+  // Shared renderer for an agent run's typed event stream — used live while a
+  // chat turn is running tools, and for replaying finished runs.
+  import { renderBlock } from '../lib/markdown.js';
+  import { mdEnhance } from '../lib/mdEnhance.js';
+  import DiffView from './DiffView.svelte';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import CircleX from '@lucide/svelte/icons/circle-x';
+  import ShieldAlert from '@lucide/svelte/icons/shield-alert';
+  import TerminalIcon from '@lucide/svelte/icons/terminal';
+  import Wrench from '@lucide/svelte/icons/wrench';
+
+  let { events = [], liveTool = null, pendingApproval = null, onapprove = null } = $props();
+
+  let openOutputs = $state(new Set());
+  let liveEl = $state(null);
+
+  function toggleOutput(id) {
+    const next = new Set(openOutputs);
+    next.has(id) ? next.delete(id) : next.add(id);
+    openOutputs = next;
+  }
+
+  function argSummary(e) {
+    return e.args?.path ?? e.args?.command ?? e.args?.name ?? '';
+  }
+
+  // friendlier chip label for the project-mode gate call
+  function toolLabel(name) {
+    return name === 'start_project' ? 'starting project' : name;
+  }
+
+  // keep the live-coding block pinned to its newest line
+  $effect(() => {
+    void liveTool?.content; void liveTool?.command;
+    if (liveEl) liveEl.scrollTop = liveEl.scrollHeight;
+  });
+
+  const tail = (s, n = 1600) => (s && s.length > n ? s.slice(-n) : s ?? '');
+</script>
+
+<div class="runfeed">
+  {#each events as e (e.id ?? e)}
+    {#if e.type === 'assistant' && e.content?.trim()}
+      <div class="note md" use:mdEnhance>{@html renderBlock(e.content)}</div>
+    {:else if e.type === 'tool_call'}
+      <div class="tool" class:gate={e.name === 'start_project'}>
+        <span class="ticon"><Wrench size={12} /></span>
+        <span class="tname">{toolLabel(e.name)}</span>
+        <span class="targ">{argSummary(e)}</span>
+      </div>
+    {:else if e.type === 'tool_output'}
+      <div class="out">
+        <button class="outhead" onclick={() => toggleOutput(e.id)}>
+          <TerminalIcon size={12} />
+          <code class="cmd">{e.command}</code>
+          <span class="exit" class:bad={e.exitCode !== 0}>{e.timedOut ? 'timeout' : `exit ${e.exitCode}`}</span>
+          <span class="chev" class:open={openOutputs.has(e.id)}><ChevronDown size={12} /></span>
+        </button>
+        {#if openOutputs.has(e.id)}
+          <pre class="outbody">{e.output || '(no output)'}</pre>
+        {/if}
+      </div>
+    {:else if e.type === 'diff'}
+      <div class="diffwrap">
+        <div class="diffpath">{e.created ? 'created' : 'edited'} <code>{e.path}</code></div>
+        <DiffView before={e.before} after={e.after} created={e.created} />
+      </div>
+    {:else if e.type === 'approval_request'}
+      <div class="appr" class:settled={pendingApproval?.id !== e.id}>
+        <div class="apphead"><ShieldAlert size={14} /> Wants to run:</div>
+        <code class="appcmd">{e.command}</code>
+        {#if pendingApproval?.id === e.id && onapprove}
+          <div class="appbtns">
+            <button class="ok" onclick={() => onapprove(true)}><CircleCheck size={13} /> Allow</button>
+            <button class="no" onclick={() => onapprove(false)}><CircleX size={13} /> Deny</button>
+          </div>
+        {/if}
+      </div>
+    {:else if e.type === 'approval'}
+      <div class="apres" class:denied={!e.approved}>
+        {e.approved ? 'Allowed' : 'Denied'}{e.by ? ` by ${e.by}` : ''}
+      </div>
+    {:else if e.type === 'image'}
+      <a class="imgevent" href={e.url} target="_blank" rel="noreferrer">
+        <img src={e.url} alt={e.prompt ?? 'generated image'} loading="lazy" />
+      </a>
+    {:else if e.type === 'error'}
+      <div class="err">{e.message}</div>
+    {/if}
+  {/each}
+
+  {#if liveTool}
+    <div class="live">
+      <div class="livehead">
+        <span class="ticon"><Wrench size={12} /></span>
+        {#if liveTool.name === 'write_file'}
+          <span class="tname">writing</span>
+          <code class="livepath">{liveTool.path ?? '…'}</code>
+        {:else if liveTool.name === 'run_command'}
+          <span class="tname">preparing command</span>
+        {:else if liveTool.name === 'start_project'}
+          <span class="tname">planning project</span>
+          {#if liveTool.pname}<code class="livepath">{liveTool.pname}</code>{/if}
+        {:else}
+          <span class="tname">{liveTool.name || 'calling tool'}</span>
+        {/if}
+        <span class="caret"></span>
+      </div>
+      {#if liveTool.name === 'write_file' && liveTool.content}
+        <pre class="livecode" bind:this={liveEl}>{tail(liveTool.content)}</pre>
+      {:else if liveTool.name === 'run_command' && liveTool.command}
+        <pre class="livecode cmdline" bind:this={liveEl}>$ {liveTool.command}</pre>
+      {:else if liveTool.name === 'start_project' && liveTool.plan}
+        <pre class="livecode" bind:this={liveEl}>{tail(liveTool.plan)}</pre>
+      {/if}
+    </div>
+  {/if}
+</div>
+
+<style>
+  .runfeed { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .note { font-size: 13.5px; line-height: 1.6; color: var(--text); overflow-wrap: break-word; }
+  .note :global(p) { margin: 0 0 6px; }
+  .note :global(p:last-child) { margin-bottom: 0; }
+  .note :global(pre) {
+    background: var(--bg); border: 1px solid var(--border-soft); border-radius: 8px;
+    padding: 8px 10px; overflow-x: auto; font-size: 11.5px;
+  }
+  .note :global(code) { font-family: var(--mono); font-size: 0.92em; }
+
+  .tool { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); min-width: 0; }
+  .tool.gate .tname { color: var(--accent); font-weight: 600; }
+  .ticon { color: var(--accent-deep); display: grid; place-items: center; flex-shrink: 0; }
+  .tname { font-family: var(--mono); flex-shrink: 0; }
+  .targ {
+    font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .out { border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg); overflow: hidden; }
+  .outhead {
+    all: unset; display: flex; align-items: center; gap: 8px; width: 100%;
+    box-sizing: border-box; padding: 6px 10px; cursor: pointer;
+    color: var(--text-dim); font-size: 11.5px;
+  }
+  .outhead:hover { background: var(--bg-hover); }
+  .cmd { font-family: var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .exit { font-family: var(--mono); font-size: 10.5px; color: var(--green); flex-shrink: 0; }
+  .exit.bad { color: var(--red); }
+  .chev { display: grid; place-items: center; transition: transform 140ms ease; }
+  .chev.open { transform: rotate(180deg); }
+  .outbody {
+    margin: 0; padding: 8px 10px; border-top: 1px solid var(--border-soft);
+    font-family: var(--mono); font-size: 11px; line-height: 1.5;
+    max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+    color: var(--text-dim);
+  }
+
+  .diffwrap { display: flex; flex-direction: column; gap: 4px; }
+  .diffpath { font-size: 11.5px; color: var(--text-faint); }
+  .diffpath code { font-family: var(--mono); color: var(--text-dim); }
+
+  .appr {
+    border: 1px solid color-mix(in srgb, var(--yellow) 35%, transparent);
+    background: color-mix(in srgb, var(--yellow) 7%, transparent);
+    border-radius: 10px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .appr.settled { opacity: 0.6; }
+  .apphead { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--yellow); font-weight: 600; }
+  .appcmd {
+    font-family: var(--mono); font-size: 12px; color: var(--text);
+    background: var(--bg); border-radius: 6px; padding: 6px 9px;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .appbtns { display: flex; gap: 8px; }
+  .appbtns button {
+    all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 8px;
+  }
+  .appbtns .ok { background: var(--green); color: #10130d; }
+  .appbtns .no { background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border-soft); }
+  .appbtns .ok:hover { filter: brightness(1.1); }
+  .appbtns .no:hover { color: var(--red); }
+  .apres { font-size: 11.5px; color: var(--green); }
+  .apres.denied { color: var(--red); }
+
+  .imgevent { display: block; max-width: 340px; }
+  .imgevent img {
+    max-width: 100%; border-radius: 10px; border: 1px solid var(--border-soft);
+    display: block;
+  }
+
+  .err {
+    border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+    background: color-mix(in srgb, var(--red) 8%, transparent);
+    color: var(--red); border-radius: 8px; padding: 8px 11px; font-size: 12.5px;
+  }
+
+  .live { border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg); overflow: hidden; }
+  .livehead {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 10px; font-size: 12px; color: var(--text-dim);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .livepath { font-family: var(--mono); font-size: 11.5px; color: var(--accent); }
+  .caret {
+    width: 7px; height: 13px; background: var(--accent);
+    margin-left: 2px; animation: blinkc 1s steps(1) infinite;
+  }
+  @keyframes blinkc { 50% { opacity: 0; } }
+  .livecode {
+    margin: 0; padding: 8px 10px;
+    font-family: var(--mono); font-size: 11px; line-height: 1.5;
+    max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+    color: var(--text-dim);
+  }
+  .cmdline { color: var(--text); }
+</style>

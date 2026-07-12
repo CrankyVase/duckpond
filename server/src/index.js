@@ -5,8 +5,13 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './db.js';
+import { reapIdleModels } from './llama.js';
+import { reapIdleSandboxes } from './sandbox.js';
+import agentRoutes from './routes/agent.js';
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
+import diffusionRoutes from './routes/diffusion.js';
+import imageRoutes from './routes/images.js';
 import modelRoutes from './routes/models.js';
 import statsRoutes from './routes/stats.js';
 
@@ -25,6 +30,9 @@ await app.register(authRoutes);
 await app.register(modelRoutes);
 await app.register(chatRoutes);
 await app.register(statsRoutes);
+await app.register(agentRoutes);
+await app.register(imageRoutes);
+await app.register(diffusionRoutes);
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(dist)) {
@@ -37,5 +45,11 @@ if (existsSync(dist)) {
 }
 
 app.get('/api/health', async () => ({ ok: true }));
+
+// VRAM reaper: fully unload models idle for 10+ minutes (router "sleeping"
+// still occupies VRAM; this actually frees it)
+setInterval(() => reapIdleModels(app.log).catch(() => {}), 60_000).unref();
+// sandbox reaper: stop workspace containers idle 15+ minutes
+setInterval(() => reapIdleSandboxes(app.log).catch(() => {}), 120_000).unref();
 
 await app.listen({ port: PORT, host: HOST });

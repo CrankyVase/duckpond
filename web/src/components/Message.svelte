@@ -1,8 +1,13 @@
 <script>
   import { renderBlock, splitBlocks } from '../lib/markdown.js';
   import { mdEnhance } from '../lib/mdEnhance.js';
+  import { prefs } from '../lib/prefs.svelte.js';
   import Duck from './Duck.svelte';
+  import RunReplay from './RunReplay.svelte';
+  import Brain from '@lucide/svelte/icons/brain';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
+  import LoaderCircle from '@lucide/svelte/icons/loader-circle';
   import Pencil from '@lucide/svelte/icons/pencil';
   import Pin from '@lucide/svelte/icons/pin';
   import PinOff from '@lucide/svelte/icons/pin-off';
@@ -23,7 +28,10 @@
 
   let editing = $state(false);
   let draft = $state('');
-  let showThinking = $state(false);
+  // a reply that is ALL thinking and no answer must stay visible, not collapse to nothing
+  const allThinking = $derived(msg.role === 'assistant' && !!msg.thinking && !(msg.content ?? '').trim());
+  let showThinking = $state(prefs.autoExpandThinking);
+  $effect(() => { if (allThinking && !streaming) showThinking = true; });
   let thinkEl = $state(null);
   let copied = $state(false);
 
@@ -101,28 +109,40 @@
     <div class="abody">
       {#if msg.thinking}
         {#if streaming && !msg.content}
-          <div class="think open">
-            <div class="think-head"><span class="shimmer">thinking</span></div>
-            <div class="think-body" bind:this={thinkEl}>{msg.thinking}</div>
+          <div class="tbar live">
+            <span class="tspin"><LoaderCircle size={13} /></span>
+            <span class="shimmer">Thinking…</span>
           </div>
+          <div class="tbody live" bind:this={thinkEl}>{msg.thinking}</div>
         {:else}
-          <button class="think-toggle" onclick={() => (showThinking = !showThinking)}>
-            {showThinking ? '▾' : '▸'} thoughts
+          <button class="tbar" class:open={showThinking} onclick={() => (showThinking = !showThinking)}>
+            <Brain size={13} />
+            <span>Thought process</span>
+            <span class="tchev" class:flip={showThinking}><ChevronRight size={13} /></span>
           </button>
           {#if showThinking}
-            <div class="think open fade-in">
-              <div class="think-body static">{msg.thinking}</div>
-            </div>
+            <div class="tbody fade-in">{msg.thinking}</div>
           {/if}
         {/if}
       {/if}
 
-      <div class="md" use:mdEnhance>
-        {#each blocks as b, i (i)}
-          {@html renderBlock(b)}
-        {/each}
-        {#if streaming}<span class="cursor"></span>{/if}
-      </div>
+      {#if msg.run_id && !streaming}
+        <RunReplay runId={msg.run_id} />
+      {/if}
+
+      {#if allThinking && !streaming}
+        <div class="nocontent">
+          The model spent its whole reply thinking and never answered — its thoughts are above.
+          Try regenerating, or set reasoning to <b>off</b> (lightbulb below).
+        </div>
+      {:else}
+        <div class="md" use:mdEnhance>
+          {#each blocks as b, i (i)}
+            {@html renderBlock(b)}
+          {/each}
+          {#if streaming}<span class="cursor"></span>{/if}
+        </div>
+      {/if}
 
       {#if !streaming}
         <div class="actions" class:show={hasBranches || last}>
@@ -152,8 +172,9 @@
   .urow { display: flex; flex-direction: column; align-items: flex-end; margin: 14px 0 4px; }
   .ububble {
     max-width: 68%;
-    background: #1d1d22;
-    border-radius: 18px 18px 6px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft);
+    border-radius: 16px 16px 5px 16px;
     padding: 10px 16px;
     white-space: pre-wrap;
     word-break: break-word;
@@ -166,6 +187,10 @@
 
   /* ---------- assistant ---------- */
   .arow { display: flex; gap: 12px; margin: 18px 0 4px; }
+  :global(html[data-density='compact']) .arow { margin-top: 10px; }
+  :global(html[data-density='compact']) .urow { margin-top: 8px; }
+  :global(html[data-density='spacious']) .arow { margin-top: 28px; }
+  :global(html[data-density='spacious']) .urow { margin-top: 22px; }
   .avatar {
     width: 30px; height: 30px; flex-shrink: 0;
     display: grid; place-items: center;
@@ -176,30 +201,31 @@
   .arow.pinned .abody { border-left: 2px solid var(--accent-dim); padding-left: 12px; }
 
   /* ---------- thinking (constrained, never blows out the page) ---------- */
-  .think-toggle {
+  .tbar {
     all: unset; cursor: pointer;
-    font-size: 12px; color: var(--text-faint);
-    padding: 2px 8px; border-radius: 6px; margin-bottom: 4px; display: inline-block;
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--text-dim);
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    border-radius: 999px; padding: 4px 12px; margin-bottom: 6px;
+    transition: background 130ms ease, color 130ms ease;
   }
-  .think-toggle:hover { color: var(--text-dim); background: var(--bg-hover); }
-  .think {
-    background: #111114;
-    border: 1px solid var(--border-soft);
-    border-radius: 10px;
-    margin: 2px 0 10px;
-    overflow: hidden;
-  }
-  .think-head {
-    padding: 5px 12px; font-size: 11.5px; color: var(--text-faint);
-    border-bottom: 1px solid var(--border-soft); font-family: var(--mono);
-  }
-  .think-body {
-    max-height: 200px; overflow-y: auto;
-    padding: 9px 12px;
-    font-size: 12.5px; line-height: 1.55; color: var(--text-dim);
+  .tbar:hover { background: var(--bg-hover); color: var(--text); }
+  .tbar.live { cursor: default; }
+  .tbar :global(svg) { color: var(--accent); }
+  .tchev { display: grid; place-items: center; transition: transform 180ms ease; color: var(--text-faint); }
+  .tchev.flip { transform: rotate(90deg); }
+  .tspin { display: grid; place-items: center; animation: spin 1.1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tbody {
+    max-height: 300px; overflow-y: auto;
+    background: transparent;
+    border-left: 2px solid var(--border);
+    margin: 2px 0 12px 5px;
+    padding: 2px 0 2px 14px;
+    font-size: 12.5px; line-height: 1.6; color: var(--text-dim);
     white-space: pre-wrap; word-break: break-word;
   }
-  .think-body.static { max-height: 320px; }
+  .tbody.live { max-height: 190px; }
   .shimmer {
     background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
     background-size: 200% 100%;
@@ -207,6 +233,13 @@
     animation: shimmer 1.6s linear infinite;
   }
   @keyframes shimmer { to { background-position: -200% 0; } }
+
+  .nocontent {
+    font-size: 13px; color: var(--text-dim);
+    background: var(--bg-raised); border: 1px dashed var(--border);
+    border-radius: 10px; padding: 9px 14px;
+  }
+  .nocontent b { color: var(--accent); font-weight: 500; }
 
   .cursor {
     display: inline-block; width: 7px; height: 15px; vertical-align: -2px;
@@ -232,11 +265,10 @@
     color: var(--text-dim);
     opacity: 0.8; transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
   }
-  .ic.on { color: var(--accent); }
+  .ic.on { color: var(--accent); opacity: 1; }
   .ic:hover { background: var(--bg-hover); opacity: 1; }
   .ic:disabled { opacity: 0.25; cursor: default; }
-  .ic.danger:hover { background: rgba(201, 106, 91, 0.14); }
-  .ic.on { opacity: 1; }
+  .ic.danger:hover { background: rgba(192, 96, 79, 0.14); color: var(--red); }
   .branch {
     display: inline-flex; align-items: center; gap: 1px;
     font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
@@ -250,7 +282,7 @@
   /* ---------- compaction ---------- */
   .compaction {
     font-size: 13px; color: var(--text-dim);
-    background: #131316; border: 1px dashed var(--border);
+    background: var(--bg-raised); border: 1px dashed var(--border);
     border-radius: 10px; padding: 8px 14px; margin: 10px 0;
   }
   .compaction .tag {

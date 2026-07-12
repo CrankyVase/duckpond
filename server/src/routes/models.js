@@ -48,4 +48,16 @@ export default async function modelRoutes(app) {
   });
 
   app.get('/api/gpu', async () => (await gpuVram()) ?? { totalBytes: 0, usedBytes: 0 });
+
+  // Real router health probe with measured latency (for the settings panel).
+  app.get('/api/router/health', async () => {
+    const base = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
+    const t0 = performance.now();
+    try {
+      const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) });
+      return { ok: res.ok, latencyMs: Math.round(performance.now() - t0), endpoint: base };
+    } catch {
+      return { ok: false, latencyMs: null, endpoint: base };
+    }
+  });
 }

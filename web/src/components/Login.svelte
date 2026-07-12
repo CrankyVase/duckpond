@@ -2,6 +2,7 @@
   import { api } from '../lib/api.js';
   import { app, checkAuth } from '../lib/state.svelte.js';
   import Duck from './Duck.svelte';
+  import LockKeyhole from '@lucide/svelte/icons/lock-keyhole';
 
   let username = $state('');
   let password = $state('');
@@ -31,9 +32,9 @@
   <form class="card slide-up" onsubmit={submit}>
     <div class="logo"><Duck px={4} bob /></div>
     <h1>DuckPond</h1>
-    {#if app.setupNeeded}
-      <p class="hint">First run — create the owner account.</p>
-    {/if}
+    <p class="hint">
+      {app.setupNeeded ? 'First run — create the owner account.' : 'Your models, your pond.'}
+    </p>
     <input placeholder="username" bind:value={username} autocomplete="username" />
     <input type="password" placeholder="password" bind:value={password}
       autocomplete={app.setupNeeded ? 'new-password' : 'current-password'} />
@@ -41,18 +42,29 @@
     <button class="primary" disabled={busy || !username || !password}>
       {app.setupNeeded ? 'Create owner account' : 'Sign in'}
     </button>
+    <p class="fine"><LockKeyhole size={11} /> argon2id · rate-limited · sessions stay on this box</p>
   </form>
 </div>
 
 <style>
-  .wrap { height: 100vh; display: grid; place-items: center; }
-  .card {
-    width: 320px; display: flex; flex-direction: column; gap: 12px;
-    background: var(--bg-raised); border: 1px solid var(--border);
-    border-radius: 16px; padding: 32px;
+  .wrap {
+    height: 100vh; display: grid; place-items: center;
+    background:
+      radial-gradient(ellipse 60% 45% at 50% 0%, rgba(166, 124, 82, 0.07), transparent),
+      var(--bg);
   }
-  .logo { display: flex; justify-content: center; }
-  h1 { margin: 0 0 8px; font-size: 22px; text-align: center; font-weight: 600; }
-  .hint { margin: 0; color: var(--text-dim); font-size: 13px; text-align: center; }
+  .card {
+    width: 330px; display: flex; flex-direction: column; gap: 12px;
+    background: var(--bg-sidebar); border: 1px solid var(--border);
+    border-radius: 18px; padding: 34px 32px 26px;
+    box-shadow: var(--shadow-lg);
+  }
+  .logo { display: flex; justify-content: center; margin-bottom: 2px; }
+  h1 { margin: 0; font-size: 22px; text-align: center; font-weight: 600; letter-spacing: -0.01em; }
+  .hint { margin: -6px 0 8px; color: var(--text-dim); font-size: 13px; text-align: center; }
   .error { margin: 0; color: var(--red); font-size: 13px; }
+  .fine {
+    margin: 8px 0 0; font-size: 10.5px; color: var(--text-faint); text-align: center;
+    display: flex; align-items: center; justify-content: center; gap: 5px;
+  }
 </style>

@@ -76,6 +76,74 @@ CREATE TABLE IF NOT EXISTS model_settings (
   json TEXT NOT NULL DEFAULT '{}'
 );
 
+-- agent workspaces: one podman container + one host directory each
+CREATE TABLE IF NOT EXISTS workspaces (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  container_id TEXT,
+  port_base INTEGER,               -- host port block start; 10 ports → container 3000-3009
+  status TEXT NOT NULL DEFAULT 'stopped' CHECK (status IN ('stopped','starting','running','error')),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  last_used INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_ws_user ON workspaces(user_id);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  model_id TEXT,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running','waiting_approval','done','error','stopped')),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_runs_ws ON agent_runs(workspace_id, id DESC);
+
+-- typed event stream per run (OpenHands-style): stored for replay, tailed live over SSE
+CREATE TABLE IF NOT EXISTS agent_events (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id, id);
+
+-- global app settings (owner-editable), e.g. the core system prompt
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- one-time account-creation links: the recipient picks their own username +
+-- password; the token dies on use (or when expires_at passes / owner revokes)
+CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY,
+  token TEXT NOT NULL UNIQUE,
+  created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  expires_at INTEGER NOT NULL,
+  used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  used_at INTEGER
+);
+
+-- generated images (files live in data/images/)
+CREATE TABLE IF NOT EXISTS images (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  prompt TEXT NOT NULL,
+  enhanced_prompt TEXT,
+  model TEXT,
+  size TEXT,
+  steps INTEGER,
+  file TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, id DESC);
+
 -- lifetime + per-day usage aggregates
 CREATE TABLE IF NOT EXISTS usage_stats (
   model_id TEXT NOT NULL,
@@ -87,5 +155,12 @@ CREATE TABLE IF NOT EXISTS usage_stats (
   PRIMARY KEY (model_id, day)
 );
 `);
+
+// additive migrations — ignore "duplicate column" once applied
+try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /* exists */ }
+// chat agent mode: an assistant message can embed an agent run; a conversation
+// keeps one workspace so follow-up tasks continue on the same files
+try { db.exec('ALTER TABLE messages ADD COLUMN run_id INTEGER'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE conversations ADD COLUMN workspace_id INTEGER'); } catch { /* exists */ }
 
 export function nowSec() { return Math.floor(Date.now() / 1000); }

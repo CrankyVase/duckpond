@@ -10,8 +10,12 @@ export const app = $state({
   streaming: null,       // { convId, text, thinking, tokS, n, loading, error }
   context: { used: 0, budget: 32768 },
   gpu: null,             // { totalBytes, usedBytes }
+  view: 'chat',          // 'chat' | 'bench' (agentic workbench) | 'images' (image studio)
   modelPickerOpen: false,
   settingsOpen: false,
+  sidebarCollapsed: false,
+  compacting: false,
+  filesVersion: 0,       // bumped when the agent writes files → chat file rail refreshes
 });
 
 export async function checkAuth() {
@@ -48,11 +52,29 @@ export async function refreshContext() {
 }
 
 export async function newConversation() {
-  const lastModel = app.conv?.model_id ?? app.conversations[0]?.model_id
+  const lastModel = app.user?.default_model_id
+    ?? app.conv?.model_id ?? app.conversations[0]?.model_id
     ?? app.models.find((m) => m.status === 'loaded')?.id ?? app.models[0]?.id ?? null;
   const conv = await api('/api/conversations', { method: 'POST', body: { model_id: lastModel } });
   await loadConversations();
   await openConversation(conv.id);
+}
+
+// Summarize older turns into a compaction node (server does the heavy lifting).
+export async function compactNow(keep = 8) {
+  if (!app.conv || app.compacting) return null;
+  app.compacting = true;
+  const convId = app.conv.id;
+  try {
+    const r = await api(`/api/conversations/${convId}/compact`, { method: 'POST', body: { keep } });
+    if (app.conv?.id === convId) {
+      await openConversation(convId);
+      if (r.used != null) app.context = { used: r.used, budget: r.budget };
+    }
+    return r;
+  } finally {
+    app.compacting = false;
+  }
 }
 
 export async function pollStatus() {
@@ -76,12 +98,14 @@ export function visiblePath(messages, leafId) {
   if (!messages?.length) return [];
   const byId = new Map(messages.map((m) => [m.id, m]));
   const path = [];
+  const seen = new Set(); // guard: bad data must never freeze the tab
   let cur = leafId ? byId.get(leafId) : null;
   if (!cur) {
     // fall back to deepest last message
     cur = messages[messages.length - 1];
   }
-  while (cur) {
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
     path.push(cur);
     cur = cur.parent_id ? byId.get(cur.parent_id) : null;
   }
@@ -91,10 +115,13 @@ export function visiblePath(messages, leafId) {
 // deepest descendant following the most recent child at each level
 export function deepestLeaf(messages, fromId) {
   const map = childrenMap(messages);
+  const seen = new Set();
   let id = fromId;
-  while (true) {
+  while (!seen.has(id)) {
+    seen.add(id);
     const kids = map.get(id);
-    if (!kids?.length) return id;
+    if (!kids?.length) break;
     id = kids[kids.length - 1].id;
   }
+  return id;
 }

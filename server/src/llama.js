@@ -5,6 +5,29 @@ import { execFile } from 'node:child_process';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
 
+// Per-model activity for the idle reaper: models unload from VRAM after
+// IDLE_UNLOAD_MS without a request (never mid-generation).
+export const IDLE_UNLOAD_MS = Number(process.env.IDLE_UNLOAD_MS ?? 10 * 60 * 1000);
+const activity = new Map(); // model -> { lastUsed, active }
+export function markUse(model) {
+  const a = activity.get(model) ?? { lastUsed: 0, active: 0 };
+  a.lastUsed = Date.now();
+  activity.set(model, a);
+  return a;
+}
+
+export async function reapIdleModels(log) {
+  const models = await listModels();
+  for (const m of models) {
+    if (m.status !== 'loaded' && m.status !== 'sleeping') continue;
+    const a = activity.get(m.id);
+    if (!a) { markUse(m.id); continue; }        // discovered resident: start the clock
+    if (a.active > 0 || Date.now() - a.lastUsed < IDLE_UNLOAD_MS) continue;
+    log?.info({ model: m.id }, 'idle 10min — unloading from VRAM');
+    await unloadModel(m.id).catch(() => {});
+  }
+}
+
 async function jfetch(path, opts = {}) {
   const res = await fetch(BASE + path, {
     ...opts,
@@ -39,6 +62,7 @@ export const unloadModel = (model) =>
   jfetch('/models/unload', { method: 'POST', body: JSON.stringify({ model }) });
 
 export async function countInputTokens(model, messages) {
+  markUse(model);
   const r = await jfetch('/v1/chat/completions/input_tokens', {
     method: 'POST',
     body: JSON.stringify({ model, messages }),
@@ -50,6 +74,17 @@ export async function countInputTokens(model, messages) {
 // Streaming chat completion. Calls onDelta(textChunk, meta) per SSE chunk and
 // returns { content, timings, usage } when done. abortSignal cancels generation.
 export async function streamChat({ model, messages, params = {}, onDelta, abortSignal }) {
+  const act = markUse(model);
+  act.active++;
+  try {
+    return await streamChatInner({ model, messages, params, onDelta, abortSignal });
+  } finally {
+    act.active--;
+    act.lastUsed = Date.now();
+  }
+}
+
+async function streamChatInner({ model, messages, params = {}, onDelta, abortSignal }) {
   const res = await fetch(BASE + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -74,6 +109,8 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
   let reasoning = '';
   let timings = null;
   let usage = null;
+  let finishReason = null;
+  const toolCalls = []; // streamed as fragments keyed by index; arguments concatenate
 
   while (true) {
     const { done, value } = await reader.read();
@@ -90,7 +127,21 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
       try { json = JSON.parse(payload); } catch { continue; }
       if (json.timings) timings = json.timings;
       if (json.usage) usage = json.usage;
+      if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
       const delta = json.choices?.[0]?.delta ?? {};
+      if (Array.isArray(delta.tool_calls)) {
+        for (const frag of delta.tool_calls) {
+          const i = frag.index ?? 0;
+          const tc = (toolCalls[i] ??= { id: '', type: 'function', function: { name: '', arguments: '' } });
+          if (frag.id) tc.id = frag.id;
+          if (frag.function?.name) tc.function.name += frag.function.name;
+          if (frag.function?.arguments) {
+            tc.function.arguments += frag.function.arguments;
+            // live view of the agent "typing" a tool call (file content, command…)
+            onDelta?.('', { toolFrag: { index: i, name: tc.function.name, args: frag.function.arguments } });
+          }
+        }
+      }
       // reasoning_content: emitted by llama-server for thinking models
       if (delta.reasoning_content) {
         reasoning += delta.reasoning_content;
@@ -102,7 +153,7 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
       }
     }
   }
-  return { content, reasoning, timings, usage };
+  return { content, reasoning, timings, usage, toolCalls: toolCalls.filter(Boolean), finishReason };
 }
 
 // VRAM via rocm-smi (card0 = RX 9070 XT). Cheap enough to poll every few seconds.
