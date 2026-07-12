@@ -8,8 +8,9 @@
   //   search    — magnifying glass up, lens glint alternating
   //   image     — tiny easel + canvas, brush dabbing
   //   talk      — plain reply streaming: a steady bob, mouth cracks open now and then
+  //   error     — something went wrong: eyes shut tight, a worried sweat drop
   // Filler moods (idle only, chosen at random for a couple seconds at a time):
-  //   stretch, preen, quack
+  //   stretch, preen, quack, sleep, wave, nom, confused
   import { DUCK } from '../lib/pixel.js';
   import Pixel from './Pixel.svelte';
 
@@ -23,15 +24,21 @@
     search: [DUCK.search1, DUCK.search2],
     image: [DUCK.image1, DUCK.image2],
     talk: [DUCK.idle, DUCK.talk2],
+    error: [DUCK.error1, DUCK.error2],
     stretch: [DUCK.stretch1, DUCK.stretch2],
     preen: [DUCK.preen1, DUCK.preen2],
     quack: [DUCK.quack1, DUCK.quack2],
+    sleep: [DUCK.sleep1, DUCK.sleep2],
+    wave: [DUCK.wave1, DUCK.wave2],
+    nom: [DUCK.nom1, DUCK.nom2],
+    confused: [DUCK.confused1, DUCK.confused2],
   };
   const SPEED = {
     swim: 700, code: 220, think: 650, thinkhard: 900,
-    search: 500, image: 600, talk: 420, stretch: 450, preen: 500, quack: 260,
+    search: 500, image: 600, talk: 420, error: 380,
+    stretch: 450, preen: 500, quack: 260, sleep: 900, wave: 340, nom: 450, confused: 600,
   };
-  const FILLERS = ['stretch', 'preen', 'quack'];
+  const FILLERS = ['stretch', 'preen', 'quack', 'sleep', 'wave', 'nom', 'confused'];
 
   let frame = $state(0);
   let blinking = $state(false);
@@ -96,8 +103,10 @@
 <style>
   .duck { display: inline-block; line-height: 0; }
   .bob, .duck.think, .duck.thinkhard, .duck.image, .duck.talk,
-  .duck.stretch, .duck.preen, .duck.quack { animation: bob 2.6s ease-in-out infinite; }
+  .duck.stretch, .duck.preen, .duck.quack, .duck.wave, .duck.nom { animation: bob 2.6s ease-in-out infinite; }
   .duck.swim, .duck.search { animation: sway 3.4s ease-in-out infinite; }
+  .duck.error { animation: shake 0.32s ease-in-out infinite; }
+  .duck.sleep { animation: breathe 3.2s ease-in-out infinite; opacity: 0.92; }
   /* never fully static: a slow breathing bob under everything else */
   .duck.idle { animation: breathe 4.2s ease-in-out infinite; }
   @keyframes breathe {
@@ -111,5 +120,10 @@
   @keyframes sway {
     0%, 100% { transform: translateX(0); }
     50% { transform: translateX(6%); }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-4%); }
+    75% { transform: translateX(4%); }
   }
 </style>

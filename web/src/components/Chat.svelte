@@ -269,6 +269,7 @@
     return null;
   });
   const duckState = $derived(!app.streaming ? 'idle'
+    : app.streaming.error ? 'error'
     : app.streaming.image ? 'image'
     : (activeToolName === 'web_search' || activeToolName === 'fetch_page') ? 'search'
     : (app.streaming.liveTool || app.streaming.events?.length) ? 'code'
