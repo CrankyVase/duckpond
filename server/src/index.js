@@ -10,7 +10,6 @@ import { reapIdleSandboxes } from './sandbox.js';
 import agentRoutes from './routes/agent.js';
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
-import diffusionRoutes from './routes/diffusion.js';
 import imageRoutes from './routes/images.js';
 import modelRoutes from './routes/models.js';
 import statsRoutes from './routes/stats.js';
@@ -32,7 +31,6 @@ await app.register(chatRoutes);
 await app.register(statsRoutes);
 await app.register(agentRoutes);
 await app.register(imageRoutes);
-await app.register(diffusionRoutes);
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(dist)) {

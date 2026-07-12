@@ -3,7 +3,6 @@
   import ContextBar from './ContextBar.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import CodeXml from '@lucide/svelte/icons/code-xml';
-  import FlaskConical from '@lucide/svelte/icons/flask-conical';
   import ImageIcon from '@lucide/svelte/icons/image';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
@@ -23,18 +22,13 @@
     </button>
     <ModelPicker />
   {:else}
-    <span class="viewtitle">{app.view === 'bench' ? 'Workbench' : app.view === 'images' ? 'Images' : 'Diffusion lab'}</span>
+    <span class="viewtitle">{app.view === 'bench' ? 'Workbench' : 'Images'}</span>
   {/if}
   <div class="spacer"></div>
   <button class="ghost iconb" class:activeview={app.view === 'images'}
     onclick={() => (app.view = app.view === 'images' ? 'chat' : 'images')}
     title={app.view === 'images' ? 'Back to chat' : 'Open the image studio'}>
     {#if app.view === 'images'}<MessageSquare size={16} />{:else}<ImageIcon size={16} />{/if}
-  </button>
-  <button class="ghost iconb" class:activeview={app.view === 'diffusion'}
-    onclick={() => (app.view = app.view === 'diffusion' ? 'chat' : 'diffusion')}
-    title={app.view === 'diffusion' ? 'Back to chat' : 'Open the diffusion LLM lab'}>
-    {#if app.view === 'diffusion'}<MessageSquare size={16} />{:else}<FlaskConical size={16} />{/if}
   </button>
   <button class="ghost iconb" class:activeview={app.view === 'bench'}
     onclick={() => (app.view = app.view === 'bench' ? 'chat' : 'bench')}

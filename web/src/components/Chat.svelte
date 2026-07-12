@@ -175,6 +175,13 @@
       case 'image_done':
         if (s) s.image = null;
         break;
+      case 'diffusion_step':
+        if (!s) break;
+        s.loading = false;
+        // load-phase frames (n===0) are status text; step frames are the canvas
+        s.diffusion = { step: ev.n, steps: ev.steps, text: ev.text, phase: ev.phase };
+        scrollToBottom();
+        break;
       case 'context': app.context = { used: ev.used, budget: ev.budget }; break;
       case 'title':
         app.conv.title = ev.title;
@@ -188,7 +195,7 @@
     if (!app.conv || busy) return;
     app.streaming = {
       convId: app.conv.id, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
-      run: null, events: [], liveTool: null, pendingApproval: null, image: null,
+      run: null, events: [], liveTool: null, pendingApproval: null, image: null, diffusion: null,
     };
     pendText = ''; pendThink = ''; toolBuf = null;
     stream = sse(`/api/conversations/${app.conv.id}/chat`, body, handleEvent);
@@ -270,6 +277,7 @@
   });
   const duckState = $derived(!app.streaming ? 'idle'
     : app.streaming.error ? 'error'
+    : app.streaming.diffusion ? 'thinkhard'
     : app.streaming.image ? 'image'
     : (activeToolName === 'web_search' || activeToolName === 'fetch_page') ? 'search'
     : (app.streaming.liveTool || app.streaming.events?.length) ? 'code'
@@ -349,6 +357,21 @@
           <div class="agentwork live fade-in">
             <RunFeed events={[]} liveTool={app.streaming.liveTool} />
           </div>
+        {/if}
+        {#if app.streaming.diffusion}
+          {#if app.streaming.diffusion.phase === 'load' || app.streaming.diffusion.step === 0}
+            <div class="diffjob fade-in">
+              <span class="diffphase shimmer">{app.streaming.diffusion.text}</span>
+            </div>
+          {:else}
+            <div class="diffjob fade-in">
+              <div class="diffhead">
+                <span class="difftag">denoising</span>
+                <span class="diffstep">step {app.streaming.diffusion.step}/{app.streaming.diffusion.steps}</span>
+              </div>
+              <pre class="diffcanvas">{app.streaming.diffusion.text}</pre>
+            </div>
+          {/if}
         {/if}
         {#if app.streaming.image}
           <div class="imgjob fade-in">
@@ -511,4 +534,23 @@
   }
   @keyframes imgshim { to { background-position: -120% 0; } }
   .imgphase { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+
+  .diffjob {
+    margin: 6px 0 8px 42px; max-width: 620px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .diffhead { display: flex; align-items: center; gap: 8px; }
+  .difftag {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .diffstep { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+  .diffphase { font-family: var(--mono); font-size: 12px; }
+  .diffcanvas {
+    margin: 0; padding: 12px 14px;
+    background: var(--bg); border: 1px solid var(--border-soft); border-radius: 12px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    color: var(--text-dim); white-space: pre-wrap; word-break: break-word;
+    max-height: 340px; overflow: auto;
+  }
 </style>

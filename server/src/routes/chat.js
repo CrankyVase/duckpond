@@ -10,6 +10,7 @@ import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imageg
 import { fetchPage, searchWeb } from '../websearch.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
+import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
 
 // ---------- tree helpers ----------
 
@@ -180,6 +181,61 @@ function withToolsPolicy(promptMessages, wsRow, imageAllowed = true) {
   return [{ role: 'system', content: policy }, ...promptMessages];
 }
 
+// A diffusion-LLM turn: resolve the gguf, denoise once, stream every visual
+// frame as { type:'diffusion_step' }, then save the final text like any reply.
+async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
+  let modelFile = null;
+  try {
+    const m = (await listModels()).find((x) => x.id === conv.model_id);
+    modelFile = diffusionModelFile(m?.args, conv.model_id);
+  } catch {
+    modelFile = diffusionModelFile(null, conv.model_id); // router down → try the diffusion dir
+  }
+  if (!modelFile) { send({ type: 'error', message: 'diffusion model file not found on disk' }); return; }
+
+  send({ type: 'loading', model: conv.model_id });
+
+  // system prompt + latest user turn only; the CLI applies the model's own
+  // chat template (its -sys flag), so we don't hand-roll one.
+  const sysParts = [];
+  const core = corePrompt();
+  if (core?.trim()) sysParts.push(core);
+  if (conv._settings.system_prompt?.trim()) sysParts.push(conv._settings.system_prompt);
+
+  let finalText = '';
+  try {
+    const r = await generateDiffusion({
+      modelFile,
+      prompt: promptLeaf.content,
+      systemPrompt: sysParts.join('\n\n'),
+      tokens: conv._settings.diffusion_tokens ?? 128,
+      steps: conv._settings.diffusion_steps ?? 64,
+      signal: abort.signal,
+      log,
+      onFrame: ({ n, steps, text, phase }) => send({ type: 'diffusion_step', n, steps, text, phase }),
+    });
+    finalText = (r.text || '').trim() || '_(the diffusion model produced no text)_';
+    if (r.stopped) finalText += '\n\n> stopped';
+  } catch (err) {
+    log?.error({ err }, 'diffusion turn failed');
+    if (!abort.signal.aborted) send({ type: 'error', message: String(err.message ?? err) });
+    return;
+  }
+
+  const asst = insertMessage(conv.id, promptLeaf.id, 'assistant', finalText, { modelId: conv.model_id });
+  setLeaf(conv.id, asst.id);
+  send({ type: 'done', msg: asst });
+
+  // cheap local auto-title (no router model to ask) from the first user words
+  if (conv.title === 'New chat') {
+    const t = promptLeaf.content.trim().split(/\s+/).slice(0, 6).join(' ').slice(0, 60);
+    if (t) {
+      db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(t, conv.id);
+      send({ type: 'title', title: t });
+    }
+  }
+}
+
 // ---------- routes ----------
 
 export default async function chatRoutes(app) {
@@ -305,6 +361,14 @@ export default async function chatRoutes(app) {
         }
         promptLeaf = insertMessage(conv.id, parent, 'user', content);
         send({ type: 'user_msg', msg: promptLeaf });
+      }
+
+      // Diffusion LLMs don't run through the router (unknown arch) — intercept
+      // here and drive llama-diffusion-cli directly, streaming denoise frames
+      // into the thread. Single-shot: no tools, no agent loop, no context bar.
+      if (isDiffusionModel(conv.model_id)) {
+        await runDiffusionTurn({ conv, promptLeaf, send, abort, log: req.log });
+        return; // finally{} closes the SSE stream
       }
 
       // warm-up indicator: tell the client if this request will trigger a model (re)load

@@ -1,6 +1,5 @@
 <script>
   import Chat from './components/Chat.svelte';
-  import DiffusionLab from './components/DiffusionLab.svelte';
   import Duck from './components/Duck.svelte';
   import ImageStudio from './components/ImageStudio.svelte';
   import Invite from './components/Invite.svelte';
@@ -77,8 +76,6 @@
         <Workbench />
       {:else if app.view === 'images'}
         <ImageStudio />
-      {:else if app.view === 'diffusion'}
-        <DiffusionLab />
       {:else}
         <Chat />
       {/if}
