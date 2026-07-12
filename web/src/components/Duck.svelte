@@ -98,6 +98,12 @@
   .bob, .duck.think, .duck.thinkhard, .duck.image, .duck.talk,
   .duck.stretch, .duck.preen, .duck.quack { animation: bob 2.6s ease-in-out infinite; }
   .duck.swim, .duck.search { animation: sway 3.4s ease-in-out infinite; }
+  /* never fully static: a slow breathing bob under everything else */
+  .duck.idle { animation: breathe 4.2s ease-in-out infinite; }
+  @keyframes breathe {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2.5%); }
+  }
   @keyframes bob {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-4%); }

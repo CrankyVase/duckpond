@@ -11,7 +11,8 @@ function frameUrl(map) {
   canvas.width = SIZE;
   canvas.height = SIZE;
   const ctx = canvas.getContext('2d');
-  const scale = 2;
+  // scale to fit whatever resolution the source sprite is drawn at
+  const scale = Math.max(1, Math.floor(SIZE / Math.max(map[0].length, map.length)));
   const ox = Math.floor((SIZE - map[0].length * scale) / 2);
   const oy = Math.floor((SIZE - map.length * scale) / 2);
   for (const r of buildRects(map, DUCK.palette)) {
