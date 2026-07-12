@@ -6,7 +6,6 @@
   } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import ChatFiles from './ChatFiles.svelte';
-  import Duck from './Duck.svelte';
   import Message from './Message.svelte';
   import RunFeed from './RunFeed.svelte';
   import Welcome from './Welcome.svelte';
@@ -260,9 +259,21 @@
   }
 
   // mascot mood while a reply streams
+  const activeToolName = $derived.by(() => {
+    if (app.streaming?.liveTool?.name) return app.streaming.liveTool.name;
+    const events = app.streaming?.events;
+    if (!events?.length) return null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].type === 'tool_call') return events[i].name;
+    }
+    return null;
+  });
   const duckState = $derived(!app.streaming ? 'idle'
+    : app.streaming.image ? 'image'
+    : (activeToolName === 'web_search' || activeToolName === 'fetch_page') ? 'search'
     : (app.streaming.liveTool || app.streaming.events?.length) ? 'code'
-    : (app.streaming.loading || (app.streaming.thinking && !app.streaming.text)) ? 'think'
+    : (app.streaming.thinking && !app.streaming.text) ? 'thinkhard'
+    : app.streaming.loading ? 'think'
     : 'idle');
 
   function onEdit(msg, newContent) {
@@ -331,7 +342,7 @@
               pendingApproval={app.streaming.pendingApproval} onapprove={approve} />
           </div>
         {/if}
-        <Message streaming
+        <Message streaming mood={duckState}
           msg={{ role: 'assistant', content: app.streaming.text, thinking: app.streaming.thinking || null, pinned: 0 }} />
         {#if app.streaming.liveTool}
           <div class="agentwork live fade-in">
@@ -353,11 +364,12 @@
           </div>
         {/if}
         <div class="status">
-          <span class="statduck"><Duck px={1.4} mood={duckState} /></span>
           {#if app.streaming.loading}
             <span class="shimmer">loading {app.conv?.model_id}…</span>
           {:else if app.streaming.pendingApproval}
             <span class="shimmer">waiting for your approval…</span>
+          {:else if duckState === 'search'}
+            <span class="shimmer">searching the web…</span>
           {:else if duckState === 'code'}
             <span class="shimmer">building…</span>
             {#if app.streaming.tokS}<span class="mono dimtok">{app.streaming.tokS.toFixed(1)} tok/s</span>{/if}
@@ -422,7 +434,6 @@
     background: var(--bg-card);
   }
   .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 42px; min-height: 26px; }
-  .statduck { display: inline-block; line-height: 0; }
   .dimtok { opacity: 0.65; }
   .mono { font-family: var(--mono); }
   .shimmer {

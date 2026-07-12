@@ -24,6 +24,7 @@
     ondelete,
     streaming = false,
     last = false,
+    mood = 'idle',
   } = $props();
 
   let editing = $state(false);
@@ -105,7 +106,7 @@
   </div>
 {:else}
   <div class="arow fade-in" class:pinned={msg.pinned}>
-    <div class="avatar"><Duck px={1.6} /></div>
+    <div class="avatar"><Duck px={1.6} mood={streaming ? mood : 'idle'} /></div>
     <div class="abody">
       {#if msg.thinking}
         {#if streaming && !msg.content}

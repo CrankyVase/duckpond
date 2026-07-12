@@ -148,7 +148,7 @@
             {#if job.preview}
               <img class="preview" src={job.preview} alt="denoising preview" />
             {:else}
-              <div class="shimmer"><Duck mood="think" px={4} /></div>
+              <div class="shimmer"><Duck mood="image" px={4} /></div>
             {/if}
           </div>
         {/if}
