@@ -106,6 +106,10 @@
         app.conv.active_leaf_id = ev.msg.id;
         scrollToBottom(true);
         break;
+      case 'queue':
+        // another user holds the GPU — ev.position is how many are ahead (0 = ours now)
+        if (s) { s.queued = ev.position ?? 0; if (s.queued) s.loading = false; }
+        break;
       case 'loading': if (s) s.loading = true; break;
       case 'thinking': if (s) { s.loading = false; pendThink += ev.text; scheduleFlush(); } break;
       case 'delta': if (s) { s.loading = false; pendText += ev.text; scheduleFlush(); } break;
@@ -195,7 +199,7 @@
     if (!app.conv || busy) return;
     app.streaming = {
       convId: app.conv.id, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
-      run: null, events: [], liveTool: null, pendingApproval: null, image: null, diffusion: null,
+      run: null, events: [], liveTool: null, pendingApproval: null, image: null, diffusion: null, queued: 0,
     };
     pendText = ''; pendThink = ''; toolBuf = null;
     stream = sse(`/api/conversations/${app.conv.id}/chat`, body, handleEvent);
@@ -276,6 +280,7 @@
     return null;
   });
   const duckState = $derived(!app.streaming ? 'idle'
+    : app.streaming.queued ? 'sleep'
     : app.streaming.error ? 'error'
     : app.streaming.diffusion ? 'thinkhard'
     : app.streaming.image ? 'image'
@@ -388,7 +393,9 @@
           </div>
         {/if}
         <div class="status">
-          {#if app.streaming.loading}
+          {#if app.streaming.queued}
+            <span class="shimmer">waiting for the GPU… {app.streaming.queued} ahead of you</span>
+          {:else if app.streaming.loading}
             <span class="shimmer">loading {app.conv?.model_id}…</span>
           {:else if app.streaming.pendingApproval}
             <span class="shimmer">waiting for your approval…</span>

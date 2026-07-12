@@ -11,6 +11,7 @@ import { fetchPage, searchWeb } from '../websearch.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
+import { acquireGpu } from '../gpuqueue.js';
 
 // ---------- tree helpers ----------
 
@@ -344,6 +345,7 @@ export default async function chatRoutes(app) {
     // disconnect) — the response socket is the real disconnect signal.
     reply.raw.on('close', () => { if (!reply.raw.writableEnded) abort.abort(); });
 
+    let releaseGpu = null;
     try {
       let promptLeaf;   // message the assistant will answer under
       if (regenerateFrom) {
@@ -362,6 +364,17 @@ export default async function chatRoutes(app) {
         promptLeaf = insertMessage(conv.id, parent, 'user', content);
         send({ type: 'user_msg', msg: promptLeaf });
       }
+
+      // One GPU → serialize every generation. A second concurrent user waits
+      // here and sees their queue position; if they disconnect while waiting,
+      // acquireGpu rejects and we bail without ever taking the slot.
+      try {
+        releaseGpu = await acquireGpu({
+          signal: abort.signal,
+          onQueued: (position) => send({ type: 'queue', position }),
+        });
+      } catch { return; } // aborted while queued
+      send({ type: 'queue', position: 0 }); // slot is ours — clear the waiting UI
 
       // Diffusion LLMs don't run through the router (unknown arch) — intercept
       // here and drive llama-diffusion-cli directly, streaming denoise frames
@@ -625,6 +638,7 @@ export default async function chatRoutes(app) {
         send({ type: 'error', message: String(err.message ?? err) });
       }
     } finally {
+      releaseGpu?.();
       if (!reply.raw.writableEnded) reply.raw.end();
     }
   });

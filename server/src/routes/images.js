@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { bridgeGet, generateViaBridge, getUserImagePrefs, IMAGES_DIR, stepsForQuality } from '../imagegen.js';
+import { acquireGpu } from '../gpuqueue.js';
 
 export default async function imageRoutes(app) {
   app.addHook('preHandler', requireAuth);
@@ -56,8 +57,18 @@ export default async function imageRoutes(app) {
       if (reply.raw.writableEnded || reply.raw.destroyed) return;
       try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
     };
+    const abort = new AbortController();
+    reply.raw.on('close', () => { if (!reply.raw.writableEnded) abort.abort(); });
 
+    let releaseGpu = null;
     try {
+      // share the single GPU slot with chat/diffusion — queue behind them
+      try {
+        releaseGpu = await acquireGpu({
+          signal: abort.signal,
+          onQueued: (position) => send({ type: 'progress', phase: 'queued', position }),
+        });
+      } catch { return; } // aborted while queued
       const r = await generateViaBridge({
         userId: req.user.id, prompt, model, size,
         steps: steps ?? stepsForQuality(getUserImagePrefs(req.user.id).quality),
@@ -69,6 +80,7 @@ export default async function imageRoutes(app) {
       req.log.error({ err: e }, 'image generation failed');
       send({ type: 'error', message: e.message });
     } finally {
+      releaseGpu?.();
       reply.raw.end();
     }
   });

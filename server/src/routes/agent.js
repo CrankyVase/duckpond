@@ -9,6 +9,7 @@ import { db } from '../db.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { streamChat } from '../llama.js';
 import { fetchPage, searchWeb } from '../websearch.js';
+import { acquireGpu } from '../gpuqueue.js';
 import {
   destroyWorkspace, ensureRunning, execCmd, portBase, PORTS_PER_WS,
   stopWorkspace, truncateOutput, wsDir,
@@ -394,9 +395,15 @@ async function runAgent(run, ws, hooks = {}) {
     { role: 'system', content: agentSystemPrompt(ws) },
     { role: 'user', content: run.task },
   ];
+  let releaseGpu = null;
   try {
     await ensureRunning(ws);
     emit(run.id, 'status', { status: 'running', note: 'sandbox up' });
+    // hold the single GPU slot for the whole run — queue behind any chat/image job
+    releaseGpu = await acquireGpu({
+      signal: abort.signal,
+      onQueued: (position) => emit(run.id, 'status', { status: 'queued', note: `waiting for the GPU… (${position} ahead)`, position }, { store: false }),
+    });
     const r = await agentLoop({
       run, ws, messages, model,
       genParams: { temperature: 0.7, top_p: 0.8, max_tokens: 8192, chat_template_kwargs: { enable_thinking: false } },
@@ -418,6 +425,7 @@ async function runAgent(run, ws, hooks = {}) {
       finish('error', String(err.message ?? err));
     }
   } finally {
+    releaseGpu?.();
     runAborts.delete(run.id);
     runApprovals.get(run.id)?.finish(false, 'run ended');
   }
