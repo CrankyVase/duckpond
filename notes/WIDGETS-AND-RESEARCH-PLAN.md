@@ -146,6 +146,23 @@ research round).
 - a chart lib — **LayerChart** (Svelte-native) or Chart.js or uPlot; decide in Phase 3 with the dataviz skill.
 - `html-to-image` (PNG export).
 
+## STATUS 2026-07-12: Phases 0–4 done + 21 widgets shipped
+Built & pushed: weather (animated), map (3D MapLibre/OpenFreeMap), github, wikipedia,
+youtube, images, chart, crypto, dictionary, spotify, link, mermaid, currency, npm,
+hackernews, table, news, countdown, palette, qr, math_plot. Grid layout, download-PNG,
+Quick/Normal/Ultra search modes, thinking watchdog, GPU queue off — all done.
+
+**Still open from the catalog (niche / more complex):** map_route (OSRM),
+weather_radar (RainViewer animated layer), stock (Yahoo unofficial — flaky),
+unit_convert, stat/hero-number tile.
+
+**⚠ Consideration — tool-list size:** ~25 tools are now offered every chat turn
+(21 widgets + project/image/search/fetch). That's ~2–3k tokens of tool schemas per
+turn and a lot of options for small local models. Tests at 2B still pick the right
+widget, but if tool-calling gets flaky, options are: (a) collapse widgets into one
+`show_widget(kind, args)` dispatch tool, (b) a per-convo "widgets" toggle so they're
+only offered when wanted, (c) trim descriptions. Flagged for a decision.
+
 ## More widgets we can build (Phase 5+ catalog)
 Shipped so far: weather (animated), map (3D), github, wikipedia, youtube, images,
 chart. All below are free / no-API-key unless noted. Each is the same one-liner
