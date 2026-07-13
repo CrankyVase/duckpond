@@ -7,7 +7,8 @@ import {
   emit as emitRunEvent, execTool, finishRun, listTree, releaseRunAbort, subscribeRun,
 } from './agent.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
-import { fetchPage, searchWeb } from '../websearch.js';
+import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
+import { makeMapWidget, makeWeatherWidget } from '../widgets.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
@@ -70,14 +71,15 @@ function convForUser(id, userId) {
 
 function insertMessage(convId, parentId, role, content, extra = {}) {
   const r = db.prepare(`
-    INSERT INTO messages (conv_id, parent_id, role, content, thinking, model_id, tokens_in, tokens_out, tok_per_sec, covers_json, run_id)
-    VALUES (@convId, @parentId, @role, @content, @thinking, @modelId, @tokensIn, @tokensOut, @tokPerSec, @coversJson, @runId)`)
+    INSERT INTO messages (conv_id, parent_id, role, content, thinking, model_id, tokens_in, tokens_out, tok_per_sec, covers_json, run_id, search_json)
+    VALUES (@convId, @parentId, @role, @content, @thinking, @modelId, @tokensIn, @tokensOut, @tokPerSec, @coversJson, @runId, @searchJson)`)
     .run({
       convId, parentId, role, content,
       thinking: extra.thinking ?? null, modelId: extra.modelId ?? null,
       tokensIn: extra.tokensIn ?? null, tokensOut: extra.tokensOut ?? null,
       tokPerSec: extra.tokPerSec ?? null, coversJson: extra.coversJson ?? null,
       runId: extra.runId ?? null,
+      searchJson: extra.searchJson ?? null,
     });
   return db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
 }
@@ -120,6 +122,35 @@ const START_PROJECT_TOOL = { type: 'function', function: {
   }, required: ['name', 'plan'] },
 } };
 
+// Widget tools: each returns a typed object we render as an interactive card in
+// the chat and persist as a ```duckwidget``` block. More types come in later phases.
+const SHOW_WEATHER_TOOL = { type: 'function', function: {
+  name: 'show_weather',
+  description: "Show an interactive weather card in the chat for a place. Use when the user asks about weather, temperature, or forecast. Pass the place name; omit it to use the user's own location if it's available.",
+  parameters: { type: 'object', properties: {
+    place: { type: 'string', description: 'city or place, e.g. "Tokyo" or "Austin, TX". Omit to use the user\'s current location.' },
+    units: { type: 'string', enum: ['metric', 'imperial'], description: 'metric (°C) or imperial (°F). Default metric; use imperial for US places.' },
+  }, required: [] },
+} };
+
+const SHOW_MAP_TOOL = { type: 'function', function: {
+  name: 'show_map',
+  description: 'Show an interactive map with a pin in the chat. Use when the user wants to see where a place, address, business, or landmark is. Pass a query (name or address).',
+  parameters: { type: 'object', properties: {
+    query: { type: 'string', description: 'place, address, business, or landmark to locate, e.g. "Blue Bottle Coffee, San Francisco"' },
+    label: { type: 'string', description: 'optional short label for the pin' },
+  }, required: ['query'] },
+} };
+
+const WIDGET_TOOLS = [SHOW_WEATHER_TOOL, SHOW_MAP_TOOL];
+const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
+
+const WIDGET_POLICY = `## Widgets
+You can drop interactive cards right into the chat:
+- show_weather — a live weather card for a place (or the user's location).
+- show_map — a pannable map with a pin for a place, address, or business.
+Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; if asked about weather, show_weather. The card is rendered for the user automatically, so don't paste a link or coordinates; just call the tool, then add a short sentence. You may use more than one in a reply.`;
+
 const GATE_POLICY = `## Project mode
 You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git; dev servers may bind ports 3000-3009), saves your plan as PLAN.md, and unlocks file and shell tools.
 
@@ -146,7 +177,9 @@ Rules:
 - After tool work, finish with a short plain-text summary: what you built, how you verified it, what could come next. No tool calls in that final message.`;
 
 const SEARCH_POLICY = `## Web search
-You can search the web with web_search and read pages with fetch_page. Use them for current events, prices, versions, library docs, or any fact you are not confident about — never guess when you can check. Cite what you used as markdown links in your answer. Skip them for things you already know well.`;
+You can search the web with web_search and read pages with fetch_page. Use them for current events, prices, versions, library docs, or any fact you are not confident about — never guess when you can check.
+Work in small batches: run a search, then read up to about 3 of the most promising results with fetch_page. If that is not enough, refine your query and read another batch. Most questions need only a handful of pages — stop as soon as you are confident. You may read many more if a question truly demands deep research (a hard limit of 200 pages), but reaching for a lot of pages should be rare, not the default.
+Cite as you write: right after any sentence or bullet that rests on something you read, add a markdown link to the exact page it came from, like [OpenAI pricing](https://example.com/pricing). Use the real page URL, never a bare URL on its own line, and never invent a link. If two pages back the same point, add both links next to each other. These links render as small source tags, so keep the link text to a couple of words. Skip searching for things you already know well.`;
 
 const IMAGE_POLICY = `## Image generation
 You can create real images with the generate_image tool (local diffusion model). Use it when the user asks for a picture, artwork, photo, logo, or wallpaper. Write the complete visual prompt yourself — subject, setting, style, lighting, composition — don't ask the user to write it. Generation takes a few minutes on the local GPU, so briefly say what you're creating before the call. Never claim you made an image without calling the tool; the finished image is shown to the user automatically.`;
@@ -169,7 +202,7 @@ function slugify(name) {
 }
 
 function withToolsPolicy(promptMessages, wsRow, imageAllowed = true) {
-  const parts = [wsRow ? ACTIVE_POLICY : GATE_POLICY, ...(imageAllowed ? [IMAGE_POLICY] : []), SEARCH_POLICY];
+  const parts = [wsRow ? ACTIVE_POLICY : GATE_POLICY, ...(imageAllowed ? [IMAGE_POLICY] : []), SEARCH_POLICY, WIDGET_POLICY];
   if (wsRow) {
     const files = listTree(wsRow).slice(0, 60)
       .map((f) => (f.dir ? `${f.path}/` : f.path)).join('\n');
@@ -235,6 +268,158 @@ async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
       send({ type: 'title', title: t });
     }
   }
+}
+
+// A web-search turn (Perplexity-style). The model drives it with web_search /
+// fetch_page tool calls; we run them in small batches (up to 30 page reads),
+// stream a live "searching the web" trace, collect the pages it actually read
+// as citation sources, and let it write the final answer with inline links.
+async function runInlineSearch({
+  conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, send, abort, onDelta, log,
+}) {
+  const MAX_READS = 200;     // hard cap on fetch_page calls — the policy nudges "a handful"
+  const MAX_SEARCHES = 40;   // and on web_search calls
+  const MAX_ROUNDS = 80;     // safety net on the whole loop (batches of ~3 reads)
+
+  const messages = [...promptMessages];
+  const steps = [];          // [{ query, sites:[{title,url,domain,read}] }]
+  const sources = [];        // pages actually read → citation list
+  const seen = new Set();
+  let reads = 0, searches = 0;
+  const reasons = [];        // reasoning from every round → full think→search→think chain
+  let timings = firstResult.timings, usage = firstResult.usage;
+  const mdImgs = [];
+  const mdWidgets = [];      // ```duckwidget``` blocks appended to the final message
+
+  const addSite = (title, url, read) => {
+    const step = steps[steps.length - 1];
+    if (!step) return;
+    let site = step.sites.find((s) => s.url === url);
+    if (!site) { site = { title, url, domain: sourceLabel(url), read: false }; step.sites.push(site); }
+    if (read) site.read = true;
+    if (title && (!site.title || site.title === site.url)) site.title = title;
+  };
+  const addSource = (title, url) => {
+    if (seen.has(url)) return;
+    seen.add(url);
+    sources.push({ title: title || url, url, domain: sourceLabel(url) });
+  };
+
+  send({ type: 'search', phase: 'begin' });
+
+  let res = firstResult;
+  let finalText = '';
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    if (abort.signal.aborted) break;
+    const calls = res.toolCalls ?? [];
+    if (res.reasoning) reasons.push(res.reasoning);
+    if (!calls.length) { finalText = res.content ?? ''; break; }
+
+    messages.push({ role: 'assistant', content: res.content ?? '', tool_calls: calls });
+
+    for (const tc of calls) {
+      let args = null;
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* truncated */ }
+      const name = tc.function.name;
+      let result;
+
+      if (args === null) {
+        result = 'ERROR: tool arguments were not valid JSON (maybe truncated). Retry with complete JSON.';
+      } else if (name === 'web_search') {
+        if (searches >= MAX_SEARCHES) {
+          result = 'Search limit reached — answer now with what you have, citing the pages you read.';
+        } else {
+          searches += 1;
+          const query = String(args.query ?? '').slice(0, 300);
+          steps.push({ query, sites: [] });
+          send({ type: 'search', phase: 'query', query });
+          try {
+            const { results, text } = await searchWebStructured(query);
+            for (const r of results) { addSite(r.title, r.url, false); send({ type: 'search', phase: 'site', title: r.title, url: r.url, domain: sourceLabel(r.url), read: false }); }
+            result = text;
+          } catch (err) { result = `ERROR: search failed: ${err.message}`; log?.warn?.({ err }, 'web_search failed'); }
+        }
+      } else if (name === 'fetch_page') {
+        if (reads >= MAX_READS) {
+          result = 'Page-read limit (30) reached — stop reading and answer now, citing the pages you read.';
+        } else {
+          reads += 1;
+          const url = String(args.url ?? '');
+          send({ type: 'search', phase: 'reading', url, domain: sourceLabel(url) });
+          try {
+            const { title, text } = await fetchPageStructured(url);
+            addSite(title, url, true);
+            addSource(title, url);
+            send({ type: 'search', phase: 'site', title, url, domain: sourceLabel(url), read: true });
+            result = title ? `# ${title}\n${text}` : text;
+          } catch (err) { result = `ERROR: couldn't read page: ${err.message}`; }
+        }
+      } else if (name === 'generate_image') {
+        if (!imgPrefs.allowed || !args?.prompt?.trim()) {
+          result = 'ERROR: image generation is not available or needs a prompt.';
+        } else {
+          send({ type: 'image_job', prompt: args.prompt });
+          try {
+            const r = await generateViaBridge({
+              userId, prompt: args.prompt, size: args.size ?? '1024x1024',
+              steps: stepsForQuality(imgPrefs.quality),
+              onProgress: (ev) => send(ev.type === 'preview'
+                ? { type: 'image_preview', b64: ev.b64 }
+                : { type: 'image_progress', phase: ev.phase, step: ev.step, steps: ev.steps }),
+            });
+            const caption = r.model_used ? `\n*generated by ${r.model_used}*` : '';
+            mdImgs.push(r.images.map((im) => `![generated image](${im.url})${caption}`).join('\n\n'));
+            send({ type: 'image_done' });
+            result = 'Image generated and shown to the user. Mention it briefly; do not repeat the prompt.';
+          } catch (err) { send({ type: 'image_done' }); result = `ERROR: image generation failed: ${err.message}`; }
+        }
+      } else if (name === 'show_weather' || name === 'show_map') {
+        try {
+          let wg;
+          if (name === 'show_weather') {
+            wg = await makeWeatherWidget({
+              place: args.place?.trim() || undefined,
+              lat: userLoc?.lat, lon: userLoc?.lon,
+              units: args.units === 'imperial' ? 'imperial' : 'metric',
+            });
+          } else {
+            wg = await makeMapWidget({
+              query: args.query?.trim() || undefined,
+              lat: args.query ? undefined : userLoc?.lat,
+              lon: args.query ? undefined : userLoc?.lon,
+              label: args.label?.trim() || undefined,
+            });
+          }
+          send({ type: 'widget', widget: wg });
+          mdWidgets.push('```duckwidget\n' + JSON.stringify(wg) + '\n```');
+          const where = wg.data.place || wg.data.label || 'the location';
+          result = `${name === 'show_weather' ? 'Weather' : 'Map'} card for ${where} is now shown to the user. Add a short sentence about it; do not repeat coordinates or a link.`;
+        } catch (err) { result = `ERROR: ${err.message}. Tell the user briefly.`; }
+      } else {
+        result = `Tool "${name}" is not available here. Use web_search, fetch_page, show_weather, show_map, or just answer.`;
+      }
+
+      messages.push({ role: 'tool', tool_call_id: tc.id, content: String(result) });
+    }
+
+    // Next round streams a fresh answer/tool-batch. Wipe the live text buffer so
+    // only the current round shows; stop offering tools once the read cap is hit
+    // so the model is forced to finalize.
+    send({ type: 'reset_text' });
+    const capped = reads >= MAX_READS || round === MAX_ROUNDS - 1;
+    res = await streamChat({
+      model: conv.model_id, messages,
+      params: capped ? params : { ...params, tools: searchTools, tool_choice: 'auto' },
+      abortSignal: abort.signal, onDelta,
+    });
+    if (capped) { finalText = res.content ?? ''; if (res.reasoning) reasons.push(res.reasoning); break; }
+  }
+
+  timings = res.timings ?? timings;
+  usage = res.usage ?? usage;
+  const text = [finalText.trim(), mdImgs.join('\n\n'), mdWidgets.join('\n\n')].filter(Boolean).join('\n\n');
+  send({ type: 'search', phase: 'done' });
+  return { text, reasoning: reasons.join('\n\n'), timings, usage, search: { steps, sources } };
 }
 
 // ---------- routes ----------
@@ -326,6 +511,11 @@ export default async function chatRoutes(app) {
     if (!conv.model_id) return reply.code(400).send({ error: 'no model selected' });
 
     const { content, parentId, regenerateFrom } = req.body ?? {};
+    // optional user location (opt-in geolocation) → lets show_weather/show_map
+    // default to where the user is when they name no place
+    const rawLoc = req.body?.userLoc;
+    const userLoc = rawLoc && Number.isFinite(rawLoc.lat) && Number.isFinite(rawLoc.lon)
+      ? { lat: Number(rawLoc.lat), lon: Number(rawLoc.lon) } : null;
 
     // take the socket away from Fastify — otherwise it "completes" the reply
     // as soon as the handler yields and our SSE stream gets torn down
@@ -346,6 +536,7 @@ export default async function chatRoutes(app) {
     reply.raw.on('close', () => { if (!reply.raw.writableEnded) abort.abort(); });
 
     let releaseGpu = null;
+    let thinkTimer = null;      // thinking-watchdog handle (cleared in finally)
     try {
       let promptLeaf;   // message the assistant will answer under
       if (regenerateFrom) {
@@ -407,10 +598,25 @@ export default async function chatRoutes(app) {
 
       let lastTick = 0;
       const t0 = Date.now();
+      // Thinking watchdog: reasoning may run as long as it likes, but 60s of
+      // *continuous* thinking with no content and no tool call means the model
+      // is stuck — cut it off. Armed on the first reasoning token after any
+      // productive output, disarmed the moment real content or a tool fragment
+      // appears. Covers the first call and every research round (shared onDelta).
+      const THINK_TIMEOUT_MS = Number(process.env.THINK_TIMEOUT_MS ?? 60_000);
+      const disarmThink = () => { if (thinkTimer) { clearTimeout(thinkTimer); thinkTimer = null; } };
+      const armThink = () => {
+        if (thinkTimer) return;
+        thinkTimer = setTimeout(() => {
+          thinkTimer = null;
+          send({ type: 'error', message: 'Stopped — the model was thinking for over 60s without answering or using a tool.' });
+          abort.abort();
+        }, THINK_TIMEOUT_MS);
+      };
       const onDelta = (chunk, meta) => {
-        if (meta?.reasoning) send({ type: 'thinking', text: meta.reasoning });
-        if (meta?.toolFrag) send({ type: 'tool_delta', ...meta.toolFrag });
-        if (chunk) send({ type: 'delta', text: chunk });
+        if (meta?.reasoning) { armThink(); send({ type: 'thinking', text: meta.reasoning }); }
+        if (meta?.toolFrag) { disarmThink(); send({ type: 'tool_delta', ...meta.toolFrag }); }
+        if (chunk) { disarmThink(); send({ type: 'delta', text: chunk }); }
         const now = Date.now();
         if (now - lastTick > 500 && meta?.timings?.predicted_per_second
             && (meta.timings.predicted_n ?? 0) >= 5) {
@@ -424,8 +630,8 @@ export default async function chatRoutes(app) {
       let res;
       let toolsOn = true;
       try {
-        const baseTools = wsRow ? AGENT_TOOLS
-          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL];
+        const baseTools = wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS]
+          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS];
         res = await streamChat({
           model: conv.model_id, messages: promptMessages,
           params: {
@@ -449,8 +655,28 @@ export default async function chatRoutes(app) {
 
       let { content: text, reasoning, timings, usage } = res;
       let runId = null;
+      let searchData = null;
 
-      if (toolsOn && res.toolCalls?.length
+      const callNames = new Set((res.toolCalls ?? []).map((t) => t.function.name));
+      const wantsInlineTools = callNames.has('web_search') || callNames.has('fetch_page')
+        || [...WIDGET_TOOL_NAMES].some((n) => callNames.has(n));
+      if (toolsOn && res.toolCalls?.length && wantsInlineTools && !callNames.has('start_project')) {
+        // inline-tools turn: web search (with live trace + citations) and/or
+        // interactive widgets, in one batched loop; the model answers at the end.
+        const searchTools = [
+          ...(imgPrefs.allowed ? [GENERATE_IMAGE_TOOL] : []),
+          WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS,
+        ];
+        const r = await runInlineSearch({
+          conv, userId: req.user.id, userLoc, promptMessages, firstResult: res, params,
+          searchTools, imgPrefs, send, abort, onDelta, log: req.log,
+        });
+        text = r.text;
+        reasoning = r.reasoning ?? reasoning;
+        timings = r.timings ?? timings;
+        usage = r.usage ?? usage;
+        searchData = r.search;
+      } else if (toolsOn && res.toolCalls?.length
           && res.toolCalls.every((t) => t.function.name === 'generate_image')) {
         // pure image turn — no workspace, no run. Generate on the bridge with
         // the live preview streaming into the chat, then let the model add a
@@ -598,6 +824,7 @@ export default async function chatRoutes(app) {
         tokensOut: usage?.completion_tokens ?? timings?.predicted_n ?? null,
         tokPerSec,
         runId,
+        searchJson: searchData && searchData.steps.length ? JSON.stringify(searchData) : null,
       });
       setLeaf(conv.id, asst.id);
       recordUsage(conv.model_id, usage, timings);
@@ -638,6 +865,7 @@ export default async function chatRoutes(app) {
         send({ type: 'error', message: String(err.message ?? err) });
       }
     } finally {
+      if (thinkTimer) clearTimeout(thinkTimer);
       releaseGpu?.();
       if (!reply.raw.writableEnded) reply.raw.end();
     }

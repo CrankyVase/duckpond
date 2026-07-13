@@ -10,6 +10,12 @@
 // NOT re-acquire, or it self-deadlocks). See the three call sites: routes/chat.js,
 // routes/images.js, routes/agent.js.
 
+// Queue is OFF by default (disabled per owner request) — every request runs
+// immediately with no waiting. Re-enable FIFO serialization by starting the
+// server with DUCKPOND_GPU_QUEUE=1.
+const QUEUE_ON = process.env.DUCKPOND_GPU_QUEUE === '1';
+const NOOP_RELEASE = () => {};
+
 let held = false;
 const waiters = []; // { resolve, onQueued, signal, onAbort }
 
@@ -41,6 +47,7 @@ function makeRelease() {
 // we're still waiting, the wait is cancelled (rejects with AbortError) and we
 // drop out of the queue so we never take a turn we no longer want.
 export function acquireGpu({ onQueued, signal } = {}) {
+  if (!QUEUE_ON) return Promise.resolve(NOOP_RELEASE); // queue disabled — run now
   if (signal?.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'));
   return new Promise((resolve, reject) => {
     if (!held) {

@@ -33,6 +33,16 @@ export function splitBlocks(src) {
   return blocks;
 }
 
+// A widget is persisted as a ```duckwidget\n{json}\n``` fenced block. Detect it
+// so Message.svelte can mount an interactive component instead of a code block.
+const WIDGET_RE = /^\s*(```+|~~~+)\s*duckwidget\s*\n([\s\S]*?)\n\1\s*$/;
+export function parseWidgetBlock(block) {
+  const m = block.match(WIDGET_RE);
+  if (!m) return null;
+  try { const w = JSON.parse(m[2]); return w && w.type ? w : null; }
+  catch { return null; }
+}
+
 export function renderBlock(block) {
   let html = cache.get(block);
   if (html === undefined) {

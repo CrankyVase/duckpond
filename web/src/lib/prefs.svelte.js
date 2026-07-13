@@ -10,6 +10,8 @@ const DEFAULTS = {
   sendOnEnter: true,         // Enter sends, Shift+Enter newline
   autoExpandThinking: false, // open finished thought panels by default
   autoCompact: true,         // summarize old turns automatically at 75% context
+  shareLocation: false,      // send coarse geolocation so weather/map widgets know where you are
+  userLoc: null,             // { lat, lon } cached when sharing is on
 };
 
 function load() {

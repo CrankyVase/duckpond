@@ -1,9 +1,11 @@
 <script>
-  import { renderBlock, splitBlocks } from '../lib/markdown.js';
+  import { parseWidgetBlock, renderBlock, splitBlocks } from '../lib/markdown.js';
+  import Widget from './Widget.svelte';
   import { mdEnhance } from '../lib/mdEnhance.js';
   import { prefs } from '../lib/prefs.svelte.js';
   import Duck from './Duck.svelte';
   import RunReplay from './RunReplay.svelte';
+  import SearchTrace from './SearchTrace.svelte';
   import Brain from '@lucide/svelte/icons/brain';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
@@ -37,6 +39,20 @@
   let copied = $state(false);
 
   const blocks = $derived(splitBlocks(msg.content ?? ''));
+  // web-search trace: live object while streaming, JSON on saved messages
+  const search = $derived.by(() => {
+    if (msg.search) return msg.search;
+    if (!msg.search_json) return null;
+    try { return JSON.parse(msg.search_json); } catch { return null; }
+  });
+  // any site the model saw counts as a citation target — it often cites from the
+  // search-result snippet without opening the page, so merge steps + fetched pages
+  const citeSources = $derived.by(() => {
+    if (!search) return [];
+    const all = [...(search.sources ?? [])];
+    for (const st of search.steps ?? []) for (const site of st.sites) all.push(site);
+    return all;
+  });
   const sibIdx = $derived(siblings.findIndex((s) => s === msg.id));
   const hasBranches = $derived(siblings.length > 1);
 
@@ -108,6 +124,9 @@
   <div class="arow fade-in" class:pinned={msg.pinned}>
     <div class="avatar"><Duck px={1.6} mood={streaming ? mood : 'idle'} /></div>
     <div class="abody">
+      {#if search}
+        <SearchTrace {search} />
+      {/if}
       {#if msg.thinking}
         {#if streaming && !msg.content}
           <div class="tbar live">
@@ -137,12 +156,22 @@
           Try regenerating, or set reasoning to <b>off</b> (lightbulb below).
         </div>
       {:else}
-        <div class="md" use:mdEnhance>
+        <div class="md" use:mdEnhance={{ sources: citeSources }}>
           {#each blocks as b, i (i)}
-            {@html renderBlock(b)}
+            {@const w = parseWidgetBlock(b)}
+            {#if w}
+              <Widget widget={w} />
+            {:else}
+              {@html renderBlock(b)}
+            {/if}
           {/each}
           {#if streaming}<span class="cursor"></span>{/if}
         </div>
+        {#if streaming && msg.widgets?.length}
+          {#each msg.widgets as w (w.id)}
+            <Widget widget={w} />
+          {/each}
+        {/if}
       {/if}
 
       {#if !streaming}
@@ -279,6 +308,20 @@
   .branch .ic { width: 20px; height: 20px; font-size: 13px; color: var(--text-dim); }
   .bn { padding: 0 2px; }
   .stat { font-family: var(--mono); font-size: 11px; color: var(--text-faint); margin-left: 8px; }
+
+  /* ---------- citation pills (built by mdEnhance) ---------- */
+  .abody :global(.citepill) {
+    display: inline-flex; align-items: center; gap: 4px;
+    vertical-align: baseline; margin: 0 1px; padding: 1px 7px 1px 6px;
+    border: 1px solid var(--border-soft); border-radius: 6px;
+    background: var(--bg-raised); color: var(--text-dim);
+    font-size: 11.5px; line-height: 1.5; text-decoration: none;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+  .abody :global(.citepill:hover) { background: var(--bg-hover); color: var(--text); border-color: var(--border); }
+  .abody :global(.citepill .cd) { font-family: var(--mono); }
+  .abody :global(.citepill .cx) { color: var(--text-faint); font-family: var(--mono); font-size: 10px; }
+  .abody :global(.citepill .cx:empty) { display: none; }
 
   /* ---------- compaction ---------- */
   .compaction {

@@ -166,5 +166,8 @@ try { db.exec('ALTER TABLE messages ADD COLUMN run_id INTEGER'); } catch { /* ex
 try { db.exec("ALTER TABLE users ADD COLUMN allow_image_gen INTEGER NOT NULL DEFAULT 1"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE users ADD COLUMN image_quality TEXT NOT NULL DEFAULT 'medium'"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE conversations ADD COLUMN workspace_id INTEGER'); } catch { /* exists */ }
+// web-search turns: the Perplexity-style search steps + sources shown above the
+// answer, stored as JSON so the disclosure and citations survive a reload
+try { db.exec('ALTER TABLE messages ADD COLUMN search_json TEXT'); } catch { /* exists */ }
 
 export function nowSec() { return Math.floor(Date.now() / 1000); }

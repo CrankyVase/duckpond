@@ -1,6 +1,6 @@
 <script>
   import { api, sse } from '../lib/api.js';
-  import { prefs } from '../lib/prefs.svelte.js';
+  import { prefs, savePrefs } from '../lib/prefs.svelte.js';
   import {
     app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
@@ -13,6 +13,7 @@
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Globe from '@lucide/svelte/icons/globe';
   import Lightbulb from '@lucide/svelte/icons/lightbulb';
+  import MapPin from '@lucide/svelte/icons/map-pin';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import Square from '@lucide/svelte/icons/square';
 
@@ -179,6 +180,40 @@
       case 'image_done':
         if (s) s.image = null;
         break;
+      case 'search': {
+        if (!s) break;
+        s.loading = false;
+        const se = (s.search ??= { steps: [], sources: [], active: true });
+        if (ev.phase === 'begin') se.active = true;
+        else if (ev.phase === 'query') se.steps.push({ query: ev.query, sites: [] });
+        else if (ev.phase === 'reading') se.reading = ev.domain;
+        else if (ev.phase === 'site') {
+          const step = se.steps[se.steps.length - 1];
+          if (step) {
+            let site = step.sites.find((x) => x.url === ev.url);
+            if (!site) { site = { title: ev.title, url: ev.url, domain: ev.domain, read: false }; step.sites.push(site); }
+            if (ev.title) site.title = ev.title;
+            if (ev.read) {
+              site.read = true;
+              if (!se.sources.find((x) => x.url === ev.url)) se.sources.push({ title: ev.title || ev.url, url: ev.url, domain: ev.domain });
+            }
+          }
+          se.reading = null;
+        } else if (ev.phase === 'done') { se.active = false; se.reading = null; }
+        scrollToBottom();
+        break;
+      }
+      case 'reset_text':
+        // a new search round begins — drop the last round's partial answer text
+        if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        pendText = '';
+        if (s) s.text = '';
+        break;
+      case 'widget':
+        // an interactive card the model summoned — show it live; it's also baked
+        // into the saved message content, so it persists after 'done'
+        if (s && ev.widget) { s.loading = false; s.widgets = [...(s.widgets ?? []), ev.widget]; }
+        break;
       case 'diffusion_step':
         if (!s) break;
         s.loading = false;
@@ -200,9 +235,12 @@
     app.streaming = {
       convId: app.conv.id, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
       run: null, events: [], liveTool: null, pendingApproval: null, image: null, diffusion: null, queued: 0,
+      search: null, widgets: [],
     };
     pendText = ''; pendThink = ''; toolBuf = null;
-    stream = sse(`/api/conversations/${app.conv.id}/chat`, body, handleEvent);
+    // include opt-in location so weather/map widgets can default to where you are
+    const outBody = prefs.shareLocation && prefs.userLoc ? { ...body, userLoc: prefs.userLoc } : body;
+    stream = sse(`/api/conversations/${app.conv.id}/chat`, outBody, handleEvent);
     try {
       await stream.done;
     } catch (err) {
@@ -262,6 +300,28 @@
 
   function stop() { stream?.abort(); }
 
+  // opt-in geolocation for weather/map widgets. First tap asks the browser and
+  // caches coarse coords; tapping again turns sharing off.
+  let locBusy = $state(false);
+  async function toggleLocation() {
+    if (prefs.shareLocation) {
+      prefs.shareLocation = false; prefs.userLoc = null; savePrefs();
+      toast('Location sharing off');
+      return;
+    }
+    if (!navigator.geolocation) { toast('Geolocation not available', 'error'); return; }
+    locBusy = true;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        prefs.userLoc = { lat: +pos.coords.latitude.toFixed(3), lon: +pos.coords.longitude.toFixed(3) };
+        prefs.shareLocation = true; savePrefs(); locBusy = false;
+        toast('Location on — weather & maps can use where you are', 'ok');
+      },
+      (err) => { locBusy = false; toast(`Location denied: ${err.message}`, 'error'); },
+      { enableHighAccuracy: false, timeout: 10_000, maximumAge: 600_000 },
+    );
+  }
+
   async function approve(ok) {
     const runId = app.streaming?.run?.id;
     if (!runId) return;
@@ -284,6 +344,7 @@
     : app.streaming.error ? 'error'
     : app.streaming.diffusion ? 'thinkhard'
     : app.streaming.image ? 'image'
+    : (app.streaming.search?.active && !app.streaming.text) ? 'search'
     : (activeToolName === 'web_search' || activeToolName === 'fetch_page') ? 'search'
     : (app.streaming.liveTool || app.streaming.events?.length) ? 'code'
     : (app.streaming.thinking && !app.streaming.text) ? 'thinkhard'
@@ -357,7 +418,7 @@
           </div>
         {/if}
         <Message streaming mood={duckState}
-          msg={{ role: 'assistant', content: app.streaming.text, thinking: app.streaming.thinking || null, pinned: 0 }} />
+          msg={{ role: 'assistant', content: app.streaming.text, thinking: app.streaming.thinking || null, search: app.streaming.search, widgets: app.streaming.widgets, pinned: 0 }} />
         {#if app.streaming.liveTool}
           <div class="agentwork live fade-in">
             <RunFeed events={[]} liveTool={app.streaming.liveTool} />
@@ -426,8 +487,11 @@
       <div class="bar">
         <button class="tool" title="Attach files — coming soon"
           onclick={() => toast('Attachments coming soon')}><Paperclip size={15} /></button>
-        <button class="tool" title="Web search — coming soon"
-          onclick={() => toast('Web search coming soon')}><Globe size={15} /></button>
+        <button class="tool on" title="Web search is on — the model searches the web automatically when it needs to"
+          onclick={() => toast('Web search is automatic — the model searches when a question needs it')}><Globe size={15} /></button>
+        <button class="tool" class:on={prefs.shareLocation} disabled={locBusy}
+          title={prefs.shareLocation ? 'Location on — weather & maps use where you are (click to turn off)' : 'Share location for weather & maps'}
+          onclick={toggleLocation}><MapPin size={15} /></button>
         <button class="tool" class:on={thinkingOn} disabled={!model}
           title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
           onclick={toggleThinking}><Lightbulb size={15} /></button>
