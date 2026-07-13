@@ -39,6 +39,19 @@
   let copied = $state(false);
 
   const blocks = $derived(splitBlocks(msg.content ?? ''));
+  // group consecutive widget blocks so compact cards flow side-by-side
+  const segments = $derived.by(() => {
+    const out = [];
+    for (const b of blocks) {
+      const w = parseWidgetBlock(b);
+      if (w) {
+        const last = out[out.length - 1];
+        if (last?.kind === 'widgets') last.widgets.push(w);
+        else out.push({ kind: 'widgets', widgets: [w] });
+      } else out.push({ kind: 'md', block: b });
+    }
+    return out;
+  });
   // web-search trace: live object while streaming, JSON on saved messages
   const search = $derived.by(() => {
     if (msg.search) return msg.search;
@@ -157,20 +170,17 @@
         </div>
       {:else}
         <div class="md" use:mdEnhance={{ sources: citeSources }}>
-          {#each blocks as b, i (i)}
-            {@const w = parseWidgetBlock(b)}
-            {#if w}
-              <Widget widget={w} />
+          {#each segments as seg, i (i)}
+            {#if seg.kind === 'widgets'}
+              <div class="wgroup">{#each seg.widgets as w (w.id)}<Widget widget={w} />{/each}</div>
             {:else}
-              {@html renderBlock(b)}
+              {@html renderBlock(seg.block)}
             {/if}
           {/each}
           {#if streaming}<span class="cursor"></span>{/if}
         </div>
         {#if streaming && msg.widgets?.length}
-          {#each msg.widgets as w (w.id)}
-            <Widget widget={w} />
-          {/each}
+          <div class="wgroup">{#each msg.widgets as w (w.id)}<Widget widget={w} />{/each}</div>
         {/if}
       {/if}
 
@@ -308,6 +318,10 @@
   .branch .ic { width: 20px; height: 20px; font-size: 13px; color: var(--text-dim); }
   .bn { padding: 0 2px; }
   .stat { font-family: var(--mono); font-size: 11px; color: var(--text-faint); margin-left: 8px; }
+
+  /* ---------- widget grouping: compact cards flow side-by-side ---------- */
+  .wgroup { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+  .wgroup > :global(*) { margin-top: 0; margin-bottom: 0; }
 
   /* ---------- citation pills (built by mdEnhance) ---------- */
   .abody :global(.citepill) {
