@@ -146,6 +146,40 @@ research round).
 - a chart lib — **LayerChart** (Svelte-native) or Chart.js or uPlot; decide in Phase 3 with the dataviz skill.
 - `html-to-image` (PNG export).
 
+## More widgets we can build (Phase 5+ catalog)
+Shipped so far: weather (animated), map (3D), github, wikipedia, youtube, images,
+chart. All below are free / no-API-key unless noted. Each is the same one-liner
+pattern (builder + tool + component + dispatcher branch).
+
+**Data cards (pure or free API):**
+- `dictionary` — word definition/phonetics (dictionaryapi.dev, free)
+- `country` — flag, capital, population, currency (restcountries.com, free)
+- `crypto` — coin price + sparkline (CoinGecko, free no key)
+- `currency` — FX conversion (frankfurter.app / ECB, free no key)
+- `npm` / `pypi` — package card (registry.npmjs.org / pypi.org JSON, free)
+- `hackernews` — story/comments card (HN Firebase API, free)
+- `stock` — quote + mini chart (Yahoo Finance unofficial; flaky — verify)
+- `table` — sortable data table from model-supplied rows (pure)
+- `timeline` — events on a timeline (pure)
+- `compare` — side-by-side "X vs Y" spec card (pure)
+- `math_plot` — plot y=f(x) over a range (pure; safe expression eval)
+- `unit_convert` / `countdown` / `color_palette` / `qr` (pure; qr needs a tiny lib)
+
+**Media / embed (free):**
+- `spotify` — track/album/playlist embed via open.spotify.com/oembed (no key!)
+- `mermaid` — diagram from mermaid source (folds in task #40; copyable + PNG)
+- `link_preview` — generic OpenGraph card (reuses fetch_page + OG parse)
+- `news` — headline list (SearxNG news category)
+- `map_route` — A→B route line on the 3D map (OSRM demo server, free)
+- `weather_radar` — animated precipitation radar layer (RainViewer, free no key)
+
+**Deferred (need keys/auth):** reddit (OAuth), tweet/x, instagram, tmdb/omdb
+movies, most sports/nutrition APIs.
+
+**Cross-cutting polish:** responsive grid when ≥2 compact widgets are adjacent;
+per-widget expand/fullscreen; live-updating widgets (crypto/stock refresh);
+click-a-mark-to-ask (widget interaction feeds the model a follow-up).
+
 ## Decisions (locked 2026-07-12)
 - **Build order:** everything, phase by phase (0 → 1 → 2 → 3 → 4), starting with Phase 0.
 - **Chart library:** LayerChart (Svelte-native).
