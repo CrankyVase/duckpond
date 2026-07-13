@@ -14,6 +14,7 @@ import imageRoutes from './routes/images.js';
 import modelRoutes from './routes/models.js';
 import statsRoutes from './routes/stats.js';
 import ttsRoutes from './routes/tts.js';
+import voiceRoutes from './routes/voice.js';
 
 const PORT = Number(process.env.PORT ?? 8090);
 // loopback-only: the Cloudflare tunnel is the sole ingress; CF-Connecting-IP
@@ -33,6 +34,7 @@ await app.register(statsRoutes);
 await app.register(agentRoutes);
 await app.register(imageRoutes);
 await app.register(ttsRoutes);
+await app.register(voiceRoutes);
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(dist)) {
