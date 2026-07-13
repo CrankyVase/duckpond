@@ -17,6 +17,7 @@
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@lucide/svelte": "^1.24.0",
     "leaflet": "^1.9.4",
+    "maplibre-gl": "^5.24.0",
     "marked": "^15.0.12"
   }
 }

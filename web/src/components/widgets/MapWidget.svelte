@@ -1,50 +1,67 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import L from 'leaflet';
-  import 'leaflet/dist/leaflet.css';
   import WidgetFrame from './WidgetFrame.svelte';
 
   let { data } = $props();
   let el = $state(null);
   let map = null;
+  let is3d = $state(true);
 
-  // custom pin (divIcon) — avoids leaflet's default marker PNGs breaking under Vite
-  const pin = L.divIcon({
-    className: 'dp-pin',
-    html: '<svg viewBox="0 0 24 24" width="30" height="30"><path d="M12 2C8 2 5 5 5 9c0 5 7 13 7 13s7-8 7-13c0-4-3-7-7-7z" fill="#e0674f" stroke="#fff" stroke-width="1.5"/><circle cx="12" cy="9" r="2.6" fill="#fff"/></svg>',
-    iconSize: [30, 30], iconAnchor: [15, 28], popupAnchor: [0, -26],
-  });
+  // OpenFreeMap "liberty" — free, no API key, vector tiles WITH 3D building
+  // extrusions that appear when the camera is pitched.
+  const STYLE = 'https://tiles.openfreemap.org/styles/liberty';
 
-  onMount(() => {
-    map = L.map(el, { scrollWheelZoom: false, attributionControl: true })
-      .setView([data.lat, data.lon], data.zoom ?? 14);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap',
-    }).addTo(map);
-    const m = L.marker([data.lat, data.lon], { icon: pin }).addTo(map);
-    if (data.label || data.address) {
-      m.bindPopup(`<b>${data.label ?? ''}</b>${data.address ? `<br>${data.address}` : ''}`);
-    }
-    // click to enable wheel-zoom so it doesn't hijack page scroll until intended
-    map.on('focus', () => map.scrollWheelZoom.enable());
-    map.on('blur', () => map.scrollWheelZoom.disable());
-    setTimeout(() => map?.invalidateSize(), 60);
+  onMount(async () => {
+    // load maplibre lazily so it stays out of the main bundle (~800kB)
+    const [{ default: maplibregl }] = await Promise.all([
+      import('maplibre-gl'),
+      import('maplibre-gl/dist/maplibre-gl.css'),
+    ]);
+    if (!el) return; // unmounted before load finished
+    const zoom = Math.max(data.zoom ?? 14, 16); // buildings need ~16+
+    map = new maplibregl.Map({
+      container: el,
+      style: STYLE,
+      center: [data.lon, data.lat],
+      zoom, pitch: 55, bearing: -18,
+      attributionControl: false,
+      cooperativeGestures: true, // ctrl/⌘ + scroll to zoom — never hijacks the page
+    });
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+    map.addControl(new maplibregl.AttributionControl({ compact: true }));
+    new maplibregl.Marker({ color: '#e0674f' })
+      .setLngLat([data.lon, data.lat])
+      .setPopup(new maplibregl.Popup({ offset: 24 })
+        .setHTML(`<b>${data.label ?? ''}</b>${data.address ? `<br>${data.address}` : ''}`))
+      .addTo(map);
   });
   onDestroy(() => { map?.remove(); map = null; });
 
-  const osm = $derived(`https://www.openstreetmap.org/?mlat=${data.lat}&mlon=${data.lon}#map=${data.zoom ?? 14}/${data.lat}/${data.lon}`);
+  function toggle3d() {
+    if (!map) return;
+    is3d = !is3d;
+    map.easeTo({ pitch: is3d ? 55 : 0, bearing: is3d ? -18 : 0, duration: 600 });
+  }
+  const osm = $derived(`https://www.openstreetmap.org/?mlat=${data.lat}&mlon=${data.lon}#map=17/${data.lat}/${data.lon}`);
 </script>
 
 <WidgetFrame title={data.label || 'Location'} subtitle={data.address} href={osm} hrefLabel="OpenStreetMap">
-  <div class="mapbox" bind:this={el}></div>
+  <div class="mapwrap">
+    <div class="mapbox" bind:this={el}></div>
+    <button class="d3" onclick={toggle3d} title="Toggle 3D">{is3d ? '2D' : '3D'}</button>
+  </div>
 </WidgetFrame>
 
 <style>
-  .mapbox { height: 260px; width: 100%; background: var(--bg-raised); }
-  /* leaflet controls tuned to the dark UI */
-  :global(.dp-pin) { background: none; border: none; }
-  :global(.leaflet-container) { font: inherit; background: var(--bg-raised); }
-  :global(.leaflet-popup-content) { font-size: 12.5px; line-height: 1.4; }
-  :global(.leaflet-control-attribution) { font-size: 9px; background: rgba(255,255,255,0.7); }
+  .mapwrap { position: relative; }
+  .mapbox { height: 280px; width: 100%; background: var(--bg-raised); }
+  .d3 {
+    position: absolute; left: 10px; bottom: 10px; z-index: 2;
+    font: 600 11px var(--mono); letter-spacing: 0.04em;
+    color: var(--text); background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 7px; padding: 4px 9px; cursor: pointer; box-shadow: var(--shadow-lg);
+  }
+  .d3:hover { background: var(--bg-hover); }
+  :global(.maplibregl-popup-content) { font-size: 12.5px; line-height: 1.4; border-radius: 8px; }
+  :global(.maplibregl-ctrl-attrib) { font-size: 9px; }
 </style>

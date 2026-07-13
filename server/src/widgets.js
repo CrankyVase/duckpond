@@ -100,6 +100,65 @@ export async function makeWeatherWidget({ place, lat, lon, units = 'metric', lab
   return widget('weather', { place: coords.label, ...w });
 }
 
+// GitHub repo card (unauthenticated REST — 60 req/hr is plenty here).
+export async function makeGithubWidget(repoInput) {
+  const m = String(repoInput || '').match(/(?:github\.com\/)?([^/\s]+)\/([^/\s#?]+)/);
+  if (!m) throw new Error('give a repo as "owner/name"');
+  const slug = `${m[1]}/${m[2].replace(/\.git$/, '')}`;
+  const r = await getJson(`https://api.github.com/repos/${slug}`);
+  return widget('github', {
+    name: r.full_name, desc: r.description, url: r.html_url,
+    stars: r.stargazers_count, forks: r.forks_count, issues: r.open_issues_count,
+    language: r.language, license: r.license?.spdx_id ?? null,
+    owner: r.owner?.login, avatar: r.owner?.avatar_url,
+    topics: (r.topics ?? []).slice(0, 6),
+    updated: r.pushed_at,
+  });
+}
+
+// Wikipedia summary card (REST, no key).
+export async function makeWikipediaWidget(title) {
+  const r = await getJson(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(String(title).trim())}`);
+  if (r.type === 'disambiguation' || !r.extract) throw new Error(`no clear Wikipedia article for "${title}"`);
+  return widget('wikipedia', {
+    title: r.title, extract: r.extract, description: r.description ?? null,
+    thumb: r.thumbnail?.source ?? null,
+    url: r.content_urls?.desktop?.page ?? `https://en.wikipedia.org/wiki/${encodeURIComponent(r.title)}`,
+  });
+}
+
+// YouTube embed card (oEmbed for title/author/thumb; player is a nocookie iframe).
+const YT_ID = /(?:youtu\.be\/|v=|embed\/|shorts\/)([A-Za-z0-9_-]{11})/;
+export async function makeYoutubeWidget(input) {
+  const raw = String(input || '').trim();
+  const id = raw.match(YT_ID)?.[1] ?? (/^[A-Za-z0-9_-]{11}$/.test(raw) ? raw : null);
+  if (!id) throw new Error('not a valid YouTube link or video id');
+  let meta = {};
+  try { meta = await getJson(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`); }
+  catch { /* embed still works without title */ }
+  return widget('youtube', {
+    id, title: meta.title ?? 'YouTube video', author: meta.author_name ?? '',
+    thumb: meta.thumbnail_url ?? `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+  });
+}
+
+// Image grid from SearxNG image search (AI-found photos).
+export async function makeImagesWidget(query, n = 6) {
+  const SEARX = process.env.SEARXNG_URL ?? 'http://127.0.0.1:8888';
+  const d = await getJson(`${SEARX}/search?q=${encodeURIComponent(query)}&format=json&categories=images&safesearch=1`);
+  const images = (d.results ?? [])
+    .filter((r) => r.img_src || r.thumbnail_src)
+    .slice(0, Math.min(12, Math.max(1, n)))
+    .map((r) => ({
+      src: r.img_src || r.thumbnail_src,
+      thumb: r.thumbnail_src || r.img_src,
+      title: (r.title ?? '').slice(0, 120),
+      page: r.url ?? null,
+    }));
+  if (!images.length) throw new Error(`no images found for "${query}"`);
+  return widget('images', { query, images });
+}
+
 export async function makeMapWidget({ query, lat, lon, label, zoom = 14 }) {
   let loc;
   if (query) loc = await geocodeAddress(query);

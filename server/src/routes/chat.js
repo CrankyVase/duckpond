@@ -8,7 +8,10 @@ import {
 } from './agent.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
-import { makeMapWidget, makeWeatherWidget } from '../widgets.js';
+import {
+  makeGithubWidget, makeImagesWidget, makeMapWidget, makeWeatherWidget,
+  makeWikipediaWidget, makeYoutubeWidget,
+} from '../widgets.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
@@ -142,14 +145,71 @@ const SHOW_MAP_TOOL = { type: 'function', function: {
   }, required: ['query'] },
 } };
 
-const WIDGET_TOOLS = [SHOW_WEATHER_TOOL, SHOW_MAP_TOOL];
+const SHOW_GITHUB_TOOL = { type: 'function', function: {
+  name: 'show_github_repo',
+  description: 'Show a GitHub repository card (stars, language, description) in the chat. Use when discussing or recommending a specific repo.',
+  parameters: { type: 'object', properties: {
+    repo: { type: 'string', description: 'repository as "owner/name" or a github.com URL' },
+  }, required: ['repo'] },
+} };
+
+const SHOW_WIKIPEDIA_TOOL = { type: 'function', function: {
+  name: 'show_wikipedia',
+  description: 'Show a Wikipedia summary card (title, extract, image) in the chat. Use to give a quick factual overview of a person, place, thing, or event.',
+  parameters: { type: 'object', properties: {
+    title: { type: 'string', description: 'article title or topic, e.g. "Great Barrier Reef"' },
+  }, required: ['title'] },
+} };
+
+const SHOW_YOUTUBE_TOOL = { type: 'function', function: {
+  name: 'show_youtube',
+  description: 'Embed a playable YouTube video in the chat. Use when you have a specific relevant video URL or id to show.',
+  parameters: { type: 'object', properties: {
+    url: { type: 'string', description: 'YouTube link or 11-character video id' },
+  }, required: ['url'] },
+} };
+
+const SHOW_IMAGES_TOOL = { type: 'function', function: {
+  name: 'show_images',
+  description: 'Show a small grid of real photos found on the web for a query. Use when the user wants to see what something looks like.',
+  parameters: { type: 'object', properties: {
+    query: { type: 'string', description: 'what to show photos of, e.g. "red panda"' },
+    count: { type: 'integer', description: 'how many images (1-12, default 6)' },
+  }, required: ['query'] },
+} };
+
+// name → builder(args, ctx). ctx has { userLoc }. Each returns a widget object.
+const WIDGET_BUILDERS = {
+  show_weather: (a, ctx) => makeWeatherWidget({
+    place: a.place?.trim() || undefined, lat: ctx.userLoc?.lat, lon: ctx.userLoc?.lon,
+    units: a.units === 'imperial' ? 'imperial' : 'metric',
+  }),
+  show_map: (a, ctx) => makeMapWidget({
+    query: a.query?.trim() || undefined,
+    lat: a.query ? undefined : ctx.userLoc?.lat, lon: a.query ? undefined : ctx.userLoc?.lon,
+    label: a.label?.trim() || undefined,
+  }),
+  show_github_repo: (a) => makeGithubWidget(a.repo),
+  show_wikipedia: (a) => makeWikipediaWidget(a.title),
+  show_youtube: (a) => makeYoutubeWidget(a.url),
+  show_images: (a) => makeImagesWidget(a.query, a.count ?? 6),
+};
+
+const WIDGET_TOOLS = [
+  SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL,
+  SHOW_WIKIPEDIA_TOOL, SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL,
+];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
 const WIDGET_POLICY = `## Widgets
 You can drop interactive cards right into the chat:
-- show_weather — a live weather card for a place (or the user's location).
-- show_map — a pannable map with a pin for a place, address, or business.
-Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; if asked about weather, show_weather. The card is rendered for the user automatically, so don't paste a link or coordinates; just call the tool, then add a short sentence. You may use more than one in a reply.`;
+- show_weather — live weather card for a place (or the user's location).
+- show_map — 3D map with a pin for a place, address, or business.
+- show_github_repo — a GitHub repo card (stars, language, description).
+- show_wikipedia — a Wikipedia summary card (title, extract, image).
+- show_youtube — embed a playable YouTube video.
+- show_images — a grid of real photos for a query.
+Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
 
 const GATE_POLICY = `## Project mode
 You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git; dev servers may bind ports 3000-3009), saves your plan as PLAN.md, and unlocks file and shell tools.
@@ -373,27 +433,13 @@ async function runInlineSearch({
             result = 'Image generated and shown to the user. Mention it briefly; do not repeat the prompt.';
           } catch (err) { send({ type: 'image_done' }); result = `ERROR: image generation failed: ${err.message}`; }
         }
-      } else if (name === 'show_weather' || name === 'show_map') {
+      } else if (WIDGET_BUILDERS[name]) {
         try {
-          let wg;
-          if (name === 'show_weather') {
-            wg = await makeWeatherWidget({
-              place: args.place?.trim() || undefined,
-              lat: userLoc?.lat, lon: userLoc?.lon,
-              units: args.units === 'imperial' ? 'imperial' : 'metric',
-            });
-          } else {
-            wg = await makeMapWidget({
-              query: args.query?.trim() || undefined,
-              lat: args.query ? undefined : userLoc?.lat,
-              lon: args.query ? undefined : userLoc?.lon,
-              label: args.label?.trim() || undefined,
-            });
-          }
+          const wg = await WIDGET_BUILDERS[name](args, { userLoc });
           send({ type: 'widget', widget: wg });
           mdWidgets.push('```duckwidget\n' + JSON.stringify(wg) + '\n```');
-          const where = wg.data.place || wg.data.label || 'the location';
-          result = `${name === 'show_weather' ? 'Weather' : 'Map'} card for ${where} is now shown to the user. Add a short sentence about it; do not repeat coordinates or a link.`;
+          const where = wg.data.place || wg.data.label || wg.data.title || wg.data.name || wg.data.query || 'it';
+          result = `The ${wg.type} card for ${where} is now shown to the user. Add a short sentence about it; do not repeat links, ids, or coordinates.`;
         } catch (err) { result = `ERROR: ${err.message}. Tell the user briefly.`; }
       } else {
         result = `Tool "${name}" is not available here. Use web_search, fetch_page, show_weather, show_map, or just answer.`;
