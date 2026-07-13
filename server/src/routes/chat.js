@@ -339,6 +339,57 @@ const stripFakeImages = (s) => (s ?? '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').re
 // per-model-profile tool gating (settings panel "enabled tools" checkboxes)
 const filterTools = (tools, disabled) => (disabled.size ? tools.filter((t) => !disabled.has(t.function.name)) : tools);
 
+// ---------- speculative tool calling ----------
+// Tool-call JSON streams token by token, and for the latency-bound tools the
+// interesting argument (the query / the url) is complete long before the JSON
+// closes and the round finishes. Start the network work the moment the
+// argument string closes; when the tool actually executes, take the in-flight
+// result instead of starting over. Wrong guesses just get dropped — the
+// speculative fetch was going to a search engine / public page either way.
+// Biggest wins: multi-call rounds (call 2's page loads while call 1 still
+// streams) and slow models (seconds of JSON tail + finalization to overlap).
+const SPEC_ARG = {
+  web_search: /"query"\s*:\s*"((?:[^"\\]|\\.)*)"/,
+  fetch_page: /"url"\s*:\s*"((?:[^"\\]|\\.)*)"/,
+};
+const SPEC_MAX_INFLIGHT = 6;
+
+function makeSpeculator(log) {
+  const buf = new Map();    // stream index → { name, args, fired }
+  const cache = new Map();  // "name\0arg" → promise of the tool result
+  return {
+    // wire into onDelta: watch fragments accumulate, fire when the arg closes
+    onFrag(frag) {
+      let b = buf.get(frag.index);
+      if (!b) { b = { name: '', args: '', fired: false }; buf.set(frag.index, b); }
+      if (frag.name) b.name = frag.name;
+      b.args += frag.args ?? '';
+      const re = SPEC_ARG[b.name];
+      if (!re || b.fired || cache.size >= SPEC_MAX_INFLIGHT) return;
+      const m = b.args.match(re);
+      if (!m) return;
+      let val;
+      try { val = JSON.parse(`"${m[1]}"`); } catch { return; } // arg still mid-escape
+      b.fired = true;
+      const key = `${b.name}\0${val}`;
+      if (cache.has(key)) return;
+      log?.info({ tool: b.name, arg: val.slice(0, 120) }, 'speculative tool start');
+      cache.set(key, (b.name === 'web_search'
+        ? searchWebStructured(val.slice(0, 300))
+        : fetchPageStructured(val)
+      ).then((r) => ({ ok: true, r }), (err) => ({ ok: false, err })));
+    },
+    // stream indexes restart at 0 every round — reset the buffers, keep the cache
+    newRound() { buf.clear(); },
+    // executor side: claim the in-flight result for this exact call, if any
+    take(name, val) {
+      const p = cache.get(`${name}\0${val}`);
+      if (p) cache.delete(`${name}\0${val}`);
+      return p ?? null;
+    },
+  };
+}
+
 // [tool name, one-line description] — data-driven so a disabled tool both
 // drops out of the offered `tools` array AND stops being described here.
 const WIDGET_LINES = [
@@ -525,7 +576,7 @@ async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
 // stream a live "searching the web" trace, collect the pages it actually read
 // as citation sources, and let it write the final answer with inline links.
 async function runInlineSearch({
-  conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, caps, send, abort, onDelta, log,
+  conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, caps, send, abort, onDelta, log, spec,
 }) {
   const MAX_READS = caps?.reads ?? 200;      // hard cap on fetch_page calls
   const MAX_SEARCHES = caps?.searches ?? 40; // and on web_search calls
@@ -584,7 +635,10 @@ async function runInlineSearch({
           steps.push({ query, sites: [] });
           send({ type: 'search', phase: 'query', query });
           try {
-            const { results, text } = await searchWebStructured(query);
+            const sp = spec?.take('web_search', query);
+            const early = sp ? await sp : null;
+            if (early?.ok) log?.info({ query }, 'speculative web_search hit');
+            const { results, text } = early?.ok ? early.r : await searchWebStructured(query);
             for (const r of results) { addSite(r.title, r.url, false); send({ type: 'search', phase: 'site', title: r.title, url: r.url, domain: sourceLabel(r.url), read: false }); }
             result = text;
           } catch (err) { result = `ERROR: search failed: ${err.message}`; log?.warn?.({ err }, 'web_search failed'); }
@@ -597,7 +651,10 @@ async function runInlineSearch({
           const url = String(args.url ?? '');
           send({ type: 'search', phase: 'reading', url, domain: sourceLabel(url) });
           try {
-            const { title, text } = await fetchPageStructured(url);
+            const sp = spec?.take('fetch_page', url);
+            const early = sp ? await sp : null;
+            if (early?.ok) log?.info({ url }, 'speculative fetch_page hit');
+            const { title, text } = early?.ok ? early.r : await fetchPageStructured(url);
             addSite(title, url, true);
             addSource(title, url);
             send({ type: 'search', phase: 'site', title, url, domain: sourceLabel(url), read: true });
@@ -642,6 +699,7 @@ async function runInlineSearch({
     // only the current round shows; stop offering tools once the read cap is hit
     // so the model is forced to finalize.
     send({ type: 'reset_text' });
+    spec?.newRound();
     const capped = reads >= MAX_READS || round === MAX_ROUNDS - 1;
     res = await streamChat({
       model: conv.model_id, messages,
@@ -882,6 +940,7 @@ export default async function chatRoutes(app) {
         }
         return count >= REPEAT_COUNT;
       };
+      const spec = makeSpeculator(req.log);
       const onDelta = (chunk, meta) => {
         if (meta?.reasoning) {
           armThink();
@@ -893,7 +952,7 @@ export default async function chatRoutes(app) {
           }
           send({ type: 'thinking', text: meta.reasoning });
         }
-        if (meta?.toolFrag) { disarmThink(); send({ type: 'tool_delta', ...meta.toolFrag }); }
+        if (meta?.toolFrag) { disarmThink(); spec.onFrag(meta.toolFrag); send({ type: 'tool_delta', ...meta.toolFrag }); }
         if (chunk) { disarmThink(); reasoningTail = ''; send({ type: 'delta', text: chunk }); }
         const now = Date.now();
         if (now - lastTick > 500 && meta?.timings?.predicted_per_second
@@ -948,7 +1007,7 @@ export default async function chatRoutes(app) {
         ], disabledTools);
         const r = await runInlineSearch({
           conv, userId: req.user.id, userLoc, promptMessages, firstResult: res, params,
-          searchTools, imgPrefs, caps: modeCfg, send, abort, onDelta, log: req.log,
+          searchTools, imgPrefs, caps: modeCfg, send, abort, onDelta, log: req.log, spec,
         });
         text = r.text;
         reasoning = r.reasoning ?? reasoning;
