@@ -225,6 +225,54 @@ export async function makeLinkPreviewWidget(rawUrl) {
   });
 }
 
+// Currency conversion card (frankfurter.dev / ECB, free no key).
+export async function makeCurrencyWidget({ from, to, amount = 1 }) {
+  const f = String(from || 'USD').toUpperCase(), t = String(to || 'EUR').toUpperCase(), amt = Number(amount) || 1;
+  const d = await getJson(`https://api.frankfurter.dev/v1/latest?base=${f}&symbols=${t}`);
+  const rate = d.rates?.[t];
+  if (rate == null) throw new Error(`can't convert ${f}→${t}`);
+  return widget('currency', { from: f, to: t, amount: amt, rate, result: Math.round(amt * rate * 10000) / 10000, date: d.date });
+}
+
+// npm package card (registry + downloads, free no key).
+export async function makeNpmWidget(pkg) {
+  const name = String(pkg).trim();
+  const r = await getJson(`https://registry.npmjs.org/${encodeURIComponent(name).replace('%40', '@')}/latest`);
+  let weekly = null;
+  try { weekly = (await getJson(`https://api.npmjs.org/downloads/point/last-week/${name}`)).downloads; } catch { /* optional */ }
+  return widget('npm', {
+    name: r.name, version: r.version, desc: r.description ?? null,
+    license: r.license ?? null, homepage: r.homepage ?? `https://www.npmjs.com/package/${r.name}`,
+    author: (typeof r.author === 'object' ? r.author?.name : r.author) ?? null,
+    keywords: (r.keywords ?? []).slice(0, 6), weekly,
+  });
+}
+
+// Hacker News top story for a query (Algolia API, free no key).
+export async function makeHackerNewsWidget(query) {
+  const q = String(query || '').trim();
+  const url = q
+    ? `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=1`
+    : 'https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=1';
+  const d = await getJson(url);
+  const h = d.hits?.[0];
+  if (!h) throw new Error(`no Hacker News story for "${query}"`);
+  return widget('hackernews', {
+    title: h.title, author: h.author, points: h.points, comments: h.num_comments,
+    url: h.url || `https://news.ycombinator.com/item?id=${h.objectID}`,
+    hn: `https://news.ycombinator.com/item?id=${h.objectID}`,
+    date: h.created_at,
+  });
+}
+
+// Sortable data table from model-supplied rows (pure, no API).
+export function makeTableWidget({ title, columns, rows }) {
+  const cols = (columns ?? []).map((c) => String(c)).slice(0, 8);
+  const rs = (rows ?? []).slice(0, 50).map((r) => (Array.isArray(r) ? r : cols.map((c) => r?.[c])).map((v) => (v == null ? '' : String(v))).slice(0, cols.length));
+  if (!cols.length || !rs.length) throw new Error('table needs columns and rows');
+  return widget('table', { title: title ? String(title) : null, columns: cols, rows: rs });
+}
+
 // Mermaid diagram from model-supplied source (rendered client-side; no API).
 export function makeMermaidWidget({ code, title }) {
   const src = String(code || '').trim();

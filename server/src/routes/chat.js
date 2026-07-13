@@ -9,9 +9,10 @@ import {
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
 import {
-  makeChartWidget, makeCryptoWidget, makeDictionaryWidget, makeGithubWidget, makeImagesWidget,
-  makeLinkPreviewWidget, makeMapWidget, makeMermaidWidget, makeSpotifyWidget, makeWeatherWidget,
-  makeWikipediaWidget, makeYoutubeWidget,
+  makeChartWidget, makeCryptoWidget, makeCurrencyWidget, makeDictionaryWidget, makeGithubWidget,
+  makeHackerNewsWidget, makeImagesWidget, makeLinkPreviewWidget, makeMapWidget, makeMermaidWidget,
+  makeNpmWidget, makeSpotifyWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget,
+  makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
@@ -225,6 +226,35 @@ const SHOW_MERMAID_TOOL = { type: 'function', function: {
   }, required: ['code'] },
 } };
 
+const SHOW_CURRENCY_TOOL = { type: 'function', function: {
+  name: 'show_currency',
+  description: 'Show a currency conversion card between two currencies at the latest rate.',
+  parameters: { type: 'object', properties: {
+    from: { type: 'string', description: '3-letter code, e.g. USD' },
+    to: { type: 'string', description: '3-letter code, e.g. EUR' },
+    amount: { type: 'number', description: 'amount to convert (default 1)' },
+  }, required: ['from', 'to'] },
+} };
+const SHOW_NPM_TOOL = { type: 'function', function: {
+  name: 'show_npm',
+  description: 'Show an npm package card (version, weekly downloads, description).',
+  parameters: { type: 'object', properties: { package: { type: 'string' } }, required: ['package'] },
+} };
+const SHOW_HN_TOOL = { type: 'function', function: {
+  name: 'show_hackernews',
+  description: 'Show the top Hacker News story for a topic (or the current front-page top if no query).',
+  parameters: { type: 'object', properties: { query: { type: 'string' } }, required: [] },
+} };
+const SHOW_TABLE_TOOL = { type: 'function', function: {
+  name: 'show_table',
+  description: 'Render a clean, sortable data table in the chat from columns and rows you provide.',
+  parameters: { type: 'object', properties: {
+    title: { type: 'string' },
+    columns: { type: 'array', items: { type: 'string' } },
+    rows: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'each row is an array of cell values aligned to columns' },
+  }, required: ['columns', 'rows'] },
+} };
+
 // name → builder(args, ctx). ctx has { userLoc }. Each returns a widget object.
 const WIDGET_BUILDERS = {
   show_weather: (a, ctx) => makeWeatherWidget({
@@ -246,12 +276,17 @@ const WIDGET_BUILDERS = {
   show_spotify: (a) => makeSpotifyWidget(a.url),
   show_link_preview: (a) => makeLinkPreviewWidget(a.url),
   show_diagram: (a) => makeMermaidWidget(a),
+  show_currency: (a) => makeCurrencyWidget(a),
+  show_npm: (a) => makeNpmWidget(a.package),
+  show_hackernews: (a) => makeHackerNewsWidget(a.query),
+  show_table: (a) => makeTableWidget(a),
 };
 
 const WIDGET_TOOLS = [
   SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL, SHOW_WIKIPEDIA_TOOL,
   SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
   SHOW_DICTIONARY_TOOL, SHOW_SPOTIFY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
+  SHOW_CURRENCY_TOOL, SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL,
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
@@ -269,6 +304,10 @@ You can drop interactive cards right into the chat:
 - show_spotify — embed a Spotify track/album/playlist (needs a real link).
 - show_link_preview — a rich preview card for any web page URL.
 - show_diagram — render a Mermaid diagram (flowchart, sequence, mind map, etc.).
+- show_currency — convert between two currencies at the latest rate.
+- show_npm — an npm package card (version, downloads, description).
+- show_hackernews — the top Hacker News story for a topic.
+- show_table — a clean data table from columns and rows you provide.
 Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
 
 const GATE_POLICY = `## Project mode

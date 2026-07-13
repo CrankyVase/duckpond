@@ -13,6 +13,10 @@
   import SpotifyWidget from './widgets/SpotifyWidget.svelte';
   import LinkPreviewWidget from './widgets/LinkPreviewWidget.svelte';
   import MermaidWidget from './widgets/MermaidWidget.svelte';
+  import CurrencyWidget from './widgets/CurrencyWidget.svelte';
+  import NpmWidget from './widgets/NpmWidget.svelte';
+  import HackerNewsWidget from './widgets/HackerNewsWidget.svelte';
+  import TableWidget from './widgets/TableWidget.svelte';
   import Download from '@lucide/svelte/icons/download';
 
   let { widget } = $props();
@@ -61,6 +65,14 @@
     <LinkPreviewWidget data={widget.data} />
   {:else if widget?.type === 'mermaid'}
     <MermaidWidget data={widget.data} />
+  {:else if widget?.type === 'currency'}
+    <CurrencyWidget data={widget.data} />
+  {:else if widget?.type === 'npm'}
+    <NpmWidget data={widget.data} />
+  {:else if widget?.type === 'hackernews'}
+    <HackerNewsWidget data={widget.data} />
+  {:else if widget?.type === 'table'}
+    <TableWidget data={widget.data} />
   {:else}
     <div class="wunknown">Unsupported widget: {widget?.type}</div>
   {/if}
