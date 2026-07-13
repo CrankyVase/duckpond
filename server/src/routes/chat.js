@@ -340,6 +340,22 @@ You can search the web with web_search and read pages with fetch_page. Use them 
 Work in small batches: run a search, then read up to about 3 of the most promising results with fetch_page. If that is not enough, refine your query and read another batch. Most questions need only a handful of pages — stop as soon as you are confident. You may read many more if a question truly demands deep research (a hard limit of 200 pages), but reaching for a lot of pages should be rare, not the default.
 Cite as you write: right after any sentence or bullet that rests on something you read, add a markdown link to the exact page it came from, like [OpenAI pricing](https://example.com/pricing). Use the real page URL, never a bare URL on its own line, and never invent a link. If two pages back the same point, add both links next to each other. These links render as small source tags, so keep the link text to a couple of words. Skip searching for things you already know well.`;
 
+// Search depth tiers. Caps flow into the inline-search loop; ultra also raises
+// the thinking budget, turns up reasoning, and injects a deep-research directive.
+const RESEARCH_MODES = {
+  quick: { reads: 8, searches: 6, rounds: 12, thinkMs: 60_000, ultra: false },
+  normal: { reads: 200, searches: 40, rounds: 80, thinkMs: 60_000, ultra: false },
+  ultra: { reads: 400, searches: 80, rounds: 160, thinkMs: 180_000, ultra: true },
+};
+const ULTRA_DIRECTIVE = `## Deep research mode (active)
+The user wants the most thorough, concrete answer you can produce. Do real research:
+1. Break the question into sub-questions.
+2. Search each, and read widely — open many sources with fetch_page, not just snippets.
+3. Cross-check facts across independent sources; prefer primary/authoritative ones; note disagreements.
+4. Keep going until you can answer with specifics and confidence (you may read up to 400 pages).
+5. Then synthesize a well-structured, richly cited answer — cite the pages you used inline.
+Do not stop early or hand-wave; be exhaustive, then conclude clearly.`;
+
 const IMAGE_POLICY = `## Image generation
 You can create real images with the generate_image tool (local diffusion model). Use it when the user asks for a picture, artwork, photo, logo, or wallpaper. Write the complete visual prompt yourself — subject, setting, style, lighting, composition — don't ask the user to write it. Generation takes a few minutes on the local GPU, so briefly say what you're creating before the call. Never claim you made an image without calling the tool; the finished image is shown to the user automatically.`;
 
@@ -434,11 +450,11 @@ async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
 // stream a live "searching the web" trace, collect the pages it actually read
 // as citation sources, and let it write the final answer with inline links.
 async function runInlineSearch({
-  conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, send, abort, onDelta, log,
+  conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, caps, send, abort, onDelta, log,
 }) {
-  const MAX_READS = 200;     // hard cap on fetch_page calls — the policy nudges "a handful"
-  const MAX_SEARCHES = 40;   // and on web_search calls
-  const MAX_ROUNDS = 80;     // safety net on the whole loop (batches of ~3 reads)
+  const MAX_READS = caps?.reads ?? 200;      // hard cap on fetch_page calls
+  const MAX_SEARCHES = caps?.searches ?? 40; // and on web_search calls
+  const MAX_ROUNDS = caps?.rounds ?? 80;     // safety net on the whole loop (batches of ~3 reads)
 
   const messages = [...promptMessages];
   const steps = [];          // [{ query, sites:[{title,url,domain,read}] }]
@@ -500,7 +516,7 @@ async function runInlineSearch({
         }
       } else if (name === 'fetch_page') {
         if (reads >= MAX_READS) {
-          result = 'Page-read limit (30) reached — stop reading and answer now, citing the pages you read.';
+          result = `Page-read limit (${MAX_READS}) reached — stop reading and answer now, citing the pages you read.`;
         } else {
           reads += 1;
           const url = String(args.url ?? '');
@@ -661,6 +677,9 @@ export default async function chatRoutes(app) {
     const rawLoc = req.body?.userLoc;
     const userLoc = rawLoc && Number.isFinite(rawLoc.lat) && Number.isFinite(rawLoc.lon)
       ? { lat: Number(rawLoc.lat), lon: Number(rawLoc.lon) } : null;
+    // search depth: quick | normal | ultra (deep research)
+    const researchMode = RESEARCH_MODES[req.body?.researchMode] ? req.body.researchMode : 'normal';
+    const modeCfg = RESEARCH_MODES[researchMode];
 
     // take the socket away from Fastify — otherwise it "completes" the reply
     // as soon as the handler yields and our SSE stream gets torn down
@@ -733,12 +752,17 @@ export default async function chatRoutes(app) {
       const imgPrefs = getUserImagePrefs(req.user.id);
       const promptMessages = withToolsPolicy(
         buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed);
+      // deep-research mode: prepend the directive to the leading system message
+      if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
+        promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
+      }
       const params = { max_tokens: -1 };
       for (const k of GEN_PARAM_KEYS) params[k] = conv._settings[k];
       // thinking control: enable_thinking is honored by qwen-style templates,
       // reasoning_effort by gpt-oss-style ones; unsupported kwargs are ignored
       const think = conv._settings.thinking;
       if (think === 'none') params.chat_template_kwargs = { enable_thinking: false };
+      else if (modeCfg.ultra) params.reasoning_effort = 'high';
       else if (think === 'high' || think === 'low') params.reasoning_effort = think;
 
       let lastTick = 0;
@@ -748,13 +772,13 @@ export default async function chatRoutes(app) {
       // is stuck — cut it off. Armed on the first reasoning token after any
       // productive output, disarmed the moment real content or a tool fragment
       // appears. Covers the first call and every research round (shared onDelta).
-      const THINK_TIMEOUT_MS = Number(process.env.THINK_TIMEOUT_MS ?? 60_000);
+      const THINK_TIMEOUT_MS = Number(process.env.THINK_TIMEOUT_MS ?? modeCfg.thinkMs);
       const disarmThink = () => { if (thinkTimer) { clearTimeout(thinkTimer); thinkTimer = null; } };
       const armThink = () => {
         if (thinkTimer) return;
         thinkTimer = setTimeout(() => {
           thinkTimer = null;
-          send({ type: 'error', message: 'Stopped — the model was thinking for over 60s without answering or using a tool.' });
+          send({ type: 'error', message: `Stopped — the model was thinking for over ${Math.round(THINK_TIMEOUT_MS / 1000)}s without answering or using a tool.` });
           abort.abort();
         }, THINK_TIMEOUT_MS);
       };
@@ -814,7 +838,7 @@ export default async function chatRoutes(app) {
         ];
         const r = await runInlineSearch({
           conv, userId: req.user.id, userLoc, promptMessages, firstResult: res, params,
-          searchTools, imgPrefs, send, abort, onDelta, log: req.log,
+          searchTools, imgPrefs, caps: modeCfg, send, abort, onDelta, log: req.log,
         });
         text = r.text;
         reasoning = r.reasoning ?? reasoning;

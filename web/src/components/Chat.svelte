@@ -15,6 +15,7 @@
   import Lightbulb from '@lucide/svelte/icons/lightbulb';
   import MapPin from '@lucide/svelte/icons/map-pin';
   import Paperclip from '@lucide/svelte/icons/paperclip';
+  import Telescope from '@lucide/svelte/icons/telescope';
   import Square from '@lucide/svelte/icons/square';
 
   let input = $state('');
@@ -238,8 +239,9 @@
       search: null, widgets: [],
     };
     pendText = ''; pendThink = ''; toolBuf = null;
-    // include opt-in location so weather/map widgets can default to where you are
-    const outBody = prefs.shareLocation && prefs.userLoc ? { ...body, userLoc: prefs.userLoc } : body;
+    // include opt-in location + search depth so the server can tailor the turn
+    const outBody = { ...body, researchMode: prefs.researchMode };
+    if (prefs.shareLocation && prefs.userLoc) outBody.userLoc = prefs.userLoc;
     stream = sse(`/api/conversations/${app.conv.id}/chat`, outBody, handleEvent);
     try {
       await stream.done;
@@ -299,6 +301,15 @@
   }
 
   function stop() { stream?.abort(); }
+
+  // web-search depth: cycle quick → normal → ultra
+  const RESEARCH = { quick: 'Quick', normal: 'Normal', ultra: 'Ultra research' };
+  function cycleResearch() {
+    const order = ['quick', 'normal', 'ultra'];
+    prefs.researchMode = order[(order.indexOf(prefs.researchMode) + 1) % order.length];
+    savePrefs();
+    toast(`Search depth: ${RESEARCH[prefs.researchMode]}${prefs.researchMode === 'ultra' ? ' — deep, slow, ~400 sources' : ''}`);
+  }
 
   // opt-in geolocation for weather/map widgets. First tap asks the browser and
   // caches coarse coords; tapping again turns sharing off.
@@ -487,8 +498,12 @@
       <div class="bar">
         <button class="tool" title="Attach files — coming soon"
           onclick={() => toast('Attachments coming soon')}><Paperclip size={15} /></button>
-        <button class="tool on" title="Web search is on — the model searches the web automatically when it needs to"
-          onclick={() => toast('Web search is automatic — the model searches when a question needs it')}><Globe size={15} /></button>
+        <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
+          title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
+          onclick={cycleResearch}>
+          {#if prefs.researchMode === 'ultra'}<Telescope size={15} />{:else}<Globe size={15} />{/if}
+          {#if prefs.researchMode !== 'normal'}<span class="rlbl">{prefs.researchMode === 'ultra' ? 'Ultra' : 'Quick'}</span>{/if}
+        </button>
         <button class="tool" class:on={prefs.shareLocation} disabled={locBusy}
           title={prefs.shareLocation ? 'Location on — weather & maps use where you are (click to turn off)' : 'Share location for weather & maps'}
           onclick={toggleLocation}><MapPin size={15} /></button>
@@ -574,6 +589,9 @@
   }
   .tool:hover { background: var(--bg-hover); color: var(--text-dim); }
   .tool.on { color: var(--accent); }
+  .tool.ultra { color: var(--accent); background: var(--accent-glow); }
+  .tool :global(.rlbl) { font-size: 11px; font-weight: 600; }
+  .tool:has(.rlbl) { width: auto; gap: 5px; padding: 0 9px; }
   .tool:disabled { opacity: 0.35; cursor: default; }
   .send {
     width: 34px; height: 34px; border-radius: 50%; padding: 0; line-height: 0;

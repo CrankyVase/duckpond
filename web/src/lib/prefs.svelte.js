@@ -12,6 +12,7 @@ const DEFAULTS = {
   autoCompact: true,         // summarize old turns automatically at 75% context
   shareLocation: false,      // send coarse geolocation so weather/map widgets know where you are
   userLoc: null,             // { lat, lon } cached when sharing is on
+  researchMode: 'normal',    // quick | normal | ultra — web-search depth
 };
 
 function load() {
