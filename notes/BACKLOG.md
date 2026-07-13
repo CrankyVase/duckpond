@@ -19,8 +19,6 @@ grind / repeats a known pattern.
   widgets, light/dark. → `WIDGETS-AND-RESEARCH-PLAN.md` (§E Phase 5)
 
 ## Sonnet (grind / known pattern)
-- **Build llama.cpp with diffusion-gemma support** — compile PR #24423 (EB
-  decoder flags); installed binaries predate the arch. → `BUILD-DIFFUSION-GEMMA.md`
 - **Stats dashboard frontend** — render `/api/stats`. → `EXTRA-STATS-DASHBOARD-SONNET.md`
 - **TTS** — read replies aloud via piper. → `EXTRA-TTS-SONNET.md`
 - **MCP support** — stdio JSON-RPC client, namespaced `mcp__server__tool`, plug
@@ -43,8 +41,9 @@ grind / repeats a known pattern.
 
 ## Done (for reference)
 Web search + Perplexity-style citations (Opus), GPU queue / two-user concurrency,
-in-chat image gen, diffusion-in-chat wiring (blocked only on the gemma binary),
-SearxNG deploy. See git log.
+in-chat image gen, diffusion-in-chat wiring, SearxNG deploy, llama.cpp built with
+diffusion-gemma support (unmerged PR #24423, Vulkan/RDNA4, verified end-to-end
+in-chat). See git log.
 
 ---
 **Standalone plans stay separate.** This index just links them; it does not merge
