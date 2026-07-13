@@ -70,9 +70,8 @@ button.danger-ghost { background: transparent; border-color: transparent; color:
 button.danger-ghost:hover { background: rgba(192, 96, 79, 0.12); }
 
 :focus-visible {
-  outline: 2px solid var(--accent-dim);
+  outline: 1px solid var(--text-faint);
   outline-offset: 2px;
-  border-radius: 6px;
 }
 
 input, textarea, select {

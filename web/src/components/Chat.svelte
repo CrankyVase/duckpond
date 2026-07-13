@@ -238,9 +238,8 @@
       search: null, widgets: [],
     };
     pendText = ''; pendThink = ''; toolBuf = null;
-    // include opt-in location + search depth so the server can tailor the turn
+    // search depth; location is resolved server-side from the request's IP
     const outBody = { ...body, researchMode: prefs.researchMode };
-    if (prefs.userLoc) outBody.userLoc = prefs.userLoc;
     stream = sse(`/api/conversations/${app.conv.id}/chat`, outBody, handleEvent);
     try {
       await stream.done;
@@ -309,34 +308,6 @@
     savePrefs();
     toast(`Search depth: ${RESEARCH[prefs.researchMode]}${prefs.researchMode === 'ultra' ? ' — deep, slow, ~400 sources' : ''}`);
   }
-
-  // Silent location capture — no button, no toast. Asks the browser's native
-  // permission prompt once per app load (a no-op if already granted/denied —
-  // the browser remembers and answers instantly either way). If it errors out
-  // (e.g. "Network location provider ... 400", common on a desktop with no
-  // WiFi radio for Chrome to triangulate from) or the user denies it, fall
-  // back to a coarse server-side IP lookup (user-approved) so weather/map
-  // widgets still have something to work with.
-  let locTried = false;
-  async function ensureLocation() {
-    if (prefs.userLoc || locTried || !app.conv) return;
-    locTried = true;
-    if (navigator.geolocation) {
-      const got = await new Promise((resolve) => {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => resolve({ lat: +pos.coords.latitude.toFixed(3), lon: +pos.coords.longitude.toFixed(3) }),
-          () => resolve(null),
-          { enableHighAccuracy: false, timeout: 8000, maximumAge: 600_000 },
-        );
-      });
-      if (got) { prefs.userLoc = got; savePrefs(); return; }
-    }
-    try {
-      const g = await api('/api/geoip');
-      if (g.ok) { prefs.userLoc = { lat: g.lat, lon: g.lon, label: g.label }; savePrefs(); }
-    } catch { /* no location this session — the model will just ask for a place */ }
-  }
-  $effect(() => { if (app.conv) ensureLocation(); });
 
   async function approve(ok) {
     const runId = app.streaming?.run?.id;

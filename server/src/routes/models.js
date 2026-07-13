@@ -1,4 +1,4 @@
-import { clientIp, requireAuth } from '../auth.js';
+import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { gpuVram, listModels, loadModel, unloadModel } from '../llama.js';
 import { describeModel } from '../modelDescribe.js';
@@ -57,25 +57,6 @@ export default async function modelRoutes(app) {
   });
 
   app.get('/api/tools', async () => TOOL_CATALOG);
-
-  // Coarse (city-level) fallback location when the browser's own geolocation
-  // fails or is denied — common on a desktop with no WiFi radio, where Chrome's
-  // network location provider has nothing to triangulate from and 400s.
-  // User-approved 2026-07-13: sends the client IP to ip-api.com (free, no key).
-  app.get('/api/geoip', async (req) => {
-    const ip = clientIp(req);
-    if (!ip || ip === 'unknown') return { ok: false };
-    try {
-      const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,lat,lon,city,regionName,country`, {
-        signal: AbortSignal.timeout(4000),
-      });
-      const d = await res.json();
-      if (d.status !== 'success' || !Number.isFinite(d.lat) || !Number.isFinite(d.lon)) return { ok: false };
-      return { ok: true, lat: d.lat, lon: d.lon, label: [d.city, d.regionName, d.country].filter(Boolean).join(', ') };
-    } catch {
-      return { ok: false };
-    }
-  });
 
   app.get('/api/gpu', async () => (await gpuVram()) ?? { totalBytes: 0, usedBytes: 0 });
 

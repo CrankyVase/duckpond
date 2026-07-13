@@ -1,5 +1,6 @@
-import { requireAuth } from '../auth.js';
+import { clientIp, requireAuth } from '../auth.js';
 import { db, nowSec } from '../db.js';
+import { ipLocation } from '../geoip.js';
 import { countInputTokens, listModels, streamChat } from '../llama.js';
 import {
   AGENT_TOOLS, FETCH_PAGE_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL,
@@ -293,12 +294,13 @@ const SHOW_MATHPLOT_TOOL = { type: 'function', function: {
 const WIDGET_BUILDERS = {
   show_weather: (a, ctx) => makeWeatherWidget({
     place: a.place?.trim() || undefined, lat: ctx.userLoc?.lat, lon: ctx.userLoc?.lon,
+    label: a.place?.trim() ? undefined : ctx.userLoc?.label,
     units: a.units === 'imperial' ? 'imperial' : 'metric',
   }),
   show_map: (a, ctx) => makeMapWidget({
     query: a.query?.trim() || undefined,
     lat: a.query ? undefined : ctx.userLoc?.lat, lon: a.query ? undefined : ctx.userLoc?.lon,
-    label: a.label?.trim() || undefined,
+    label: a.label?.trim() || (a.query ? undefined : ctx.userLoc?.label),
   }),
   show_github_repo: (a) => makeGithubWidget(a.repo),
   show_wikipedia: (a) => makeWikipediaWidget(a.title),
@@ -435,8 +437,8 @@ function slugify(name) {
 
 function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, userLoc = null, disabled = EMPTY_DISABLED) {
   const locPolicy = userLoc
-    ? `## User location\nThe user has shared their approximate location (lat ${userLoc.lat}, lon ${userLoc.lon}). You may omit place/query in show_weather or show_map to use it — do not ask them where they are.`
-    : `## User location\nThe user has NOT shared their location. Never omit place/query in show_weather or show_map expecting it to fall back to "where they are" — it will fail. Ask what place they mean, or tell them to tap the location pin next to the composer.`;
+    ? `## User location\nAn approximate location is available for the user (lat ${userLoc.lat}, lon ${userLoc.lon}, near ${userLoc.label ?? 'their area'}). You may omit place/query in show_weather or show_map to use it — do not ask them where they are.`
+    : `## User location\nNo location is available for the user right now. Never omit place/query in show_weather or show_map expecting it to fall back to "where they are" — it will fail. Ask what place they mean.`;
   const showGate = !wsRow && !disabled.has('start_project');
   const showImage = imageAllowed && !disabled.has('generate_image');
   const showSearch = !disabled.has('web_search');
@@ -741,11 +743,10 @@ export default async function chatRoutes(app) {
     if (!conv.model_id) return reply.code(400).send({ error: 'no model selected' });
 
     const { content, parentId, regenerateFrom } = req.body ?? {};
-    // optional user location (opt-in geolocation) → lets show_weather/show_map
-    // default to where the user is when they name no place
-    const rawLoc = req.body?.userLoc;
-    const userLoc = rawLoc && Number.isFinite(rawLoc.lat) && Number.isFinite(rawLoc.lon)
-      ? { lat: Number(rawLoc.lat), lon: Number(rawLoc.lon) } : null;
+    // coarse location, resolved from the request's own IP (no browser prompt,
+    // no client involvement) → lets show_weather/show_map default to where the
+    // user is when they name no place
+    const userLoc = await ipLocation(clientIp(req));
     // search depth: quick | normal | ultra (deep research)
     const researchMode = RESEARCH_MODES[req.body?.researchMode] ? req.body.researchMode : 'normal';
     const modeCfg = RESEARCH_MODES[researchMode];

@@ -10,7 +10,6 @@ const DEFAULTS = {
   sendOnEnter: true,         // Enter sends, Shift+Enter newline
   autoExpandThinking: false, // open finished thought panels by default
   autoCompact: true,         // summarize old turns automatically at 75% context
-  userLoc: null,             // { lat, lon } cached after a silent, one-time browser geolocation ask
   researchMode: 'normal',    // quick | normal | ultra — web-search depth
 };
 
