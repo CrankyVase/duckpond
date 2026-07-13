@@ -332,6 +332,14 @@ const WIDGET_TOOLS = [
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
+// Small models sometimes hallucinate a markdown image (![alt](url), often with
+// a bogus/empty url) right next to a widget/generated-image tool call — as if
+// narrating "here's a photo" on top of the card that's already rendered. Every
+// *real* image or widget in a reply is appended by us (mdImgs/mdWidgets), never
+// typed by the model, so any ![...](...)  found in the model's own raw text is
+// always spurious. Strip it there, before it's combined with the real markdown.
+const stripFakeImages = (s) => (s ?? '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/[ \t]+\n/g, '\n').trim();
+
 // per-model-profile tool gating (settings panel "enabled tools" checkboxes)
 const filterTools = (tools, disabled) => (disabled.size ? tools.filter((t) => !disabled.has(t.function.name)) : tools);
 
@@ -625,7 +633,7 @@ async function runInlineSearch({
           send({ type: 'widget', widget: wg });
           mdWidgets.push('```duckwidget\n' + JSON.stringify(wg) + '\n```');
           const where = wg.data.place || wg.data.label || wg.data.title || wg.data.name || wg.data.query || 'it';
-          result = `The ${wg.type} card for ${where} is now shown to the user. Add a short sentence about it; do not repeat links, ids, or coordinates.`;
+          result = `The ${wg.type} card for ${where} is now shown to the user, right below your reply. Add ONE short sentence about it in plain text — no links, ids, coordinates, and critically no markdown image syntax like ![...](...); the card is not a photo you need to embed, it is already rendered.`;
         } catch (err) { result = `ERROR: ${err.message}. Tell the user briefly.`; }
       } else {
         result = `Tool "${name}" is not available here. Use web_search, fetch_page, show_weather, show_map, or just answer.`;
@@ -649,7 +657,7 @@ async function runInlineSearch({
 
   timings = res.timings ?? timings;
   usage = res.usage ?? usage;
-  const text = [finalText.trim(), mdImgs.join('\n\n'), mdWidgets.join('\n\n')].filter(Boolean).join('\n\n');
+  const text = [stripFakeImages(finalText), mdImgs.join('\n\n'), mdWidgets.join('\n\n')].filter(Boolean).join('\n\n');
   send({ type: 'search', phase: 'done' });
   return { text, reasoning: reasons.join('\n\n'), timings, usage, search: { steps, sources } };
 }
@@ -894,6 +902,7 @@ export default async function chatRoutes(app) {
       }
 
       let { content: text, reasoning, timings, usage } = res;
+      text = stripFakeImages(text);
       let runId = null;
       let searchData = null;
 
@@ -967,7 +976,7 @@ export default async function chatRoutes(app) {
           if (!mdImgs.length) throw err;
           req.log.warn({ err }, 'image follow-up commentary failed; keeping the image');
         }
-        text = [(res.content ?? '').trim(), mdImgs.join('\n\n'), (fin.content ?? '').trim()]
+        text = [stripFakeImages(res.content), mdImgs.join('\n\n'), stripFakeImages(fin.content)]
           .filter(Boolean).join('\n\n');
         reasoning = fin.reasoning ?? reasoning;
         timings = fin.timings ?? timings;
