@@ -6,10 +6,13 @@
   import Duck from './Duck.svelte';
   import RunReplay from './RunReplay.svelte';
   import SearchTrace from './SearchTrace.svelte';
+  import { speech, toggleSpeech } from '../lib/tts.svelte.js';
   import Brain from '@lucide/svelte/icons/brain';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
   import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+  import Square from '@lucide/svelte/icons/square';
+  import Volume2 from '@lucide/svelte/icons/volume-2';
   import Pencil from '@lucide/svelte/icons/pencil';
   import Pin from '@lucide/svelte/icons/pin';
   import PinOff from '@lucide/svelte/icons/pin-off';
@@ -194,6 +197,12 @@
             </span>
           {/if}
           <button class="ic" onclick={copyMsg} title={copied ? 'Copied' : 'Copy'}><Copy size={14} /></button>
+          <button class="ic" class:on={speech.playingId === msg.id}
+            class:pulse={speech.loadingId === msg.id}
+            onclick={() => toggleSpeech(msg)}
+            title={speech.playingId === msg.id ? 'Stop reading' : 'Read aloud'}>
+            {#if speech.playingId === msg.id}<Square size={13} />{:else}<Volume2 size={14} />{/if}
+          </button>
           <button class="ic" onclick={() => onregenerate?.(msg)} title="Regenerate (branches)"><RotateCcw size={14} /></button>
           <button class="ic" class:on={msg.pinned} onclick={() => onpin?.(msg)} title={msg.pinned ? 'Unpin' : 'Pin — survives compaction'}>
             {#if msg.pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
@@ -309,6 +318,8 @@
   .ic:hover { background: var(--bg-hover); opacity: 1; }
   .ic:disabled { opacity: 0.25; cursor: default; }
   .ic.danger:hover { background: rgba(192, 96, 79, 0.14); color: var(--red); }
+  .ic.pulse { animation: icpulse 0.9s ease infinite; }
+  @keyframes icpulse { 50% { opacity: 0.35; } }
   .branch {
     display: inline-flex; align-items: center; gap: 1px;
     font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
