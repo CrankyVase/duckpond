@@ -1,12 +1,8 @@
 <script>
   // Collapsible replay card for an agent run embedded in a chat message.
-  import { api } from '../lib/api.js';
-  import { app } from '../lib/state.svelte.js';
-  import { attachRun, loadWorkspaces, openWorkspace, bench } from '../lib/bench.svelte.js';
   import RunFeed from './RunFeed.svelte';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Hammer from '@lucide/svelte/icons/hammer';
-  import SquareArrowOutUpRight from '@lucide/svelte/icons/square-arrow-out-up-right';
 
   let { runId } = $props();
 
@@ -41,14 +37,6 @@
     edits && `${edits} file edit${edits > 1 ? 's' : ''}`,
     cmds && `${cmds} command${cmds > 1 ? 's' : ''}`,
   ].filter(Boolean).join(' · ') || `${events.length} steps`);
-
-  async function openBench() {
-    if (!run) return;
-    await loadWorkspaces();
-    const ws = bench.workspaces.find((w) => w.id === run.workspace_id);
-    if (ws) { await openWorkspace(ws); attachRun(run); }
-    app.view = 'bench';
-  }
 </script>
 
 <div class="replay">
@@ -59,9 +47,6 @@
       <span class="sum">{summary}</span>
       {#if run}<span class="st {run.status}">{run.status}</span>{/if}
       <span class="chev" class:open><ChevronDown size={13} /></span>
-    </button>
-    <button class="openbench" onclick={openBench} title="Open this run in the Workbench">
-      <SquareArrowOutUpRight size={13} />
     </button>
   </div>
   {#if open}
@@ -93,10 +78,5 @@
   .st.running, .st.waiting_approval { color: var(--accent); }
   .chev { display: grid; place-items: center; transition: transform 140ms ease; color: var(--text-faint); }
   .chev.open { transform: rotate(180deg); }
-  .openbench {
-    all: unset; cursor: pointer; padding: 8px 12px;
-    color: var(--text-faint); display: grid; place-items: center;
-  }
-  .openbench:hover { color: var(--accent); }
   .body { padding: 10px 12px; border-top: 1px solid var(--border-soft); }
 </style>

@@ -1,20 +1,24 @@
 <script>
   // Project files rail for chat agent mode: live view of the conversation's
-  // workspace, with a read-only file peek. Editing lives in the Workbench.
+  // workspace, with a read-only file peek and an embedded dev-server preview.
   import { api } from '../lib/api.js';
   import { app } from '../lib/state.svelte.js';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import FileIcon from '@lucide/svelte/icons/file';
   import Folder from '@lucide/svelte/icons/folder';
   import FolderOpen from '@lucide/svelte/icons/folder-open';
+  import Globe from '@lucide/svelte/icons/globe';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
+  import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import X from '@lucide/svelte/icons/x';
 
   let open = $state(true);
   let files = $state([]);
   let wsName = $state('');
   let viewer = $state(null); // { path, content, error }
+  let preview = $state(false);
+  let previewNonce = $state(0); // bump to force the iframe to reload
 
   $effect(() => {
     const wsId = app.conv?.workspace_id;
@@ -62,6 +66,9 @@
         <span class="title">Project files</span>
         {#if wsName}<span class="ws">{wsName}</span>{/if}
       </div>
+      <button class="hbtn" onclick={() => (preview = true)} title="Preview (live dev server)">
+        <Globe size={14} />
+      </button>
       <button class="hbtn" onclick={() => (open = false)} title="Hide files">
         <PanelRightClose size={14} />
       </button>
@@ -99,6 +106,24 @@
       {:else}
         <pre class="cbody">{viewer.content}</pre>
       {/if}
+    </div>
+  </div>
+{/if}
+
+{#if preview}
+  <div class="overlay" role="button" tabindex="-1"
+    onclick={(e) => { if (e.target === e.currentTarget) preview = false; }}
+    onkeydown={key}>
+    <div class="card previewcard">
+      <div class="chead">
+        <code class="cpath">Preview — localhost:3000</code>
+        <button class="hbtn" onclick={() => (previewNonce += 1)} title="Reload"><RefreshCw size={14} /></button>
+        <button class="hbtn" onclick={() => (preview = false)} title="Close"><X size={15} /></button>
+      </div>
+      {#key previewNonce}
+        <iframe class="previewframe" title="Live dev server preview"
+          src={`/api/workspaces/${app.conv.workspace_id}/preview/3000/`}></iframe>
+      {/key}
     </div>
   </div>
 {/if}
@@ -166,4 +191,7 @@
     color: var(--text-dim); white-space: pre-wrap; word-break: break-all;
   }
   .cerr { padding: 16px; color: var(--red); font-size: 13px; }
+
+  .previewcard { width: min(1400px, 96vw); height: 90vh; }
+  .previewframe { flex: 1; min-height: 0; border: none; background: #fff; }
 </style>

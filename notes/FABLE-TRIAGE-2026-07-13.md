@@ -1,188 +1,195 @@
 # 2026-07-13 idea dump — Sonnet's triage for Fable
 
 The user dropped a big, unstructured list of feature ideas in one message and
-asked for it to be organized and handed to Fable, with **Fable free to refine
-this further** — re-scope, reorder, disagree, decide what a first slice actually
-looks like. This document is Sonnet's honest first pass, not a final spec.
+asked for it to be organized and handed to Fable. Updated same-day after a
+follow-up from the user — read the whole doc, the directive changed partway
+through.
 
-Two ground rules the user set:
-1. **Be honest about genuine feasibility**, not just complexity. "Hard but
-   doable" and "not achievable / bad fit for this app" are different verdicts —
-   don't blur them.
-2. **Order by complexity** among the doable ones: most complex-but-possible
-   first, down to least complex last.
+**The brief, as it now stands:** build all of this for real. Not a sampler —
+the user wants this UI to become genuinely state-of-the-art: more impressive
+and more usable than other local/self-hosted chat UIs, not just "a few new
+features bolted on." Fable should **attempt every item below**, not
+self-select the easy ones — difficulty is not a reason to skip something.
+**Order of attack: most complex first, least complex last** (the user's own
+instruction — start with the hardest, hairiest system while there's the most
+runway, don't save it for "later" and never get to it). Within that constraint,
+**Fable decides how to actually organize and sequence the work** — this
+document is a briefing, not a spec to follow literally.
 
-Read `FABLE-PLAN.md` first — several of these ideas already have a home there
-(EPIC 1 Council, EPIC 2 Memory, EPIC 3 Generative UI, EPIC 5 Voice — just
-restored today with new detail from this same conversation, EPIC 6 Document
+Read `FABLE-PLAN.md` first — several items already have a home there (EPIC 1
+Council, EPIC 2 Memory, EPIC 3 Generative UI, EPIC 5 Voice, EPIC 6 Document
 RAG). Don't duplicate; extend or cross-link instead.
 
 ---
 
-## Not a good fit / reconsider before building
+## Explicitly set aside — do not build these right now
 
-**Live Google Slides API integration.** The user asked for "google slides"
-generation. Actually creating/editing documents in a user's real Google account
-requires OAuth consent, API credentials, token storage/refresh, and a Google
-Cloud project — a fundamentally different kind of integration (external account,
-cloud dependency) than anything else in DuckPond, which is otherwise entirely
-self-hosted with no external accounts. This doesn't mean "skip the underlying
-want" — it means the actual deliverable should be **PowerPoint (.pptx)
-generation** (a real, well-supported local library path — see below), which
-opens natively in Google Slides via upload/import. Build that; don't build
-Google OAuth for this unless the user explicitly confirms they want DuckPond
-holding a Google account credential, which is a real trust/scope decision worth
-asking about on its own, separately from this list.
+The user pulled these two out of scope themselves, after Sonnet's feasibility
+read below. Different reasons for each:
 
-**"A complex way of choosing the best model that always gets best speed and
-quality."** Taken completely literally — a routing system with a *provably
-optimal* speed/quality tradeoff — that's a research problem (it's what much of
-frontier-lab routing/MoE work is chasing), not a buildable feature. The
-achievable version of this want already exists as a plan: **EPIC 1, The
-Council**, in `FABLE-PLAN.md` — a classifier model + confidence-gated
-escalation + optional multi-model debate for hard questions. That's the right
-target. Build that, not a perfection oracle.
+- **Google Slides API integration** — genuinely a poor fit (see below for why:
+  OAuth/external account/cloud dependency, unlike everything else in this
+  self-hosted app). Not being built at all right now.
+- **Adaptive/automatic model routing** ("the auto model") — this one **is**
+  genuinely feasible and already has a home (EPIC 1, The Council, in
+  `FABLE-PLAN.md`) — the user is choosing to deprioritize it for this round,
+  not agreeing it's infeasible. Leave Epic 1 as-is in the plan for whenever it
+  comes back into scope; don't start it now.
+
+**Why Google Slides is a poor fit, for the record:** actually creating/editing
+documents in a user's real Google account requires OAuth consent, API
+credentials, token storage/refresh, and a Google Cloud project — a
+fundamentally different kind of integration (external account, cloud
+dependency) than anything else in DuckPond. The underlying want (a slide deck)
+is still worth building — see item 6 below (PowerPoint export, which opens
+directly in Google Slides via upload, no OAuth needed).
 
 ---
 
-## Fable-tier, ordered most → least complex (of what's genuinely doable)
+## Already done this session (context for Fable, not to-do)
 
-### 1. Adaptive/automatic model routing
-Maps directly onto **EPIC 1 — The Council** in `FABLE-PLAN.md`. Don't treat this
-as a separate feature — it's the same ask. Genuinely doable: a small always-warm
-classifier model picking a target resident model per turn, with confidence-gated
-escalation to a bigger model when unsure. The single-GPU constraint is the real
-design pressure (loading a second model to double-check costs real seconds) —
-`FABLE-PLAN.md` already flags this. **Verdict: doable, hard, already scoped —
-just point Fable at Epic 1 rather than re-designing it here.**
+- **Thinking watchdog fixed.** It was killing legitimate long reasoning at a
+  fixed 60s (180s in Ultra) after the first reasoning token, regardless of
+  whether the model kept working. Now a true idle timeout (resets on every
+  reasoning token) at 60 minutes, plus a separate loop detector that catches a
+  model stuck repeating the same ~200-char phrase forever (which an idle
+  timeout alone can't see, since a repeating model never goes idle). See
+  `server/src/routes/chat.js` around `armThink`/`checkRepeat`.
+- **Core prompt updated** to tell models to stop reasoning once they've
+  decided on an approach and write the actual code as the real answer/tool
+  call, instead of re-deriving or narrating the code again inside their
+  thinking first (`server/src/settings.js`, `DEFAULT_CORE_PROMPT`).
+- **Image Studio and Workbench panels removed.** Both were redundant —
+  `generate_image` already works inline in chat, and agent/coding mode already
+  runs inline too (inline run feed, `ChatFiles` file tree). Deleted
+  `ImageStudio.svelte`, `Workbench.svelte`, `AgentPanel.svelte`,
+  `FileTree.svelte`, and their state modules; removed their Topbar buttons.
+  **The one genuinely unique thing Workbench had — the live dev-server
+  preview — was moved, not lost**: `ChatFiles.svelte` now has a preview button
+  that opens an embedded iframe overlay (`localhost:3000` dev server), bigger
+  and actually inline where the user wanted it, instead of Workbench's
+  new-tab link. Manual file editing and the standalone cross-conversation
+  workspace browser were **not** preserved — the AI edits files via chat now;
+  if Fable's new features need direct manual file editing back, that's a new,
+  deliberate decision, not an oversight.
+- Topbar is down to one view-toggle button (Stats) plus the VRAM chip, context
+  bar, and settings — still worth a proper decluttering pass once Fable's new
+  features land (see the final phase below), since new buttons are coming.
 
-### 2. Live voice conversation (reactive orb)
-Just restored as **EPIC 5** in `FABLE-PLAN.md` with the new detail from today's
-conversation (the orb reacts to *both* the AI talking and the user talking — two
-distinct live-audio-reactive states, not one; button placement should be small
-and out of the way, not a permanent composer fixture). Piper (TTS) is already
-installed and working this session
-(`/home/cranky/bin/piper-install/piper/piper`,
+---
+
+## Attempt all of these — ordered most → least complex
+
+Every item here should genuinely be attempted, not triaged away for
+difficulty. The ordering below is Sonnet's complexity read; re-verify it once
+you're actually designing, and reorganize if your own judgment differs.
+
+### 1. Live voice conversation (reactive orb)
+**EPIC 5** in `FABLE-PLAN.md`, restored today with the user's new detail: the
+orb reacts to *both* the AI talking and the user talking — two distinct live
+audio-reactive states, not one — and the trigger button should be small and
+unintrusive, not a permanent composer fixture. Piper (TTS) is already installed
+and working (`/home/cranky/bin/piper-install/piper/piper`,
 `/home/lewis/tts-voices/en_US-amy-medium.onnx`) but only wired for on-demand
-per-message playback so far, per `EXTRA-TTS-SONNET.md` — the always-on live
-duplex conversation loop (STT + barge-in + turn-taking) is the actual new work.
-**Verdict: doable, hard — realtime turn-taking and barge-in on local hardware is
-a genuine systems problem. Read EPIC 5 in full before scoping.**
+per-message playback (`EXTRA-TTS-SONNET.md`) — the always-on live duplex loop
+(STT + barge-in + turn-taking) is the real new work. Realtime turn-taking and
+barge-in on local hardware is a genuine systems problem — likely the hardest
+single item on this list. Read EPIC 5 in full before scoping.
 
-### 3. Speculative tool calling
+### 2. Speculative tool calling
 Predict which tool the model is about to call from partial streamed output,
-start running it before generation finishes, discard if the prediction was
-wrong. This is genuinely possible — `llama.js`'s `streamChatInner` already
-accumulates `tool_calls` fragments incrementally as they stream (name and
-arguments arrive in pieces), so there's a real signal to pattern-match against.
-**But**: flag the honest caveat — this technique earns its keep when tool-call
-*network* latency is the bottleneck (cloud APIs). On this local single-GPU
-setup, the model's own token generation is usually the dominant cost, so the
-win is real but narrower than the "up to 50% faster" pitch suggests — it mainly
-helps for tools with real external latency (`web_search`, `fetch_page`), not
-free/instant ones (widgets, math). **Verdict: doable, genuinely complex,
-uncertain ROI here — worth a focused experiment if there's appetite, but budget
-it as exploratory, not a guaranteed win. Lowest priority of the "hard" items.**
+start running it before generation finishes, discard if wrong. Genuinely
+possible: `llama.js`'s `streamChatInner` already accumulates `tool_calls`
+fragments incrementally (name and arguments arrive in pieces), so there's a
+real signal to pattern-match against. Honest caveat to design around, not a
+reason to skip: this technique earns the most when tool-call *network* latency
+is the bottleneck. On this local single-GPU setup the model's own token
+generation is usually the dominant cost, so the win is real but concentrated —
+mainly `web_search`/`fetch_page` (real external latency), less so free/instant
+tools (widgets, math). Design it, ship it, just calibrate expectations to
+that shape of win rather than a flat "50% faster."
 
-### 4. Semantic conversation search
+### 3. Semantic conversation search
 "Find that old conversation about GPU memory even if I didn't use those exact
-words." Needs embeddings — **same infrastructure blocker already documented in
-`MEMORY-RETRIEVAL-FABLE.md`**: the router doesn't serve embeddings, there's no
-embedding model on disk yet, a dedicated `--embeddings` side-service needs
-standing up. One correction to the user's framing: **there is no ChromaDB
-anywhere in this stack today** (checked — nothing in `server/`) — the existing
-memory plan deliberately recommends brute-force cosine similarity in SQLite over
-introducing a vector database, specifically to avoid one more service to run and
-maintain on a single self-hosted box. Semantic search should reuse that same
-embedding pipeline and storage approach once Epic 2 (Memory) lands, not stand up
-ChromaDB separately. **Verdict: doable, depends entirely on the Memory epic's
-embedding infrastructure landing first — sequence it right after, don't build in
-parallel.**
+words." Needs embeddings — same infrastructure work already documented in
+`MEMORY-RETRIEVAL-FABLE.md`: the router doesn't serve embeddings, no embedding
+model is on disk yet, a dedicated `--embeddings` side-service needs standing
+up. Correction to the user's original framing: **there is no ChromaDB
+anywhere in this stack** — the existing memory plan deliberately recommends
+brute-force cosine similarity in SQLite instead, specifically to avoid running
+a whole extra database service on a single self-hosted box. Build semantic
+search on that same embedding pipeline once it exists — sequence it right
+after Memory (Epic 2), reusing the infrastructure rather than duplicating it.
 
-### 5. Forgetting-curve memory decay (Ebbinghaus)
-A scoring/ranking refinement on top of stored memories — decay relevance over
-time unless a memory gets referenced again. Elegant, and a legitimately good
-idea for keeping the memory store lean. **But it has nothing to decay until
-Memory (Epic 2) exists.** **Verdict: doable, small — sequence as a refinement
-inside Epic 2's design, not a standalone epic.**
+### 4. Forgetting-curve memory decay (Ebbinghaus)
+A scoring/ranking refinement on stored memories — relevance decays over time
+unless a memory is referenced again, keeping the store lean. Real and doable,
+but it's a refinement *inside* Epic 2's design (there's nothing to decay until
+Memory exists) — build it as part of that epic, not standalone.
 
-### 6. RAG (document knowledge base)
-The user explicitly said to skip detailing this one — it already has its own
-plan. This is **EPIC 6 — Document RAG** in `FABLE-PLAN.md`, and shares the same
-embedding blocker as items 4 and 5 above. No new triage needed here; just note
-the shared dependency chain: **Memory → embedding service exists → RAG and
-Semantic Search both become straightforward extensions of the same pipeline.**
+### 5. RAG (document knowledge base)
+The user explicitly said to skip detailing this — it already has its own plan,
+**EPIC 6 — Document RAG** in `FABLE-PLAN.md`, sharing the same embedding
+dependency as items 3-4 above. Sequence: **Memory → embedding service exists →
+RAG and Semantic Search both become straightforward extensions of the same
+pipeline.**
+
+### 6. PowerPoint / CSV export
+Two different sizes bundled in one ask:
+- **PowerPoint (.pptx)** — moderate: a deck-generation library (`pptxgenjs` on
+  the Node side — pure JS, no native build step) plus a `generate_slides` tool
+  turning a structured outline into a real downloadable file. This is also the
+  actual answer to "Google Slides" above — a `.pptx` opens directly in Google
+  Slides via upload, with no OAuth needed.
+- **CSV** — small: a tool that takes structured data (the model already emits
+  rows for the `table` widget) and offers it as a download.
+No blockers on either half; least complex item in the "attempt all" list, but
+still explicitly in scope — don't let its size make it fall off the plan.
 
 ### 7. Dynamic UI generation, extended
-The user's framing: "we already have that" (correct — 21 widget types, the
-model calls a tool and a structured card renders) "but I want the model to have
-more choice." Their own caveat is the right one: this needs a capable
-coding/reasoning model, not a 2B chat model, to reliably compose novel
+The user's own framing: "we already have that" (correct — 21 widget types, a
+tool call renders a structured card) "but I want the model to have more
+choice." Their own caveat is right: this needs a genuinely capable
+coding/reasoning model, not a small chat model, to reliably compose novel
 structured output instead of picking from the fixed widget menu. This is
-**EPIC 3 — Generative UI** in `FABLE-PLAN.md` already, specifically the
-"model-authored components" feature. **Verdict: doable, moderate — mostly an
-extension of shipped infrastructure, but gate it behind model capability (only
-offer the "compose something custom" tool to models above some capability
-threshold), exactly as the user suggested.**
+**EPIC 3 — Generative UI** in `FABLE-PLAN.md`, specifically the
+"model-authored components" feature — gate the "compose something custom"
+tool behind a model-capability threshold, exactly as the user suggested.
 
-### 8. CSV / PowerPoint export
-Splitting this because the two halves are very different sizes:
-- **CSV**: genuinely small — a tool that takes structured data (the model
-  already emits structured rows for the `table` widget) and offers it as a
-  downloadable file. This is closer to Sonnet-tier than Fable-tier; could be
-  built as a quick follow-on to the existing `show_table` widget rather than
-  needing real architecture work.
-- **PowerPoint (.pptx)**: moderate — needs a deck-generation library
-  (`pptxgenjs` on the Node side is the natural fit, pure JS, no native build
-  step) and a `generate_slides` tool that turns a structured outline into a real
-  downloadable .pptx. This *is* the answer to the "Google Slides" want above —
-  a .pptx opens directly in Google Slides via upload, with no OAuth needed.
-**Verdict: CSV is a quick win (see below), .pptx is doable and moderate, no
-blockers — could plausibly be Opus-tier rather than Fable-tier since there's no
-architecture question, just a new tool + library.**
+### 8. GBNF grammar-constrained generation + Mirostat sampling
+Both are native llama.cpp capabilities already (the diffusion CLI alone
+exposes `-j/--json-schema` right now) — this is exposing existing capability
+through DuckPond's own API and `SettingsPanel.svelte`, not building new
+infrastructure. Smallest item on the list. Still worth Fable owning as part of
+the same "make this genuinely impressive" push, since forcing valid structured
+output and tunable sampling behavior are both real, visible quality wins.
 
 ---
 
-## Not actually Fable-tier — quick wins, recommend building these directly
+## Final phase, after everything else ships: UI decluttering pass
 
-These don't need Fable's judgment; they're small, mechanical, and mostly
-frontend/config. Listed here so Fable sees the full picture, but the
-recommendation is Sonnet or Opus just does them without a design phase:
-
-- **GBNF grammar-constrained generation.** llama.cpp already supports this
-  natively (the diffusion CLI alone exposes `-j/--json-schema` and
-  `-jf/--json-schema-file` right now) — this is exposing an existing llama.cpp
-  capability through DuckPond's own API/settings, not building new
-  infrastructure.
-- **Mirostat sampling.** Also a native llama.cpp sampling parameter — exposing
-  it as a per-model setting alongside the existing temperature/top_p/top_k
-  controls in `SettingsPanel.svelte`.
-- **Full-size denoising/image preview.** `ImageStudio.svelte`'s `.preview` class
-  currently caps at `width: min(480px, 90%)` (line ~261) — straightforward CSS
-  change to make it genuinely large, matching the ask to actually see each step.
-- **UI decluttering.** Concretely: `Topbar.svelte` now has three separate icon
-  toggle-buttons crammed in (Images / Workbench / Stats, lines 28-43) plus the
-  VRAM chip plus the context bar plus settings — this is the exact clutter the
-  user is describing, and it got worse this session when the Stats button was
-  added. The fix is consolidating these into a single "more views" menu/dropdown
-  instead of one dedicated icon per view. Separately: the user isn't sure the
-  **image studio panel is worth keeping at all** now that `generate_image` works
-  fine inline in chat — worth asking them directly whether to cut it rather than
-  guessing.
-- **HTML live preview in the agent workspace.** Worth checking what already
-  exists before scoping new work — task #5 in the project's completed list says
-  the agentic coding panel already has "preview" as a shipped feature (sandbox
-  dev servers bind ports 3000-3009 per `SONNET-TODO.md`), so this may already be
-  most of the way there and just need a raw-HTML-file preview mode added
-  alongside the running-dev-server preview, not a build from zero.
+Once Fable's features land, there will be a meaningfully different app — a
+voice-mode trigger and reactive orb, possibly new export buttons (CSV/PPTX),
+new settings sections (Mirostat, grammar, per-model tool choices), maybe a
+semantic search bar. **Do this decluttering pass last, deliberately, with the
+full new feature set in view** — not incrementally per feature. Goals:
+- Reduce visual clutter across Topbar/composer/settings holistically, not
+  patch by patch.
+- Find real homes for anything that still feels bolted-on (this session
+  already moved the dev-server preview from a standalone panel into
+  `ChatFiles`, and cut Topbar down to one view button — continue that
+  direction).
+- The voice orb/button placement is explicitly called out by the user as
+  needing to be unintrusive — this is the moment to get that right against
+  the final feature set, not guess early and redo it later.
 
 ---
 
 ## For Fable
 
-This is Sonnet's read, not gospel. In particular: re-verify the complexity
-ordering above against what you'd actually design for items 1-3 — the
-speculative-tool-calling ROI caveat especially deserves your own judgment call,
-and the Council/routing item (1) may turn out simpler or harder once you're
-actually designing the classifier. Reorganize freely; the goal is a plan you'd
-actually commit to building, not one that matches this document exactly.
+This is Sonnet's read, not gospel — reorganize freely, the goal is a plan
+you'd actually commit to building. But the two firm constraints from the user
+are: **attempt everything above** (nothing gets silently dropped for
+difficulty) and **hardest-first ordering** as the attack plan. Google Slides
+and adaptive model routing are the only two items actually out of scope right
+now.

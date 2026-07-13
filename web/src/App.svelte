@@ -1,7 +1,6 @@
 <script>
   import Chat from './components/Chat.svelte';
   import Duck from './components/Duck.svelte';
-  import ImageStudio from './components/ImageStudio.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
   import SettingsPanel from './components/SettingsPanel.svelte';
@@ -9,7 +8,6 @@
   import StatsPanel from './components/StatsPanel.svelte';
   import Toast from './components/Toast.svelte';
   import Topbar from './components/Topbar.svelte';
-  import Workbench from './components/Workbench.svelte';
   import { applyPrefs } from './lib/prefs.svelte.js';
   import {
     app, checkAuth, loadConversations, loadModels, newConversation, openConversation, pollStatus,
@@ -73,11 +71,7 @@
     {/if}
     <main>
       <Topbar />
-      {#if app.view === 'bench'}
-        <Workbench />
-      {:else if app.view === 'images'}
-        <ImageStudio />
-      {:else if app.view === 'stats'}
+      {#if app.view === 'stats'}
         <StatsPanel />
       {:else}
         <Chat />
