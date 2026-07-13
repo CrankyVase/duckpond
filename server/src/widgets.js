@@ -320,6 +320,48 @@ export function makeMermaidWidget({ code, title }) {
   return widget('mermaid', { code: src.slice(0, 8000), title: title ? String(title) : null });
 }
 
+// Tiny safe math evaluator (recursive descent) — no eval/Function. Supports
+// numbers, x, + - * / ^, parens, and a fixed set of functions/constants.
+const MATH_FNS = { sin: Math.sin, cos: Math.cos, tan: Math.tan, asin: Math.asin, acos: Math.acos,
+  atan: Math.atan, sqrt: Math.sqrt, abs: Math.abs, exp: Math.exp, log: Math.log, ln: Math.log,
+  log10: Math.log10, floor: Math.floor, ceil: Math.ceil, round: Math.round, sign: Math.sign };
+function compileExpr(src) {
+  const toks = String(src).match(/\d*\.?\d+|[a-z_]+|[+\-*/^()]/gi) ?? [];
+  let i = 0;
+  const peek = () => toks[i], next = () => toks[i++];
+  function parseExpr() { let v = parseTerm(); while (peek() === '+' || peek() === '-') { const op = next(); const r = parseTerm(); v = op === '+' ? v + r : v - r; } return v; }
+  function parseTerm() { let v = parsePow(); while (peek() === '*' || peek() === '/') { const op = next(); const r = parsePow(); v = op === '*' ? v * r : v / r; } return v; }
+  function parsePow() { const v = parseUnary(); if (peek() === '^') { next(); return v ** parsePow(); } return v; }
+  function parseUnary() { if (peek() === '-') { next(); return -parseUnary(); } if (peek() === '+') { next(); return parseUnary(); } return parseAtom(); }
+  function parseAtom(x) {
+    const t = next();
+    if (t === '(') { const v = parseExpr(); if (next() !== ')') throw new Error('bad )'); return v; }
+    if (/^\d/.test(t)) return parseFloat(t);
+    if (t === 'x') return xVal;
+    if (t === 'pi') return Math.PI;
+    if (t === 'e') return Math.E;
+    if (MATH_FNS[t]) { if (next() !== '(') throw new Error('need ('); const a = parseExpr(); if (next() !== ')') throw new Error('bad )'); return MATH_FNS[t](a); }
+    throw new Error(`unknown token "${t}"`);
+  }
+  let xVal = 0;
+  return (x) => { xVal = x; i = 0; const r = parseExpr(); if (i < toks.length) throw new Error('trailing input'); return r; };
+}
+
+// Plot y = f(x) over [from,to] → a line chart widget (reuses ChartWidget).
+export function makeMathPlotWidget({ expr, from = -10, to = 10, points = 60 }) {
+  const fn = compileExpr(expr);
+  const n = Math.min(120, Math.max(10, points));
+  const a = Number(from), b = Number(to);
+  const labels = [], values = [];
+  for (let k = 0; k < n; k++) {
+    const x = a + ((b - a) * k) / (n - 1);
+    let y; try { y = fn(x); } catch { throw new Error(`can't evaluate "${expr}"`); }
+    labels.push((Math.round(x * 100) / 100).toString());
+    values.push(Number.isFinite(y) ? Math.round(y * 1000) / 1000 : 0);
+  }
+  return widget('chart', { kind: 'line', title: `y = ${expr}`, labels, series: [{ name: `f(x)`, values }] });
+}
+
 // Chart from model-supplied data (no external call). Normalizes + caps the input.
 const CHART_KINDS = new Set(['bar', 'line', 'area', 'pie', 'donut', 'scatter']);
 export function makeChartWidget({ kind = 'bar', title, labels, series, values, name, x_label, y_label }) {

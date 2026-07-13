@@ -11,8 +11,8 @@ import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websea
 import {
   makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
   makeDictionaryWidget, makeGithubWidget, makeHackerNewsWidget, makeImagesWidget, makeLinkPreviewWidget,
-  makeMapWidget, makeMermaidWidget, makeNewsWidget, makeNpmWidget, makeQrWidget, makeSpotifyWidget,
-  makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
+  makeMapWidget, makeMathPlotWidget, makeMermaidWidget, makeNewsWidget, makeNpmWidget, makeQrWidget,
+  makeSpotifyWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
@@ -280,6 +280,14 @@ const SHOW_QR_TOOL = { type: 'function', function: {
   description: 'Show a scannable QR code for a URL or text.',
   parameters: { type: 'object', properties: { text: { type: 'string' }, label: { type: 'string' } }, required: ['text'] },
 } };
+const SHOW_MATHPLOT_TOOL = { type: 'function', function: {
+  name: 'show_math_plot',
+  description: 'Plot a mathematical function y = f(x) over a range. Use for graphing equations.',
+  parameters: { type: 'object', properties: {
+    expr: { type: 'string', description: 'expression in x, e.g. "sin(x)*x" or "x^2 - 3*x + 2" (functions: sin,cos,tan,sqrt,abs,exp,ln,log; constants: pi,e)' },
+    from: { type: 'number' }, to: { type: 'number' },
+  }, required: ['expr'] },
+} };
 
 // name → builder(args, ctx). ctx has { userLoc }. Each returns a widget object.
 const WIDGET_BUILDERS = {
@@ -310,6 +318,7 @@ const WIDGET_BUILDERS = {
   show_countdown: (a) => makeCountdownWidget(a),
   show_color_palette: (a) => makeColorPaletteWidget(a),
   show_qr: (a) => makeQrWidget(a),
+  show_math_plot: (a) => makeMathPlotWidget(a),
 };
 
 const WIDGET_TOOLS = [
@@ -317,7 +326,7 @@ const WIDGET_TOOLS = [
   SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
   SHOW_DICTIONARY_TOOL, SHOW_SPOTIFY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
   SHOW_CURRENCY_TOOL, SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL,
-  SHOW_NEWS_TOOL, SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL,
+  SHOW_NEWS_TOOL, SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL, SHOW_MATHPLOT_TOOL,
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
@@ -343,6 +352,7 @@ You can drop interactive cards right into the chat:
 - show_countdown — a live countdown to a date/time.
 - show_color_palette — copyable hex color swatches.
 - show_qr — a scannable QR code for a URL or text.
+- show_math_plot — graph a function y = f(x) over a range.
 Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
 
 const GATE_POLICY = `## Project mode
