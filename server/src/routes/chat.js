@@ -9,7 +9,7 @@ import {
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
 import {
-  makeGithubWidget, makeImagesWidget, makeMapWidget, makeWeatherWidget,
+  makeChartWidget, makeGithubWidget, makeImagesWidget, makeMapWidget, makeWeatherWidget,
   makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
@@ -178,6 +178,23 @@ const SHOW_IMAGES_TOOL = { type: 'function', function: {
   }, required: ['query'] },
 } };
 
+const SHOW_CHART_TOOL = { type: 'function', function: {
+  name: 'show_chart',
+  description: 'Render an interactive chart in the chat from data you provide. Use to visualize numbers, comparisons, trends, or proportions. You supply all the data.',
+  parameters: { type: 'object', properties: {
+    kind: { type: 'string', enum: ['bar', 'line', 'area', 'pie', 'donut', 'scatter'], description: 'chart type' },
+    title: { type: 'string', description: 'short chart title' },
+    labels: { type: 'array', items: { type: 'string' }, description: 'category / x-axis labels' },
+    series: {
+      type: 'array',
+      description: 'one or more data series; each has a name and numeric values aligned to labels',
+      items: { type: 'object', properties: {
+        name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } },
+      }, required: ['values'] },
+    },
+  }, required: ['kind', 'labels', 'series'] },
+} };
+
 // name → builder(args, ctx). ctx has { userLoc }. Each returns a widget object.
 const WIDGET_BUILDERS = {
   show_weather: (a, ctx) => makeWeatherWidget({
@@ -193,11 +210,12 @@ const WIDGET_BUILDERS = {
   show_wikipedia: (a) => makeWikipediaWidget(a.title),
   show_youtube: (a) => makeYoutubeWidget(a.url),
   show_images: (a) => makeImagesWidget(a.query, a.count ?? 6),
+  show_chart: (a) => makeChartWidget(a),
 };
 
 const WIDGET_TOOLS = [
   SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL,
-  SHOW_WIKIPEDIA_TOOL, SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL,
+  SHOW_WIKIPEDIA_TOOL, SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL,
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
@@ -209,6 +227,7 @@ You can drop interactive cards right into the chat:
 - show_wikipedia — a Wikipedia summary card (title, extract, image).
 - show_youtube — embed a playable YouTube video.
 - show_images — a grid of real photos for a query.
+- show_chart — an interactive chart (bar/line/area/pie/donut/scatter) from data you provide.
 Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
 
 const GATE_POLICY = `## Project mode

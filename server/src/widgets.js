@@ -159,6 +159,24 @@ export async function makeImagesWidget(query, n = 6) {
   return widget('images', { query, images });
 }
 
+// Chart from model-supplied data (no external call). Normalizes + caps the input.
+const CHART_KINDS = new Set(['bar', 'line', 'area', 'pie', 'donut', 'scatter']);
+export function makeChartWidget({ kind = 'bar', title, labels, series, values, name, x_label, y_label }) {
+  const k = CHART_KINDS.has(kind) ? kind : 'bar';
+  const labs = (labels ?? []).map((l) => String(l)).slice(0, 30);
+  let ser;
+  if (Array.isArray(series) && series.length) {
+    ser = series.slice(0, 8).map((s, i) => ({
+      name: String(s.name ?? `Series ${i + 1}`),
+      values: (s.values ?? []).map(Number).map((v) => (Number.isFinite(v) ? v : 0)).slice(0, 30),
+    }));
+  } else {
+    ser = [{ name: String(name ?? title ?? ''), values: (values ?? []).map(Number).map((v) => (Number.isFinite(v) ? v : 0)).slice(0, 30) }];
+  }
+  if (!ser.some((s) => s.values.length)) throw new Error('chart needs numeric values');
+  return widget('chart', { kind: k, title: title ? String(title) : null, labels: labs, series: ser, xLabel: x_label ?? null, yLabel: y_label ?? null });
+}
+
 export async function makeMapWidget({ query, lat, lon, label, zoom = 14 }) {
   let loc;
   if (query) loc = await geocodeAddress(query);
