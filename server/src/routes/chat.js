@@ -406,9 +406,9 @@ Cite as you write: right after any sentence or bullet that rests on something yo
 // Search depth tiers. Caps flow into the inline-search loop; ultra also raises
 // the thinking budget, turns up reasoning, and injects a deep-research directive.
 const RESEARCH_MODES = {
-  quick: { reads: 8, searches: 6, rounds: 12, thinkMs: 60_000, ultra: false },
-  normal: { reads: 200, searches: 40, rounds: 80, thinkMs: 60_000, ultra: false },
-  ultra: { reads: 400, searches: 80, rounds: 160, thinkMs: 180_000, ultra: true },
+  quick: { reads: 8, searches: 6, rounds: 12, thinkMs: 60 * 60_000, ultra: false },
+  normal: { reads: 200, searches: 40, rounds: 80, thinkMs: 60 * 60_000, ultra: false },
+  ultra: { reads: 400, searches: 80, rounds: 160, thinkMs: 60 * 60_000, ultra: true },
 };
 const ULTRA_DIRECTIVE = `## Deep research mode (active)
 The user wants the most thorough, concrete answer you can produce. Do real research:
@@ -842,25 +842,59 @@ export default async function chatRoutes(app) {
 
       let lastTick = 0;
       const t0 = Date.now();
-      // Thinking watchdog: reasoning may run as long as it likes, but 60s of
-      // *continuous* thinking with no content and no tool call means the model
-      // is stuck — cut it off. Armed on the first reasoning token after any
-      // productive output, disarmed the moment real content or a tool fragment
-      // appears. Covers the first call and every research round (shared onDelta).
+      // Thinking watchdog: a model may think for as long as it genuinely keeps
+      // working — hard problems (especially coding) can legitimately reason for
+      // a long time. This is a true idle/hang timeout, not a cap on total
+      // thinking duration: every new reasoning token resets the clock, so it
+      // only fires if reasoning goes completely silent (stream stalled/stuck)
+      // for the full window. Disarmed the moment real content or a tool
+      // fragment appears. Covers the first call and every research round
+      // (shared onDelta).
       const THINK_TIMEOUT_MS = Number(process.env.THINK_TIMEOUT_MS ?? modeCfg.thinkMs);
       const disarmThink = () => { if (thinkTimer) { clearTimeout(thinkTimer); thinkTimer = null; } };
       const armThink = () => {
-        if (thinkTimer) return;
+        clearTimeout(thinkTimer);
         thinkTimer = setTimeout(() => {
           thinkTimer = null;
-          send({ type: 'error', message: `Stopped — the model was thinking for over ${Math.round(THINK_TIMEOUT_MS / 1000)}s without answering or using a tool.` });
+          send({ type: 'error', message: `Stopped — the model went silent mid-thought for over ${Math.round(THINK_TIMEOUT_MS / 60_000)} min without answering or using a tool.` });
           abort.abort();
         }, THINK_TIMEOUT_MS);
       };
+      // Loop detector: a model can keep emitting tokens forever without ever
+      // going idle, just repeating the same phrase — the idle watchdog above
+      // can't see that. Keep a bounded tail of reasoning text and check the
+      // most recent chunk-sized window for verbatim repeats; 3+ identical
+      // repeats in the recent tail means it's stuck in a loop, not thinking.
+      let reasoningTail = '';
+      const REPEAT_WINDOW = 200;
+      const REPEAT_SCAN = 4000; // only scan the recent tail — stay cheap on very long thinks
+      const REPEAT_COUNT = 3;
+      const checkRepeat = () => {
+        if (reasoningTail.length < REPEAT_WINDOW * REPEAT_COUNT) return false;
+        const scan = reasoningTail.slice(-REPEAT_SCAN);
+        const probe = scan.slice(-REPEAT_WINDOW);
+        let count = 0, from = 0;
+        for (;;) {
+          const i = scan.indexOf(probe, from);
+          if (i === -1) break;
+          count++;
+          from = i + 1;
+        }
+        return count >= REPEAT_COUNT;
+      };
       const onDelta = (chunk, meta) => {
-        if (meta?.reasoning) { armThink(); send({ type: 'thinking', text: meta.reasoning }); }
+        if (meta?.reasoning) {
+          armThink();
+          reasoningTail = (reasoningTail + meta.reasoning).slice(-REPEAT_SCAN * 2);
+          if (checkRepeat()) {
+            send({ type: 'error', message: 'Stopped — the model got stuck repeating itself instead of thinking.' });
+            abort.abort();
+            return;
+          }
+          send({ type: 'thinking', text: meta.reasoning });
+        }
         if (meta?.toolFrag) { disarmThink(); send({ type: 'tool_delta', ...meta.toolFrag }); }
-        if (chunk) { disarmThink(); send({ type: 'delta', text: chunk }); }
+        if (chunk) { disarmThink(); reasoningTail = ''; send({ type: 'delta', text: chunk }); }
         const now = Date.now();
         if (now - lastTick > 500 && meta?.timings?.predicted_per_second
             && (meta.timings.predicted_n ?? 0) >= 5) {
