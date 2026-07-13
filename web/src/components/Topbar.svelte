@@ -2,6 +2,7 @@
   import { app } from '../lib/state.svelte.js';
   import ContextBar from './ContextBar.svelte';
   import ModelPicker from './ModelPicker.svelte';
+  import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import CodeXml from '@lucide/svelte/icons/code-xml';
   import ImageIcon from '@lucide/svelte/icons/image';
   import MessageSquare from '@lucide/svelte/icons/message-square';
@@ -22,7 +23,7 @@
     </button>
     <ModelPicker />
   {:else}
-    <span class="viewtitle">{app.view === 'bench' ? 'Workbench' : 'Images'}</span>
+    <span class="viewtitle">{app.view === 'bench' ? 'Workbench' : app.view === 'stats' ? 'Stats' : 'Images'}</span>
   {/if}
   <div class="spacer"></div>
   <button class="ghost iconb" class:activeview={app.view === 'images'}
@@ -34,6 +35,11 @@
     onclick={() => (app.view = app.view === 'bench' ? 'chat' : 'bench')}
     title={app.view === 'bench' ? 'Back to chat' : 'Open the agent workbench'}>
     {#if app.view === 'bench'}<MessageSquare size={16} />{:else}<CodeXml size={16} />{/if}
+  </button>
+  <button class="ghost iconb" class:activeview={app.view === 'stats'}
+    onclick={() => (app.view = app.view === 'stats' ? 'chat' : 'stats')}
+    title={app.view === 'stats' ? 'Back to chat' : 'Open usage stats'}>
+    {#if app.view === 'stats'}<MessageSquare size={16} />{:else}<BarChart3 size={16} />{/if}
   </button>
   {#if vram}
     <span class="vram" class:hot={vramPct > 0.9} title="GPU VRAM used / total">

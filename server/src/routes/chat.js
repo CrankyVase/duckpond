@@ -13,7 +13,7 @@ import {
   makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
   makeDictionaryWidget, makeGithubWidget, makeHackerNewsWidget, makeImagesWidget, makeLinkPreviewWidget,
   makeMapWidget, makeMathPlotWidget, makeMermaidWidget, makeNewsWidget, makeNpmWidget, makeQrWidget,
-  makeSpotifyWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
+  makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
@@ -137,7 +137,7 @@ const SHOW_WEATHER_TOOL = { type: 'function', function: {
   description: "Show an interactive weather card in the chat for a place. Use when the user asks about weather, temperature, or forecast. Pass the place name; omit it to use the user's own location if it's available.",
   parameters: { type: 'object', properties: {
     place: { type: 'string', description: 'city or place, e.g. "Tokyo" or "Austin, TX". Omit to use the user\'s current location.' },
-    units: { type: 'string', enum: ['metric', 'imperial'], description: 'metric (°C) or imperial (°F). Default metric; use imperial for US places.' },
+    units: { type: 'string', enum: ['metric', 'imperial'], description: 'metric (°C) or imperial (°F). Default imperial (°F) — only pass metric when the place is clearly outside the US or the user asks for Celsius.' },
   }, required: [] },
 } };
 
@@ -209,11 +209,6 @@ const SHOW_DICTIONARY_TOOL = { type: 'function', function: {
   name: 'show_dictionary',
   description: 'Show a dictionary card (pronunciation, definitions, examples) for an English word.',
   parameters: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] },
-} };
-const SHOW_SPOTIFY_TOOL = { type: 'function', function: {
-  name: 'show_spotify',
-  description: 'Embed a playable Spotify track, album, or playlist. Requires a real open.spotify.com link.',
-  parameters: { type: 'object', properties: { url: { type: 'string', description: 'open.spotify.com URL' } }, required: ['url'] },
 } };
 const SHOW_LINK_TOOL = { type: 'function', function: {
   name: 'show_link_preview',
@@ -297,7 +292,7 @@ const WIDGET_BUILDERS = {
   show_weather: (a, ctx) => makeWeatherWidget({
     place: a.place?.trim() || undefined, lat: ctx.userLoc?.lat, lon: ctx.userLoc?.lon,
     label: a.place?.trim() ? undefined : ctx.userLoc?.label,
-    units: a.units === 'imperial' ? 'imperial' : 'metric',
+    units: a.units === 'metric' ? 'metric' : 'imperial',
   }),
   show_map: (a, ctx) => makeMapWidget({
     query: a.query?.trim() || undefined,
@@ -311,7 +306,6 @@ const WIDGET_BUILDERS = {
   show_chart: (a) => makeChartWidget(a),
   show_crypto: (a) => makeCryptoWidget(a.coin),
   show_dictionary: (a) => makeDictionaryWidget(a.word),
-  show_spotify: (a) => makeSpotifyWidget(a.url),
   show_link_preview: (a) => makeLinkPreviewWidget(a.url),
   show_diagram: (a) => makeMermaidWidget(a),
   show_currency: (a) => makeCurrencyWidget(a),
@@ -328,7 +322,7 @@ const WIDGET_BUILDERS = {
 const WIDGET_TOOLS = [
   SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL, SHOW_WIKIPEDIA_TOOL,
   SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
-  SHOW_DICTIONARY_TOOL, SHOW_SPOTIFY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
+  SHOW_DICTIONARY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
   SHOW_CURRENCY_TOOL, SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL,
   SHOW_NEWS_TOOL, SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL, SHOW_MATHPLOT_TOOL,
 ];
@@ -357,7 +351,6 @@ const WIDGET_LINES = [
   ['show_chart', 'an interactive chart (bar/line/area/pie/donut/scatter) from data you provide.'],
   ['show_crypto', 'a coin price card with a 7-day sparkline.'],
   ['show_dictionary', "a word's pronunciation, definitions, and examples."],
-  ['show_spotify', 'embed a Spotify track/album/playlist (needs a real link).'],
   ['show_link_preview', 'a rich preview card for any web page URL.'],
   ['show_diagram', 'render a Mermaid diagram (flowchart, sequence, mind map, etc.).'],
   ['show_currency', 'convert between two currencies at the latest rate.'],
@@ -376,7 +369,7 @@ const EMPTY_DISABLED = new Set();
 function widgetPolicyFor(disabled) {
   const lines = WIDGET_LINES.filter(([name]) => !disabled.has(name)).map(([name, desc]) => `- ${name} — ${desc}`);
   if (!lines.length) return null;
-  return `## Widgets\nYou can drop interactive cards right into the chat:\n${lines.join('\n')}\nCall them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
+  return `## Widgets\nYou can drop interactive cards right into the chat:\n${lines.join('\n')}\nBe proactive with these — don't wait to be asked for "the widget". The moment you're about to state a fact one of these covers, call the tool instead of just typing the number: a temperature or forecast → show_weather; a coin price → show_crypto; an exchange rate → show_currency; a package version/downloads → show_npm; a repo's stars/language → show_github_repo; a word's definition → show_dictionary; a place, address, or business → show_map; a date you're counting down to → show_countdown; a set of hex colors → show_color_palette; a small table of numbers or comparisons → show_table; a y=f(x) relationship → show_math_plot. Recommending a restaurant, landmark, or repo also earns its card the same way. The card renders for the user automatically, so don't paste a link, id, or coordinates in your text — just call the tool, then add one short sentence around it. You may use more than one in a reply, and it's fine to lead with the tool call before you've written anything.`;
 }
 
 const GATE_POLICY = `## Project mode

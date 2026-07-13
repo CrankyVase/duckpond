@@ -10,7 +10,6 @@
   import ChartWidget from './widgets/ChartWidget.svelte';
   import CryptoWidget from './widgets/CryptoWidget.svelte';
   import DictionaryWidget from './widgets/DictionaryWidget.svelte';
-  import SpotifyWidget from './widgets/SpotifyWidget.svelte';
   import LinkPreviewWidget from './widgets/LinkPreviewWidget.svelte';
   import MermaidWidget from './widgets/MermaidWidget.svelte';
   import CurrencyWidget from './widgets/CurrencyWidget.svelte';
@@ -27,7 +26,7 @@
   let node = $state(null);
   let saving = $state(false);
   // exclude embeds/WebGL that html-to-image can't capture (map=WebGL, iframes=cross-origin)
-  const NO_SAVE = new Set(['map', 'youtube', 'spotify']);
+  const NO_SAVE = new Set(['map', 'youtube']);
   const canSave = $derived(widget?.type && !NO_SAVE.has(widget.type));
 
   async function savePng() {
@@ -63,8 +62,6 @@
     <CryptoWidget data={widget.data} />
   {:else if widget?.type === 'dictionary'}
     <DictionaryWidget data={widget.data} />
-  {:else if widget?.type === 'spotify'}
-    <SpotifyWidget data={widget.data} />
   {:else if widget?.type === 'link'}
     <LinkPreviewWidget data={widget.data} />
   {:else if widget?.type === 'mermaid'}
@@ -96,11 +93,16 @@
 
 <style>
   .wcard { position: relative; width: fit-content; max-width: 100%; }
+  /* sits half outside the card, on the border — a corner badge rather than an
+     overlay, so it never covers whatever a widget draws in its own top-right
+     corner (weather icon, avatar, etc). Hover still works: it's a DOM child of
+     .wcard, so hovering it counts as hovering .wcard regardless of the
+     negative offset putting it outside .wcard's own box. */
   .dl {
-    position: absolute; top: 6px; right: 6px; z-index: 4;
-    display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px;
-    color: var(--text-dim); background: color-mix(in srgb, var(--bg-card) 82%, transparent);
-    border: 1px solid var(--border-soft); cursor: pointer;
+    position: absolute; top: -10px; right: -10px; z-index: 4;
+    display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+    color: var(--text-dim); background: var(--bg-card);
+    border: 1px solid var(--border-soft); box-shadow: var(--shadow-lg); cursor: pointer;
     opacity: 0; transition: opacity 140ms ease, background 140ms ease;
   }
   .wcard:hover .dl { opacity: 1; }

@@ -10,7 +10,7 @@
 // in with no code change.
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { listModels, unloadModel } from './llama.js';
 
 const BIN = process.env.DIFFUSION_CLI
@@ -34,7 +34,28 @@ export const diffusionBusy = () => busy;
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]|\x1b[c=>]|\r/g;
-const CLEAR = /\x1b\[2J|\x1b\[H\x1b\[J|\x1b\[3J/;
+
+// The diffusion-gemma CLI's harmony-style chat template puts its scratchpad
+// in a <|channel>thought ... <channel|> block before the real answer, and
+// (in -cnv/conversation mode) appends its own perf-stats trailer + a bare
+// "> " REPL prompt after the answer. None of that belongs in the saved
+// message — strip down to just the final answer text.
+function extractFinalAnswer(raw) {
+  let t = String(raw ?? '');
+  const lastChan = t.lastIndexOf('<channel|>');
+  if (lastChan !== -1) t = t.slice(lastChan + '<channel|>'.length);
+  t = t.split(/\n\s*total time:/)[0];
+  t = t.replace(/^\s*>\s*$/gm, '');
+  return t.trim();
+}
+// LLaDA/Dream (old b9966 binary) repaint with a full clear (\x1b[2J or
+// \x1b[H\x1b[J). The diffusion-gemma EB decoder (PR #24423,
+// llama-diffusion-cli) instead uses the terminal "synchronized output" idiom:
+// each redraw is bracketed by \x1b[?2026l\x1b[?2026h (end/begin a sync batch)
+// immediately followed by a cursor-up + carriage-return to overwrite the
+// canvas in place — there's no full-screen clear at all. Match both so the
+// same parser handles either binary.
+const CLEAR = /\x1b\[2J|\x1b\[H\x1b\[J|\x1b\[3J|\x1b\[\?2026l\x1b\[\?2026h\x1b\[\d+A\r/;
 
 // A router model id (or a bare gguf name) is a diffusion model if its name
 // matches the family markers or it's explicitly listed in DIFFUSION_MODEL_IDS.
@@ -127,12 +148,17 @@ export async function generateDiffusion({
       modelFile, prompt: String(prompt).slice(0, 6000), systemPrompt: systemPrompt.slice(0, 4000),
       tokens: nTokens, steps: nSteps,
     });
+    // from-source builds (diffusion-gemma) link their ggml/llama .so's
+    // alongside the binary rather than baking everything in statically like
+    // the old official release builds did — point the loader at BIN's own
+    // directory so the deployed copy works even if the build tree is gone.
+    const spawnEnv = { ...process.env, LD_LIBRARY_PATH: [dirname(BIN), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':') };
     if (USE_PTY) {
       // wrap in `script` so the CLI believes it has a tty
       const inner = [BIN, ...argv].map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`).join(' ');
-      child = spawn('script', ['-qec', inner, '/dev/null'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn('script', ['-qec', inner, '/dev/null'], { stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
     } else {
-      child = spawn(BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(BIN, argv, { stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
     }
     log?.info({ bin: BIN, mode: MODE, pty: USE_PTY }, 'diffusion run started');
 
@@ -182,7 +208,8 @@ export async function generateDiffusion({
     clearTimeout(trailer);
     signal?.removeEventListener('abort', onAbort);
 
-    const final = (buf.replace(ANSI, '').trim() || frame.trim());
+    const rawFinal = (buf.replace(ANSI, '').trim() || frame.trim());
+    const final = extractFinalAnswer(rawFinal);
     if (killed) return { text: final, stopped: true, ms: Date.now() - t0 };
     if (code !== 0 && !final) {
       const lastErr = errTail.split('\n').filter(Boolean).pop() ?? '';

@@ -21,7 +21,6 @@ export const TOOL_CATALOG = [
   { id: 'show_chart', label: 'Chart', category: 'Widgets', description: 'Bar, line, area, pie, donut, or scatter charts built from data the model provides.' },
   { id: 'show_crypto', label: 'Crypto price card', category: 'Widgets', description: 'A coin’s price with a 7-day sparkline.' },
   { id: 'show_dictionary', label: 'Dictionary card', category: 'Widgets', description: 'A word’s pronunciation, definitions, and example sentences.' },
-  { id: 'show_spotify', label: 'Spotify embed', category: 'Widgets', description: 'An embedded Spotify track, album, or playlist player.' },
   { id: 'show_link_preview', label: 'Link preview', category: 'Widgets', description: 'A rich preview card for any web page URL.' },
   { id: 'show_diagram', label: 'Diagram (Mermaid)', category: 'Widgets', description: 'A rendered, copyable flowchart / sequence / mind-map diagram.' },
   { id: 'show_currency', label: 'Currency conversion', category: 'Widgets', description: 'Converts between two currencies at the latest exchange rate.' },

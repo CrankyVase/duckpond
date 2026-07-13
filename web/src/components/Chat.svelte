@@ -55,6 +55,9 @@
   const path = $derived(app.conv ? visiblePath(app.conv.messages, app.conv.active_leaf_id) : []);
   const kidsMap = $derived(app.conv ? childrenMap(app.conv.messages) : new Map());
   const busy = $derived(!!app.streaming);
+  // the stream in app.streaming may belong to a conversation the user has
+  // since navigated away from — only show its live bubble on that conversation
+  const streamingHere = $derived(app.streaming && app.conv && app.streaming.convId === app.conv.id ? app.streaming : null);
 
   const IMG_PHASE = {
     starting: 'starting the image…',
@@ -99,13 +102,16 @@
     });
   }
 
-  function handleEvent(ev) {
+  // true while `convId` (the conversation this stream belongs to) is the one
+  // currently on screen — guards every place that would otherwise mutate
+  // app.conv, since app.conv may now point at a conversation the user
+  // switched to while this stream kept running in the background.
+  function handleEvent(ev, convId) {
     const s = app.streaming;
+    const here = app.conv?.id === convId;
     switch (ev.type) {
       case 'user_msg':
-        app.conv.messages.push(ev.msg);
-        app.conv.active_leaf_id = ev.msg.id;
-        scrollToBottom(true);
+        if (here) { app.conv.messages.push(ev.msg); app.conv.active_leaf_id = ev.msg.id; scrollToBottom(true); }
         break;
       case 'queue':
         // another user holds the GPU — ev.position is how many are ahead (0 = ours now)
@@ -127,8 +133,10 @@
         break;
       case 'agent_start':
         if (s) { s.run = ev.run; s.events = []; }
-        if (app.conv && !app.conv.workspace_id) app.conv.workspace_id = ev.workspace.id;
-        app.filesVersion++;
+        if (here) {
+          if (app.conv && !app.conv.workspace_id) app.conv.workspace_id = ev.workspace.id;
+          app.filesVersion++;
+        }
         break;
       case 'agent': {
         if (!s) break;
@@ -149,24 +157,26 @@
           s.pendingApproval = null;
           s.events?.push(e);
         } else if (e.type === 'diff') {
-          app.filesVersion++;
+          if (here) app.filesVersion++;
           s.events?.push(e);
         } else if (e.type === 'status') {
           if (e.status !== 'waiting_approval') s.pendingApproval = null;
         } else {
           s.events?.push(e);
         }
-        scrollToBottom();
+        if (here) scrollToBottom();
         break;
       }
       case 'done':
         if (raf) { cancelAnimationFrame(raf); raf = 0; pendText = ''; pendThink = ''; }
         toolBuf = null;
-        app.conv.messages.push(ev.msg);
-        app.conv.active_leaf_id = ev.msg.id;
+        if (here) {
+          app.conv.messages.push(ev.msg);
+          app.conv.active_leaf_id = ev.msg.id;
+          if (ev.msg.run_id) app.filesVersion++;
+          scrollToBottom();
+        }
         app.streaming = null;
-        if (ev.msg.run_id) app.filesVersion++;
-        scrollToBottom();
         break;
       case 'image_job':
         if (s) { s.loading = false; s.image = { prompt: ev.prompt, phase: 'starting', step: null, steps: null, preview: null }; }
@@ -200,7 +210,7 @@
           }
           se.reading = null;
         } else if (ev.phase === 'done') { se.active = false; se.reading = null; }
-        scrollToBottom();
+        if (here) scrollToBottom();
         break;
       }
       case 'reset_text':
@@ -219,11 +229,11 @@
         s.loading = false;
         // load-phase frames (n===0) are status text; step frames are the canvas
         s.diffusion = { step: ev.n, steps: ev.steps, text: ev.text, phase: ev.phase };
-        scrollToBottom();
+        if (here) scrollToBottom();
         break;
-      case 'context': app.context = { used: ev.used, budget: ev.budget }; break;
+      case 'context': if (here) app.context = { used: ev.used, budget: ev.budget }; break;
       case 'title':
-        app.conv.title = ev.title;
+        if (here) app.conv.title = ev.title;
         loadConversations();
         break;
       case 'error': if (s) s.error = ev.message; break;
@@ -232,27 +242,29 @@
 
   async function run(body) {
     if (!app.conv || busy) return;
+    const convId = app.conv.id;
     app.streaming = {
-      convId: app.conv.id, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
+      convId, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
       run: null, events: [], liveTool: null, pendingApproval: null, image: null, diffusion: null, queued: 0,
       search: null, widgets: [],
     };
     pendText = ''; pendThink = ''; toolBuf = null;
     // search depth; location is resolved server-side from the request's IP
     const outBody = { ...body, researchMode: prefs.researchMode };
-    stream = sse(`/api/conversations/${app.conv.id}/chat`, outBody, handleEvent);
+    stream = sse(`/api/conversations/${convId}/chat`, outBody, (ev) => handleEvent(ev, convId));
     try {
       await stream.done;
     } catch (err) {
       if (app.streaming) app.streaming.error = String(err.message ?? err);
     } finally {
       if (app.streaming) {
-        // stopped or errored before 'done' — keep whatever exists. If this was
-        // an agent run, attach run_id so the replay card shows the recorded
-        // work instead of it all vanishing from the chat.
-        if (app.streaming.text || app.streaming.error || app.streaming.run) {
+        // stopped or errored before 'done' — keep whatever exists, but only if
+        // the conversation it belongs to is still the one on screen; otherwise
+        // there's nowhere honest to put it (the server never persisted a
+        // partial for a plain-chat stop) and we just drop it.
+        if (app.conv?.id === convId && (app.streaming.text || app.streaming.error || app.streaming.run)) {
           app.conv.messages.push({
-            id: `tmp-${Date.now()}`, conv_id: app.conv.id,
+            id: `tmp-${Date.now()}`, conv_id: convId,
             parent_id: app.conv.active_leaf_id, role: 'assistant',
             run_id: app.streaming.run?.id ?? null,
             content: app.streaming.text + (app.streaming.error ? `\n\n> ${app.streaming.error}` : '\n\n> stopped'),
@@ -262,8 +274,7 @@
         app.streaming = null;
       }
       stream = null;
-      refreshContext();
-      maybeAutoCompact();
+      if (app.conv?.id === convId) { refreshContext(); maybeAutoCompact(); }
     }
   }
 
@@ -318,24 +329,24 @@
 
   // mascot mood while a reply streams
   const activeToolName = $derived.by(() => {
-    if (app.streaming?.liveTool?.name) return app.streaming.liveTool.name;
-    const events = app.streaming?.events;
+    if (streamingHere?.liveTool?.name) return streamingHere.liveTool.name;
+    const events = streamingHere?.events;
     if (!events?.length) return null;
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i].type === 'tool_call') return events[i].name;
     }
     return null;
   });
-  const duckState = $derived(!app.streaming ? 'idle'
-    : app.streaming.queued ? 'sleep'
-    : app.streaming.error ? 'error'
-    : app.streaming.diffusion ? 'thinkhard'
-    : app.streaming.image ? 'image'
-    : (app.streaming.search?.active && !app.streaming.text) ? 'search'
+  const duckState = $derived(!streamingHere ? 'idle'
+    : streamingHere.queued ? 'sleep'
+    : streamingHere.error ? 'error'
+    : streamingHere.diffusion ? 'thinkhard'
+    : streamingHere.image ? 'image'
+    : (streamingHere.search?.active && !streamingHere.text) ? 'search'
     : (activeToolName === 'web_search' || activeToolName === 'fetch_page') ? 'search'
-    : (app.streaming.liveTool || app.streaming.events?.length) ? 'code'
-    : (app.streaming.thinking && !app.streaming.text) ? 'thinkhard'
-    : app.streaming.loading ? 'think'
+    : (streamingHere.liveTool || streamingHere.events?.length) ? 'code'
+    : (streamingHere.thinking && !streamingHere.text) ? 'thinkhard'
+    : streamingHere.loading ? 'think'
     : 'talk');
 
   function onEdit(msg, newContent) {
@@ -389,71 +400,71 @@
  <div class="main">
   <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="thread">
-      {#if !path.length && !busy}
+      {#if !path.length && !streamingHere}
         <Welcome onsuggest={suggest} />
       {/if}
       {#each path as m, i (m.id)}
-        <Message msg={m} siblings={siblingsOf(m)} last={i === path.length - 1 && !busy}
+        <Message msg={m} siblings={siblingsOf(m)} last={i === path.length - 1 && !streamingHere}
           onedit={onEdit} onregenerate={onRegenerate} onpin={onPin}
           onbranch={onBranch} ondelete={onDelete} />
       {/each}
-      {#if app.streaming}
-        {#if app.streaming.events?.length}
+      {#if streamingHere}
+        {#if streamingHere.events?.length}
           <div class="agentwork fade-in">
-            <RunFeed events={app.streaming.events}
-              pendingApproval={app.streaming.pendingApproval} onapprove={approve} />
+            <RunFeed events={streamingHere.events}
+              pendingApproval={streamingHere.pendingApproval} onapprove={approve} />
           </div>
         {/if}
         <Message streaming mood={duckState}
-          msg={{ role: 'assistant', content: app.streaming.text, thinking: app.streaming.thinking || null, search: app.streaming.search, widgets: app.streaming.widgets, pinned: 0 }} />
-        {#if app.streaming.liveTool}
+          msg={{ role: 'assistant', content: streamingHere.text, thinking: streamingHere.thinking || null, search: streamingHere.search, widgets: streamingHere.widgets, pinned: 0 }} />
+        {#if streamingHere.liveTool}
           <div class="agentwork live fade-in">
-            <RunFeed events={[]} liveTool={app.streaming.liveTool} />
+            <RunFeed events={[]} liveTool={streamingHere.liveTool} />
           </div>
         {/if}
-        {#if app.streaming.diffusion}
-          {#if app.streaming.diffusion.phase === 'load' || app.streaming.diffusion.step === 0}
+        {#if streamingHere.diffusion}
+          {#if streamingHere.diffusion.phase === 'load' || streamingHere.diffusion.step === 0}
             <div class="diffjob fade-in">
-              <span class="diffphase shimmer">{app.streaming.diffusion.text}</span>
+              <span class="diffphase shimmer">{streamingHere.diffusion.text}</span>
             </div>
           {:else}
             <div class="diffjob fade-in">
               <div class="diffhead">
                 <span class="difftag">denoising</span>
-                <span class="diffstep">step {app.streaming.diffusion.step}/{app.streaming.diffusion.steps}</span>
+                <span class="diffstep">step {streamingHere.diffusion.step}/{streamingHere.diffusion.steps}</span>
               </div>
-              <pre class="diffcanvas">{app.streaming.diffusion.text}</pre>
+              <pre class="diffcanvas">{streamingHere.diffusion.text}</pre>
             </div>
           {/if}
         {/if}
-        {#if app.streaming.image}
+        {#if streamingHere.image}
           <div class="imgjob fade-in">
-            {#if app.streaming.image.preview}
-              <img class="imgpreview" src={app.streaming.image.preview} alt="image taking shape" />
+            {#if streamingHere.image.preview}
+              <img class="imgpreview" src={streamingHere.image.preview} alt="image taking shape" />
             {:else}
               <div class="imgshimmer"></div>
             {/if}
             <span class="imgphase">
-              {app.streaming.image.phase === 'denoising' && app.streaming.image.step
-                ? `step ${app.streaming.image.step}/${app.streaming.image.steps}`
-                : (IMG_PHASE[app.streaming.image.phase] ?? `${app.streaming.image.phase}…`)}
+              {streamingHere.image.phase === 'denoising' && streamingHere.image.step
+                ? `step ${streamingHere.image.step}/${streamingHere.image.steps}`
+                : (IMG_PHASE[streamingHere.image.phase] ?? `${streamingHere.image.phase}…`)}
             </span>
           </div>
         {/if}
         <div class="status">
-          {#if app.streaming.queued}
-            <span class="shimmer">waiting for the GPU… {app.streaming.queued} ahead of you</span>
-          {:else if app.streaming.loading}
+          {#if streamingHere.queued}
+            <span class="shimmer">waiting for the GPU… {streamingHere.queued} ahead of you</span>
+          {:else if streamingHere.loading}
             <span class="shimmer">loading {app.conv?.model_id}…</span>
-          {:else if app.streaming.pendingApproval}
+          {:else if streamingHere.pendingApproval}
             <span class="shimmer">waiting for your approval…</span>
           {:else if duckState === 'search'}
             <span class="shimmer">searching the web…</span>
           {:else if duckState === 'code'}
             <span class="shimmer">building…</span>
-            {#if app.streaming.tokS}<span class="mono dimtok">{app.streaming.tokS.toFixed(1)} tok/s</span>{/if}
-          {:else if app.streaming.tokS}
-            <span class="mono">{app.streaming.tokS.toFixed(1)} tok/s · {app.streaming.n} tok</span>
+            {#if streamingHere.tokS}<span class="mono dimtok">{streamingHere.tokS.toFixed(1)} tok/s</span>{/if}
+          {:else if streamingHere.tokS}
+            <span class="mono">{streamingHere.tokS.toFixed(1)} tok/s · {streamingHere.n} tok</span>
           {/if}
         </div>
       {/if}

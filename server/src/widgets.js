@@ -196,18 +196,6 @@ export async function makeDictionaryWidget(word) {
   return widget('dictionary', { word: e.word, phonetic, audio: audio && audio.startsWith('//') ? 'https:' + audio : audio, meanings });
 }
 
-// Spotify embed (track/album/playlist/artist) via public embed URL — no key.
-const SPOTIFY_RE = /open\.spotify\.com\/(track|album|playlist|artist|episode|show)\/([A-Za-z0-9]+)/;
-export async function makeSpotifyWidget(input) {
-  const m = String(input || '').match(SPOTIFY_RE);
-  if (!m) throw new Error('not a Spotify link');
-  const [, type, id] = m;
-  let title = '', thumb = null;
-  try { const o = await getJson(`https://open.spotify.com/oembed?url=https://open.spotify.com/${type}/${id}`); title = o.title ?? ''; thumb = o.thumbnail_url ?? null; }
-  catch { /* embed works without meta */ }
-  return widget('spotify', { kind: type, embed: `https://open.spotify.com/embed/${type}/${id}`, title, thumb });
-}
-
 // Generic OpenGraph link-preview card. Guarded by the public-http SSRF check.
 export async function makeLinkPreviewWidget(rawUrl) {
   const u = assertPublicHttp(rawUrl);
