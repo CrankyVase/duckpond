@@ -8,13 +8,19 @@
   import YoutubeWidget from './widgets/YoutubeWidget.svelte';
   import ImagesWidget from './widgets/ImagesWidget.svelte';
   import ChartWidget from './widgets/ChartWidget.svelte';
+  import CryptoWidget from './widgets/CryptoWidget.svelte';
+  import DictionaryWidget from './widgets/DictionaryWidget.svelte';
+  import SpotifyWidget from './widgets/SpotifyWidget.svelte';
+  import LinkPreviewWidget from './widgets/LinkPreviewWidget.svelte';
+  import MermaidWidget from './widgets/MermaidWidget.svelte';
   import Download from '@lucide/svelte/icons/download';
 
   let { widget } = $props();
   let node = $state(null);
   let saving = $state(false);
-  // map is WebGL + cross-origin tiles → html-to-image can't capture it reliably
-  const canSave = $derived(widget?.type && widget.type !== 'map' && widget.type !== 'youtube');
+  // exclude embeds/WebGL that html-to-image can't capture (map=WebGL, iframes=cross-origin)
+  const NO_SAVE = new Set(['map', 'youtube', 'spotify']);
+  const canSave = $derived(widget?.type && !NO_SAVE.has(widget.type));
 
   async function savePng() {
     if (!node || saving) return;
@@ -45,6 +51,16 @@
     <ImagesWidget data={widget.data} />
   {:else if widget?.type === 'chart'}
     <ChartWidget data={widget.data} />
+  {:else if widget?.type === 'crypto'}
+    <CryptoWidget data={widget.data} />
+  {:else if widget?.type === 'dictionary'}
+    <DictionaryWidget data={widget.data} />
+  {:else if widget?.type === 'spotify'}
+    <SpotifyWidget data={widget.data} />
+  {:else if widget?.type === 'link'}
+    <LinkPreviewWidget data={widget.data} />
+  {:else if widget?.type === 'mermaid'}
+    <MermaidWidget data={widget.data} />
   {:else}
     <div class="wunknown">Unsupported widget: {widget?.type}</div>
   {/if}

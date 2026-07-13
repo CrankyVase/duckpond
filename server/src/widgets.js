@@ -7,6 +7,7 @@
 //   - Nominatim / OpenStreetMap (map geocoding + reverse geocoding)
 
 import { randomUUID } from 'node:crypto';
+import { assertPublicHttp } from './websearch.js';
 
 const UA = 'DuckPond/1.0 (self-hosted assistant)';
 const timeout = (ms) => AbortSignal.timeout(ms);
@@ -157,6 +158,78 @@ export async function makeImagesWidget(query, n = 6) {
     }));
   if (!images.length) throw new Error(`no images found for "${query}"`);
   return widget('images', { query, images });
+}
+
+// Crypto price card + 7-day sparkline (CoinGecko, free no key).
+export async function makeCryptoWidget(coin) {
+  const q = String(coin || '').trim();
+  let id = q.toLowerCase();
+  // resolve symbols / names ("btc", "Ethereum") to a CoinGecko id
+  try {
+    const s = await getJson(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(q)}`);
+    if (s.coins?.[0]) id = s.coins[0].id;
+  } catch { /* fall back to the raw input as id */ }
+  const d = await getJson(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${encodeURIComponent(id)}&sparkline=true&price_change_percentage=24h`);
+  const c = Array.isArray(d) ? d[0] : null;
+  if (!c) throw new Error(`couldn't find coin "${coin}"`);
+  return widget('crypto', {
+    name: c.name, symbol: (c.symbol || '').toUpperCase(), image: c.image,
+    price: c.current_price, change24h: c.price_change_percentage_24h,
+    marketCap: c.market_cap, high24h: c.high_24h, low24h: c.low_24h,
+    spark: (c.sparkline_in_7d?.price ?? []).filter((_, i) => i % 4 === 0), // thin to ~42 pts
+  });
+}
+
+// Dictionary definition card (dictionaryapi.dev, free no key).
+export async function makeDictionaryWidget(word) {
+  const d = await getJson(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(String(word).trim())}`);
+  const e = Array.isArray(d) ? d[0] : null;
+  if (!e) throw new Error(`no definition for "${word}"`);
+  const phonetic = e.phonetic || e.phonetics?.find((p) => p.text)?.text || '';
+  const audio = e.phonetics?.find((p) => p.audio)?.audio || null;
+  const meanings = (e.meanings ?? []).slice(0, 3).map((m) => ({
+    pos: m.partOfSpeech,
+    defs: (m.definitions ?? []).slice(0, 2).map((x) => ({ def: x.definition, example: x.example ?? null })),
+    synonyms: (m.synonyms ?? []).slice(0, 5),
+  }));
+  return widget('dictionary', { word: e.word, phonetic, audio: audio && audio.startsWith('//') ? 'https:' + audio : audio, meanings });
+}
+
+// Spotify embed (track/album/playlist/artist) via public embed URL — no key.
+const SPOTIFY_RE = /open\.spotify\.com\/(track|album|playlist|artist|episode|show)\/([A-Za-z0-9]+)/;
+export async function makeSpotifyWidget(input) {
+  const m = String(input || '').match(SPOTIFY_RE);
+  if (!m) throw new Error('not a Spotify link');
+  const [, type, id] = m;
+  let title = '', thumb = null;
+  try { const o = await getJson(`https://open.spotify.com/oembed?url=https://open.spotify.com/${type}/${id}`); title = o.title ?? ''; thumb = o.thumbnail_url ?? null; }
+  catch { /* embed works without meta */ }
+  return widget('spotify', { kind: type, embed: `https://open.spotify.com/embed/${type}/${id}`, title, thumb });
+}
+
+// Generic OpenGraph link-preview card. Guarded by the public-http SSRF check.
+export async function makeLinkPreviewWidget(rawUrl) {
+  const u = assertPublicHttp(rawUrl);
+  const res = await fetch(u, { signal: timeout(10_000), redirect: 'follow', headers: { 'user-agent': UA } });
+  if (!res.ok) throw new Error(`fetch ${res.status}`);
+  const html = (await res.text()).slice(0, 400_000);
+  const meta = (prop) => html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`, 'i'))?.[1]
+    || html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`, 'i'))?.[1] || null;
+  const dec = (s) => s && s.replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  const title = dec(meta('og:title')) || dec(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim()) || u.hostname;
+  let image = meta('og:image');
+  if (image && image.startsWith('/')) image = u.origin + image;
+  return widget('link', {
+    url: u.href, title, description: dec(meta('og:description')) || null,
+    image: image || null, site: dec(meta('og:site_name')) || u.hostname.replace(/^www\./, ''),
+  });
+}
+
+// Mermaid diagram from model-supplied source (rendered client-side; no API).
+export function makeMermaidWidget({ code, title }) {
+  const src = String(code || '').trim();
+  if (!src) throw new Error('mermaid needs diagram source');
+  return widget('mermaid', { code: src.slice(0, 8000), title: title ? String(title) : null });
 }
 
 // Chart from model-supplied data (no external call). Normalizes + caps the input.

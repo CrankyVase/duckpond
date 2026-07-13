@@ -37,7 +37,7 @@ export function sourceLabel(rawUrl) {
 }
 
 // friends-instance SSRF guard: public http(s) only, no loopback/LAN targets
-function assertPublicHttp(raw) {
+export function assertPublicHttp(raw) {
   let u;
   try { u = new URL(raw); } catch { throw new Error('invalid URL'); }
   if (!/^https?:$/.test(u.protocol)) throw new Error('only http(s) URLs');

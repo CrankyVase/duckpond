@@ -9,7 +9,8 @@ import {
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
 import {
-  makeChartWidget, makeGithubWidget, makeImagesWidget, makeMapWidget, makeWeatherWidget,
+  makeChartWidget, makeCryptoWidget, makeDictionaryWidget, makeGithubWidget, makeImagesWidget,
+  makeLinkPreviewWidget, makeMapWidget, makeMermaidWidget, makeSpotifyWidget, makeWeatherWidget,
   makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
@@ -195,6 +196,35 @@ const SHOW_CHART_TOOL = { type: 'function', function: {
   }, required: ['kind', 'labels', 'series'] },
 } };
 
+const SHOW_CRYPTO_TOOL = { type: 'function', function: {
+  name: 'show_crypto',
+  description: 'Show a cryptocurrency price card with a 7-day sparkline. Use when asked about a coin\'s price.',
+  parameters: { type: 'object', properties: { coin: { type: 'string', description: 'coin name or symbol, e.g. "bitcoin" or "eth"' } }, required: ['coin'] },
+} };
+const SHOW_DICTIONARY_TOOL = { type: 'function', function: {
+  name: 'show_dictionary',
+  description: 'Show a dictionary card (pronunciation, definitions, examples) for an English word.',
+  parameters: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] },
+} };
+const SHOW_SPOTIFY_TOOL = { type: 'function', function: {
+  name: 'show_spotify',
+  description: 'Embed a playable Spotify track, album, or playlist. Requires a real open.spotify.com link.',
+  parameters: { type: 'object', properties: { url: { type: 'string', description: 'open.spotify.com URL' } }, required: ['url'] },
+} };
+const SHOW_LINK_TOOL = { type: 'function', function: {
+  name: 'show_link_preview',
+  description: 'Show a rich preview card (title, description, image) for any web page URL.',
+  parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+} };
+const SHOW_MERMAID_TOOL = { type: 'function', function: {
+  name: 'show_diagram',
+  description: 'Render a diagram (flowchart, sequence, mind map, gantt, etc.) from Mermaid source. Use for flows, architectures, timelines, or relationships. Provide valid Mermaid code.',
+  parameters: { type: 'object', properties: {
+    code: { type: 'string', description: 'Mermaid diagram source, e.g. "graph TD; A-->B;"' },
+    title: { type: 'string' },
+  }, required: ['code'] },
+} };
+
 // name → builder(args, ctx). ctx has { userLoc }. Each returns a widget object.
 const WIDGET_BUILDERS = {
   show_weather: (a, ctx) => makeWeatherWidget({
@@ -211,11 +241,17 @@ const WIDGET_BUILDERS = {
   show_youtube: (a) => makeYoutubeWidget(a.url),
   show_images: (a) => makeImagesWidget(a.query, a.count ?? 6),
   show_chart: (a) => makeChartWidget(a),
+  show_crypto: (a) => makeCryptoWidget(a.coin),
+  show_dictionary: (a) => makeDictionaryWidget(a.word),
+  show_spotify: (a) => makeSpotifyWidget(a.url),
+  show_link_preview: (a) => makeLinkPreviewWidget(a.url),
+  show_diagram: (a) => makeMermaidWidget(a),
 };
 
 const WIDGET_TOOLS = [
-  SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL,
-  SHOW_WIKIPEDIA_TOOL, SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL,
+  SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL, SHOW_WIKIPEDIA_TOOL,
+  SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
+  SHOW_DICTIONARY_TOOL, SHOW_SPOTIFY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
@@ -228,6 +264,11 @@ You can drop interactive cards right into the chat:
 - show_youtube — embed a playable YouTube video.
 - show_images — a grid of real photos for a query.
 - show_chart — an interactive chart (bar/line/area/pie/donut/scatter) from data you provide.
+- show_crypto — a coin price card with a 7-day sparkline.
+- show_dictionary — a word's pronunciation, definitions, and examples.
+- show_spotify — embed a Spotify track/album/playlist (needs a real link).
+- show_link_preview — a rich preview card for any web page URL.
+- show_diagram — render a Mermaid diagram (flowchart, sequence, mind map, etc.).
 Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
 
 const GATE_POLICY = `## Project mode
