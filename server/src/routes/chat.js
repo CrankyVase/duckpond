@@ -16,6 +16,7 @@ import {
   makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
+import { indexMessage } from '../memory.js';
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
 import { acquireGpu } from '../gpuqueue.js';
@@ -89,7 +90,9 @@ function insertMessage(convId, parentId, role, content, extra = {}) {
       runId: extra.runId ?? null,
       searchJson: extra.searchJson ?? null,
     });
-  return db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
+  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
+  indexMessage(msg); // fire-and-forget: semantic-search vector for this message
+  return msg;
 }
 
 function setLeaf(convId, leafId) {

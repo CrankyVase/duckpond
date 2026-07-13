@@ -156,6 +156,41 @@ CREATE TABLE IF NOT EXISTS usage_stats (
 );
 `);
 
+// semantic search / memory / RAG share one embedding pipeline (embed.js).
+// Vectors are Float32Array BLOBs; brute-force cosine in JS is plenty at this
+// scale (two users) — deliberately no vector-DB dependency.
+db.exec(`
+CREATE TABLE IF NOT EXISTS message_vectors (
+  message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conv_id INTEGER NOT NULL,
+  dim INTEGER NOT NULL,
+  vec BLOB NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_msgvec_user ON message_vectors(user_id);
+
+-- lexical half of hybrid search: external-content FTS5 kept in sync by triggers
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+  content, content='messages', content_rowid='id'
+);
+CREATE TRIGGER IF NOT EXISTS msg_fts_ins AFTER INSERT ON messages BEGIN
+  INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS msg_fts_del AFTER DELETE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS msg_fts_upd AFTER UPDATE OF content ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+  INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+`);
+// one-time FTS backfill for rows that predate the triggers
+if (!db.prepare("SELECT value FROM app_settings WHERE key = 'fts_built'").get()) {
+  db.exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
+  db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('fts_built', '1')").run();
+}
+
 // additive migrations — ignore "duplicate column" once applied
 try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /* exists */ }
 // chat agent mode: an assistant message can embed an agent run; a conversation

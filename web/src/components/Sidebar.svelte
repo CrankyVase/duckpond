@@ -9,6 +9,26 @@
   import X from '@lucide/svelte/icons/x';
 
   let query = $state('');
+  // deep search: Enter runs hybrid semantic+exact search over all message
+  // content (typing still filters titles instantly, like before)
+  let deep = $state(null);      // { q, results, semanticOk } | null
+  let searching = $state(false);
+
+  async function deepSearch() {
+    const q = query.trim();
+    if (!q) return;
+    searching = true;
+    try {
+      const r = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      deep = { q, ...r };
+    } catch { deep = { q, results: [], semanticOk: false }; }
+    searching = false;
+  }
+  function clearSearch() { query = ''; deep = null; }
+  async function openResult(r) {
+    await openConversation(r.conv_id);
+  }
+  const fmtDay = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
   const groups = $derived.by(() => {
     const now = Date.now() / 1000;
@@ -58,15 +78,36 @@
       </button>
       <div class="search">
         <Search size={13} />
-        <input type="search" name="chat-search" placeholder="Search chats" bind:value={query}
+        <input type="search" name="chat-search" placeholder="Search chats — Enter for deep search"
+          bind:value={query}
+          onkeydown={(e) => { if (e.key === 'Enter') deepSearch(); if (e.key === 'Escape') clearSearch(); }}
           autocomplete="off" autocorrect="off" spellcheck="false" />
-        {#if query}
-          <button class="clear" onclick={() => (query = '')} title="Clear"><X size={12} /></button>
+        {#if query || deep}
+          <button class="clear" onclick={clearSearch} title="Clear"><X size={12} /></button>
         {/if}
       </div>
     </div>
 
     <nav>
+      {#if deep}
+        <div class="group">
+          {searching ? 'Searching…' : `Found in messages${deep.semanticOk ? '' : ' (exact match only)'}`}
+        </div>
+        {#each deep.results as r (r.message_id)}
+          <div class="item result" onclick={() => openResult(r)} role="button" tabindex="0"
+            onkeydown={(e) => e.key === 'Enter' && openResult(r)}>
+            <div class="rhead">
+              <span class="rtitle">{r.conv_title}</span>
+              <span class="rdate">{fmtDay(r.created_at)}</span>
+            </div>
+            <div class="rsnip">{r.snippet}</div>
+          </div>
+        {:else}
+          {#if !searching}
+            <div class="none">Nothing found for “{deep.q}”.</div>
+          {/if}
+        {/each}
+      {:else}
       {#each groups as g (g.label)}
         <div class="group">{g.label}</div>
         {#each g.items as c (c.id)}
@@ -83,6 +124,7 @@
       {:else}
         <div class="none">{query ? 'No chats match.' : 'No chats yet.'}</div>
       {/each}
+      {/if}
     </nav>
 
     <div class="bottom">
@@ -163,6 +205,19 @@
   .item:hover .del { opacity: 0.7; }
   .del:hover { background: rgba(192, 96, 79, 0.15); color: var(--red); opacity: 1; }
   .none { padding: 18px 12px; color: var(--text-faint); font-size: 12.5px; text-align: center; }
+
+  /* deep-search results */
+  .item.result { flex-direction: column; align-items: stretch; gap: 3px; padding: 8px 10px; }
+  .rhead { display: flex; align-items: baseline; gap: 8px; }
+  .rtitle {
+    flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .rdate { font-size: 10.5px; color: var(--text-faint); font-family: var(--mono); flex-shrink: 0; }
+  .rsnip {
+    font-size: 11.5px; color: var(--text-dim); line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
 
   .bottom {
     padding: 11px 14px; border-top: 1px solid var(--border-soft);
