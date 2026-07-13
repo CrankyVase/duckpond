@@ -7,6 +7,7 @@
 //   - Nominatim / OpenStreetMap (map geocoding + reverse geocoding)
 
 import { randomUUID } from 'node:crypto';
+import QRCode from 'qrcode';
 import { assertPublicHttp } from './websearch.js';
 
 const UA = 'DuckPond/1.0 (self-hosted assistant)';
@@ -271,6 +272,45 @@ export function makeTableWidget({ title, columns, rows }) {
   const rs = (rows ?? []).slice(0, 50).map((r) => (Array.isArray(r) ? r : cols.map((c) => r?.[c])).map((v) => (v == null ? '' : String(v))).slice(0, cols.length));
   if (!cols.length || !rs.length) throw new Error('table needs columns and rows');
   return widget('table', { title: title ? String(title) : null, columns: cols, rows: rs });
+}
+
+// News headline list (SearxNG news category).
+export async function makeNewsWidget(query, n = 5) {
+  const SEARX = process.env.SEARXNG_URL ?? 'http://127.0.0.1:8888';
+  const d = await getJson(`${SEARX}/search?q=${encodeURIComponent(query)}&format=json&categories=news&safesearch=1`);
+  const items = (d.results ?? []).slice(0, Math.min(10, Math.max(1, n))).map((r) => {
+    let source = ''; try { source = new URL(r.url).hostname.replace(/^www\./, ''); } catch { /* keep blank */ }
+    return { title: r.title, url: r.url, source, published: r.publishedDate ?? null, snippet: (r.content ?? '').slice(0, 160) };
+  });
+  if (!items.length) throw new Error(`no news for "${query}"`);
+  return widget('news', { query, items });
+}
+
+// Live countdown to a date (pure; client ticks).
+export function makeCountdownWidget({ title, date }) {
+  const t = new Date(date);
+  if (Number.isNaN(t.getTime())) throw new Error('countdown needs a valid date/time');
+  return widget('countdown', { title: title ? String(title) : 'Countdown', target: t.toISOString() });
+}
+
+// Color palette card (pure). colors: [{hex, name?}] or ["#rrggbb", …].
+export function makeColorPaletteWidget({ title, colors }) {
+  const list = (colors ?? []).map((c) => {
+    const hex = (typeof c === 'string' ? c : c.hex ?? '').trim();
+    const m = hex.match(/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
+    if (!m) return null;
+    return { hex: '#' + m[1].toLowerCase(), name: (typeof c === 'object' ? c.name : null) ?? null };
+  }).filter(Boolean).slice(0, 12);
+  if (!list.length) throw new Error('palette needs valid hex colors');
+  return widget('palette', { title: title ? String(title) : null, colors: list });
+}
+
+// QR code (rendered to SVG server-side; no client lib).
+export async function makeQrWidget({ text, label }) {
+  const value = String(text ?? '').trim();
+  if (!value) throw new Error('QR needs text or a URL');
+  const svg = await QRCode.toString(value.slice(0, 1200), { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+  return widget('qr', { svg, label: label ? String(label) : value.slice(0, 80) });
 }
 
 // Mermaid diagram from model-supplied source (rendered client-side; no API).

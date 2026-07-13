@@ -17,6 +17,10 @@
   import NpmWidget from './widgets/NpmWidget.svelte';
   import HackerNewsWidget from './widgets/HackerNewsWidget.svelte';
   import TableWidget from './widgets/TableWidget.svelte';
+  import NewsWidget from './widgets/NewsWidget.svelte';
+  import CountdownWidget from './widgets/CountdownWidget.svelte';
+  import ColorPaletteWidget from './widgets/ColorPaletteWidget.svelte';
+  import QrWidget from './widgets/QrWidget.svelte';
   import Download from '@lucide/svelte/icons/download';
 
   let { widget } = $props();
@@ -73,6 +77,14 @@
     <HackerNewsWidget data={widget.data} />
   {:else if widget?.type === 'table'}
     <TableWidget data={widget.data} />
+  {:else if widget?.type === 'news'}
+    <NewsWidget data={widget.data} />
+  {:else if widget?.type === 'countdown'}
+    <CountdownWidget data={widget.data} />
+  {:else if widget?.type === 'palette'}
+    <ColorPaletteWidget data={widget.data} />
+  {:else if widget?.type === 'qr'}
+    <QrWidget data={widget.data} />
   {:else}
     <div class="wunknown">Unsupported widget: {widget?.type}</div>
   {/if}

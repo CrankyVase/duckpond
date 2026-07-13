@@ -9,10 +9,10 @@ import {
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
 import {
-  makeChartWidget, makeCryptoWidget, makeCurrencyWidget, makeDictionaryWidget, makeGithubWidget,
-  makeHackerNewsWidget, makeImagesWidget, makeLinkPreviewWidget, makeMapWidget, makeMermaidWidget,
-  makeNpmWidget, makeSpotifyWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget,
-  makeYoutubeWidget,
+  makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
+  makeDictionaryWidget, makeGithubWidget, makeHackerNewsWidget, makeImagesWidget, makeLinkPreviewWidget,
+  makeMapWidget, makeMermaidWidget, makeNewsWidget, makeNpmWidget, makeQrWidget, makeSpotifyWidget,
+  makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
 import { corePrompt } from '../settings.js';
@@ -255,6 +255,32 @@ const SHOW_TABLE_TOOL = { type: 'function', function: {
   }, required: ['columns', 'rows'] },
 } };
 
+const SHOW_NEWS_TOOL = { type: 'function', function: {
+  name: 'show_news',
+  description: 'Show a list of recent news headlines for a topic.',
+  parameters: { type: 'object', properties: { query: { type: 'string' }, count: { type: 'integer' } }, required: ['query'] },
+} };
+const SHOW_COUNTDOWN_TOOL = { type: 'function', function: {
+  name: 'show_countdown',
+  description: 'Show a live countdown timer to a future date/time.',
+  parameters: { type: 'object', properties: {
+    title: { type: 'string' }, date: { type: 'string', description: 'ISO date/time, e.g. 2027-01-01T00:00:00Z' },
+  }, required: ['date'] },
+} };
+const SHOW_PALETTE_TOOL = { type: 'function', function: {
+  name: 'show_color_palette',
+  description: 'Show a color palette card with copyable hex swatches.',
+  parameters: { type: 'object', properties: {
+    title: { type: 'string' },
+    colors: { type: 'array', items: { type: 'object', properties: { hex: { type: 'string' }, name: { type: 'string' } }, required: ['hex'] } },
+  }, required: ['colors'] },
+} };
+const SHOW_QR_TOOL = { type: 'function', function: {
+  name: 'show_qr',
+  description: 'Show a scannable QR code for a URL or text.',
+  parameters: { type: 'object', properties: { text: { type: 'string' }, label: { type: 'string' } }, required: ['text'] },
+} };
+
 // name → builder(args, ctx). ctx has { userLoc }. Each returns a widget object.
 const WIDGET_BUILDERS = {
   show_weather: (a, ctx) => makeWeatherWidget({
@@ -280,6 +306,10 @@ const WIDGET_BUILDERS = {
   show_npm: (a) => makeNpmWidget(a.package),
   show_hackernews: (a) => makeHackerNewsWidget(a.query),
   show_table: (a) => makeTableWidget(a),
+  show_news: (a) => makeNewsWidget(a.query, a.count ?? 5),
+  show_countdown: (a) => makeCountdownWidget(a),
+  show_color_palette: (a) => makeColorPaletteWidget(a),
+  show_qr: (a) => makeQrWidget(a),
 };
 
 const WIDGET_TOOLS = [
@@ -287,6 +317,7 @@ const WIDGET_TOOLS = [
   SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
   SHOW_DICTIONARY_TOOL, SHOW_SPOTIFY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
   SHOW_CURRENCY_TOOL, SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL,
+  SHOW_NEWS_TOOL, SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL,
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
@@ -308,6 +339,10 @@ You can drop interactive cards right into the chat:
 - show_npm — an npm package card (version, downloads, description).
 - show_hackernews — the top Hacker News story for a topic.
 - show_table — a clean data table from columns and rows you provide.
+- show_news — recent news headlines for a topic.
+- show_countdown — a live countdown to a date/time.
+- show_color_palette — copyable hex color swatches.
+- show_qr — a scannable QR code for a URL or text.
 Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
 
 const GATE_POLICY = `## Project mode
