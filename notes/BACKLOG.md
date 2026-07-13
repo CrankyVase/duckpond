@@ -6,6 +6,10 @@ lists its **tier** and the **handoff note** with the real detail. Tiers:
 grind / repeats a known pattern.
 
 ## Fable (architecture / craft)
+- **Deep-end program** — 8 big systems (Council/multi-model routing, long-term
+  memory + knowledge graph, generative UI, autonomous research workspace, voice,
+  document RAG, proactive automations, vision) + an eval harness.
+  → `FABLE-PLAN.md`
 - **Core system prompt rewrite** — make it insanely good, small-model-calibrated.
   → `CORE-PROMPT-FABLE.md`
 - **Memory / semantic recall** — embeddings service, message_vectors, cosine +
