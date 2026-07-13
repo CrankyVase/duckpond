@@ -144,28 +144,42 @@ coherent while streaming. This is agentic-systems design.
 
 ---
 
-## EPIC 5 — Voice: the duck you can talk to
-**Vision.** Full hands-free conversation with the duck — speak, it listens, thinks,
-and talks back, with barge-in.
+## EPIC 5 — Voice: live conversation with the duck
+**Vision.** Full hands-free, live spoken conversation — speak, it listens, thinks,
+and talks back, with barge-in. Not just "read this reply aloud" (that's the
+Sonnet-tier `EXTRA-TTS-SONNET.md` piece, shipped as an on-demand per-message
+button) — this is a standing, always-available *talk to the duck* mode.
 
 **Features**
-- **STT** via whisper.cpp (there's already a whisper-capable stack around); push-to-
-  talk first, then wake-word ("hey duck").
-- **Streaming TTS** via piper (already routed to Sonnet in `EXTRA-TTS-SONNET.md` —
-  Fable owns the *realtime duplex* version): speak sentences as they stream.
-- **Barge-in.** User talking interrupts playback and starts a new turn.
-- **Voice-reactive duck.** The mascot lip-syncs / bobs to TTS amplitude (ties into
-  the existing Duck.svelte mood engine).
+- **A reactive orb**, placed somewhere unintrusive (not a permanent fixture in the
+  composer — a small persistent affordance, e.g. a corner button that expands into
+  the orb view when voice mode is active). It reacts visually to **both** sides of
+  the conversation: amplitude/rhythm from the TTS output while the duck talks, and
+  from the mic input while the user talks — two distinct reactive states, not just
+  a single "is audio playing" pulse.
+- **STT** via whisper.cpp (CPU, so it doesn't fight the GPU); push-to-talk first,
+  then continuous listening with VAD once turn-taking is solid.
+- **Streaming TTS** via piper (already deployed this session — binary at
+  `/home/cranky/bin/piper-install/piper/piper`, voice at
+  `/home/lewis/tts-voices/en_US-amy-medium.onnx`, wired for on-demand playback per
+  `EXTRA-TTS-SONNET.md`): speak sentences as they stream rather than waiting for
+  the full reply.
+- **Barge-in.** User talking interrupts playback and starts a new turn immediately.
 - **Full-duplex loop.** VAD → STT → model (with tools!) → TTS, all streaming, with
-  clean turn-taking.
+  clean turn-taking — this is the crux of the whole epic.
 
-**Architecture.** whisper.cpp + piper as side services (CPU where possible to spare
-the GPU). WebAudio capture + a VAD in the browser; stream audio to a `/api/voice`
-socket; reuse the chat pipeline for the brain. State machine for turn-taking is the
-crux.
+**Architecture.** whisper.cpp + piper as CPU-side services. WebAudio capture + a
+VAD in the browser; stream audio to a `/api/voice` socket; reuse the chat pipeline
+for the brain, and the existing widget/tool loop so voice mode can still call
+tools mid-conversation. The orb is a new small component (state machine: idle /
+listening / thinking / speaking, each a distinct visual), not a repaint of the
+existing Duck.svelte mascot — keep them decoupled unless it turns out they should
+share a mood engine.
 
 **Hard parts / why Fable.** Realtime turn-taking, barge-in, and latency budgeting
-across STT/LLM/TTS on constrained hardware is a genuine systems problem.
+across STT/LLM/TTS on constrained hardware is a genuine systems problem. The
+dual-reactive orb (mic input AND TTS output, not just one) adds a second live
+audio-analysis path to get right on top of that.
 
 ---
 
