@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './db.js';
 import { reapIdleModels } from './llama.js';
-import { backfillMissing } from './memory.js';
+import { backfillMissing, pruneMemories } from './memory.js';
 import { reapIdleSandboxes } from './sandbox.js';
 import agentRoutes from './routes/agent.js';
 import authRoutes from './routes/auth.js';
@@ -60,5 +60,7 @@ setInterval(() => reapIdleSandboxes(app.log).catch(() => {}), 120_000).unref();
 // down (and the whole pre-feature history on first boot)
 setTimeout(() => backfillMissing(app.log).catch(() => {}), 5_000).unref();
 setInterval(() => backfillMissing(app.log).catch(() => {}), 10 * 60_000).unref();
+// the forgetting curve: sweep decayed-to-zero memories a few times a day
+setInterval(() => { try { pruneMemories(app.log); } catch { /* next sweep */ } }, 6 * 60 * 60_000).unref();
 
 await app.listen({ port: PORT, host: HOST });

@@ -191,6 +191,23 @@ if (!db.prepare("SELECT value FROM app_settings WHERE key = 'fts_built'").get())
   db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('fts_built', '1')").run();
 }
 
+// Long-term memory (Epic 2 thin vertical): durable facts extracted from
+// conversations, retrieved by meaning each turn, forgotten on an Ebbinghaus
+// curve unless reinforced by being retrieved again.
+db.exec(`
+CREATE TABLE IF NOT EXISTS memories (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  vec BLOB,
+  source_conv INTEGER,
+  strength REAL NOT NULL DEFAULT 1.0,       -- grows each reinforcement (spaced repetition)
+  last_seen INTEGER NOT NULL DEFAULT (unixepoch()),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_mem_user ON memories(user_id);
+`);
+
 // additive migrations — ignore "duplicate column" once applied
 try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /* exists */ }
 // chat agent mode: an assistant message can embed an agent run; a conversation
@@ -204,5 +221,8 @@ try { db.exec('ALTER TABLE conversations ADD COLUMN workspace_id INTEGER'); } ca
 // web-search turns: the Perplexity-style search steps + sources shown above the
 // answer, stored as JSON so the disclosure and citations survive a reload
 try { db.exec('ALTER TABLE messages ADD COLUMN search_json TEXT'); } catch { /* exists */ }
+// long-term memory opt-out (on by default in this self-hosted, two-user pond;
+// the Settings panel shows and edits everything remembered — full transparency)
+try { db.exec('ALTER TABLE users ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1'); } catch { /* exists */ }
 
 export function nowSec() { return Math.floor(Date.now() / 1000); }

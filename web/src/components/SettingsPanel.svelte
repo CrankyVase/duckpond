@@ -4,6 +4,7 @@
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
+  import Brain from '@lucide/svelte/icons/brain';
   import ImageIcon from '@lucide/svelte/icons/image';
   import KeyRound from '@lucide/svelte/icons/key-round';
   import LinkIcon from '@lucide/svelte/icons/link';
@@ -44,6 +45,27 @@
     if (disabled.has(id)) disabled.delete(id); else disabled.add(id);
     form.disabledTools = [...disabled];
   }
+
+  // long-term memory
+  let memories = $state([]);
+  let memOpen = $state(false);
+  async function loadMemories() {
+    try { memories = await api('/api/memories'); } catch { memories = []; }
+  }
+  async function toggleMemory() {
+    const v = !app.user?.memory_enabled;
+    await api('/api/auth/me', { method: 'PATCH', body: { memory_enabled: v } });
+    if (app.user) app.user.memory_enabled = v;
+    toast(v ? 'Memory on — the duck learns durable facts as you chat' : 'Memory off');
+  }
+  async function forgetMemory(id) {
+    await api(`/api/memories/${id}`, { method: 'DELETE' });
+    memories = memories.filter((m) => m.id !== id);
+  }
+  const memAge = (t) => {
+    const d = Math.floor((Date.now() / 1000 - t) / 86400);
+    return d < 1 ? 'today' : d === 1 ? 'yesterday' : `${d}d ago`;
+  };
 
   // account
   let pwCurrent = $state('');
@@ -392,6 +414,39 @@
       </div>
     </section>
 
+    <!-- long-term memory -->
+    <section>
+      <div class="stitle"><Brain size={13} />Memory</div>
+      <div class="row">
+        <div class="rlabel">
+          <div class="rt">Long-term memory</div>
+          <div class="rd">the duck learns durable facts about you and recalls them across chats; unused memories fade on a forgetting curve</div>
+        </div>
+        <button class="tog" class:on={app.user?.memory_enabled} role="switch" aria-checked={app.user?.memory_enabled}
+          onclick={toggleMemory}>
+          <span class="knob"></span>
+        </button>
+      </div>
+      <button class="wide" onclick={() => { memOpen = !memOpen; if (!memories.length) loadMemories(); }}>
+        {memOpen ? 'Hide' : 'Show'} what it remembers
+      </button>
+      {#if memOpen}
+        <div class="memlist">
+          {#each memories as m (m.id)}
+            <div class="memrow">
+              <span class="memtext">{m.text}</span>
+              <span class="memmeta mono" title="how firmly this is remembered right now">
+                {Math.round(m.retention * 100)}% · {memAge(m.last_seen)}
+              </span>
+              <button class="memdel" onclick={() => forgetMemory(m.id)} title="Forget this"><X size={12} /></button>
+            </div>
+          {:else}
+            <div class="hint">Nothing remembered yet — it learns as you chat.</div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
     <!-- account -->
     <section>
       <div class="stitle"><KeyRound size={13} />Account</div>
@@ -628,6 +683,23 @@
   }
   .aname { font-size: 13px; font-weight: 600; margin-top: 6px; }
   .aver { font-size: 10.5px; color: var(--text-faint); }
+
+  /* long-term memory list */
+  .memlist { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+  .memrow {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 8px; font-size: 12px;
+  }
+  .memrow:hover { background: var(--bg-hover); }
+  .memtext { flex: 1; min-width: 0; color: var(--text-dim); line-height: 1.45; }
+  .memmeta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
+  .memdel {
+    all: unset; cursor: pointer; display: grid; place-items: center;
+    width: 20px; height: 20px; border-radius: 5px; color: var(--text-faint);
+    opacity: 0; transition: opacity 120ms ease;
+  }
+  .memrow:hover .memdel { opacity: 0.8; }
+  .memdel:hover { background: rgba(192, 96, 79, 0.15); color: var(--red); }
 
   .foot {
     display: flex; gap: 9px; padding: 13px 18px;

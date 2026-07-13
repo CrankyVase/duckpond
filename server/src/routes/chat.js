@@ -16,7 +16,7 @@ import {
   makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
-import { indexMessage } from '../memory.js';
+import { indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories } from '../memory.js';
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
 import { acquireGpu } from '../gpuqueue.js';
@@ -892,6 +892,26 @@ export default async function chatRoutes(app) {
       if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
       }
+      // long-term memory: what the duck remembers about this user, retrieved
+      // by meaning against this turn (retrieval also reinforces — see memory.js)
+      if (promptLeaf?.content && promptMessages[0]?.role === 'system' && memoryEnabled(req.user.id)) {
+        try {
+          const mems = await retrieveMemories(req.user.id, promptLeaf.content);
+          if (mems.length) {
+            req.log.info({ count: mems.length }, 'memories injected');
+            const lines = mems.map((m) => `- (${new Date(m.created_at * 1000).toISOString().slice(0, 10)}) ${m.text}`);
+            // leads the system prompt: small models pay the most attention to
+            // the top, and a memory that gets ignored is worse than none
+            const memBlock = '## What you know about this user\n'
+              + 'You remember these facts about this user from your previous conversations with them. '
+              + 'They are true — when the user asks about themselves or the facts are relevant, use them '
+              + 'directly and confidently instead of asking the user to repeat things. This overrides any '
+              + 'impulse to say you have no access to personal information: you DO have these remembered '
+              + "facts. Don't recite this list unprompted.\n" + lines.join('\n');
+            promptMessages[0] = { role: 'system', content: memBlock + '\n\n' + promptMessages[0].content };
+          }
+        } catch { /* embed service down — the turn proceeds memoryless */ }
+      }
       const params = { max_tokens: -1 };
       for (const k of GEN_PARAM_KEYS) params[k] = conv._settings[k];
       // thinking control: enable_thinking is honored by qwen-style templates,
@@ -1199,6 +1219,17 @@ export default async function chatRoutes(app) {
             send({ type: 'title', title: clean });
           }
         } catch { /* non-fatal */ }
+      }
+
+      // learn: distill durable facts from this exchange into long-term memory
+      // (runs on the still-warm model after the reply is already delivered)
+      if (!abort.signal.aborted && text && promptLeaf?.content && memoryEnabled(req.user.id)) {
+        try {
+          await rememberFromExchange({
+            model: conv.model_id, userText: promptLeaf.content, replyText: text,
+            userId: req.user.id, convId: conv.id, log: req.log,
+          });
+        } catch (err) { req.log.warn({ err }, 'memory extraction failed (non-fatal)'); }
       }
     } catch (err) {
       req.log.error({ err }, 'chat generation failed');

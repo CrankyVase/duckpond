@@ -60,13 +60,14 @@ export default async function authRoutes(app) {
     const user = sessionUser(req.cookies?.dp_session);
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
     const row = db.prepare(
-      'SELECT default_model_id, allow_image_gen, image_quality FROM users WHERE id = ?',
+      'SELECT default_model_id, allow_image_gen, image_quality, memory_enabled FROM users WHERE id = ?',
     ).get(user.id);
     return {
       id: user.id, username: user.username, role: user.role,
       default_model_id: row.default_model_id,
       allow_image_gen: !!row.allow_image_gen,
       image_quality: row.image_quality,
+      memory_enabled: !!row.memory_enabled,
     };
   });
 
@@ -84,6 +85,10 @@ export default async function authRoutes(app) {
     if (image_quality !== undefined && ['fast', 'medium', 'high'].includes(image_quality)) {
       db.prepare('UPDATE users SET image_quality = ? WHERE id = ?')
         .run(image_quality, req.user.id);
+    }
+    if (req.body?.memory_enabled !== undefined) {
+      db.prepare('UPDATE users SET memory_enabled = ? WHERE id = ?')
+        .run(req.body.memory_enabled ? 1 : 0, req.user.id);
     }
     return { ok: true };
   });
