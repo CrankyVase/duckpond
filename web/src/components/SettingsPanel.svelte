@@ -18,6 +18,7 @@
   import ToggleLeft from '@lucide/svelte/icons/toggle-left';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import UserPlus from '@lucide/svelte/icons/user-plus';
+  import Wrench from '@lucide/svelte/icons/wrench';
   import X from '@lucide/svelte/icons/x';
 
   const model = $derived(app.models.find((m) => m.id === app.conv?.model_id));
@@ -25,6 +26,24 @@
   let health = $state(null);      // { ok, latencyMs, endpoint }
   let testing = $state(false);
   let saving = $state(false);
+
+  // per-model tool toggles
+  let toolCatalog = $state([]);
+  const toolGroups = $derived.by(() => {
+    const groups = [];
+    for (const t of toolCatalog) {
+      let g = groups.find((g) => g.category === t.category);
+      if (!g) { g = { category: t.category, tools: [] }; groups.push(g); }
+      g.tools.push(t);
+    }
+    return groups;
+  });
+  function toggleTool(id) {
+    if (!form) return;
+    const disabled = new Set(form.disabledTools);
+    if (disabled.has(id)) disabled.delete(id); else disabled.add(id);
+    form.disabledTools = [...disabled];
+  }
 
   // account
   let pwCurrent = $state('');
@@ -47,8 +66,9 @@
 
   $effect(() => {
     if (!app.settingsOpen) return;
-    form = model ? { ...model.settings } : null;
+    form = model ? { ...model.settings, disabledTools: [...(model.settings.disabledTools ?? [])] } : null;
     probe();
+    if (!toolCatalog.length) api('/api/tools').then((t) => (toolCatalog = t)).catch(() => {});
     if (app.user?.role === 'owner') loadAdmin();
   });
 
@@ -157,7 +177,7 @@
 
   function resetAll() {
     resetPrefs(); applyPrefs();
-    if (model) form = { ...model.settings };
+    if (model) form = { ...model.settings, disabledTools: [...(model.settings.disabledTools ?? [])] };
     toast('Reset to saved values');
   }
 
@@ -290,6 +310,27 @@
         <div class="hint">Pick a model to edit its generation settings.</div>
       {/if}
     </section>
+
+    <!-- per-model tool toggles -->
+    {#if form}
+      <section>
+        <div class="stitle"><Wrench size={13} />Tools{#if model}<span class="formodel mono">{model.id}</span>{/if}</div>
+        <div class="hint">Everything's on by default. Turn off what this model shouldn't be offered — fewer tools can make small models call the right one more reliably.</div>
+        {#each toolGroups as g (g.category)}
+          <div class="substitle">{g.category}</div>
+          {#each g.tools as t (t.id)}
+            <label class="toolrow">
+              <input type="checkbox" checked={!form.disabledTools.includes(t.id)}
+                onchange={() => toggleTool(t.id)} />
+              <span class="tcol">
+                <span class="tname">{t.label}</span>
+                <span class="tdesc">{t.description}</span>
+              </span>
+            </label>
+          {/each}
+        {/each}
+      </section>
+    {/if}
 
     <!-- appearance -->
     <section>
@@ -541,6 +582,16 @@
   }
   .tog.on { background: var(--accent-deep); border-color: transparent; }
   .tog.on .knob { transform: translateX(16px); background: #16110a; }
+
+  .toolrow {
+    display: flex; align-items: flex-start; gap: 10px; cursor: pointer;
+    padding: 6px 2px; border-radius: 8px; transition: background 120ms ease;
+  }
+  .toolrow:hover { background: var(--bg-hover); }
+  .toolrow input[type='checkbox'] { margin-top: 3px; flex-shrink: 0; width: 15px; height: 15px; accent-color: var(--accent); }
+  .tcol { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .tname { font-size: 13px; }
+  .tdesc { font-size: 11px; color: var(--text-faint); line-height: 1.4; }
 
   .urow { display: flex; align-items: center; gap: 10px; }
   .uavatar {

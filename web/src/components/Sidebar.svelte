@@ -58,7 +58,8 @@
       </button>
       <div class="search">
         <Search size={13} />
-        <input placeholder="Search chats" bind:value={query} />
+        <input type="search" name="chat-search" placeholder="Search chats" bind:value={query}
+          autocomplete="off" autocorrect="off" spellcheck="false" />
         {#if query}
           <button class="clear" onclick={() => (query = '')} title="Clear"><X size={12} /></button>
         {/if}

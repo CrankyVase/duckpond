@@ -330,30 +330,42 @@ const WIDGET_TOOLS = [
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
-const WIDGET_POLICY = `## Widgets
-You can drop interactive cards right into the chat:
-- show_weather — live weather card for a place (or the user's location).
-- show_map — 3D map with a pin for a place, address, or business.
-- show_github_repo — a GitHub repo card (stars, language, description).
-- show_wikipedia — a Wikipedia summary card (title, extract, image).
-- show_youtube — embed a playable YouTube video.
-- show_images — a grid of real photos for a query.
-- show_chart — an interactive chart (bar/line/area/pie/donut/scatter) from data you provide.
-- show_crypto — a coin price card with a 7-day sparkline.
-- show_dictionary — a word's pronunciation, definitions, and examples.
-- show_spotify — embed a Spotify track/album/playlist (needs a real link).
-- show_link_preview — a rich preview card for any web page URL.
-- show_diagram — render a Mermaid diagram (flowchart, sequence, mind map, etc.).
-- show_currency — convert between two currencies at the latest rate.
-- show_npm — an npm package card (version, downloads, description).
-- show_hackernews — the top Hacker News story for a topic.
-- show_table — a clean data table from columns and rows you provide.
-- show_news — recent news headlines for a topic.
-- show_countdown — a live countdown to a date/time.
-- show_color_palette — copyable hex color swatches.
-- show_qr — a scannable QR code for a URL or text.
-- show_math_plot — graph a function y = f(x) over a range.
-Call them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
+// per-model-profile tool gating (settings panel "enabled tools" checkboxes)
+const filterTools = (tools, disabled) => (disabled.size ? tools.filter((t) => !disabled.has(t.function.name)) : tools);
+
+// [tool name, one-line description] — data-driven so a disabled tool both
+// drops out of the offered `tools` array AND stops being described here.
+const WIDGET_LINES = [
+  ['show_weather', "live weather card for a place (or the user's location)."],
+  ['show_map', '3D map with a pin for a place, address, or business.'],
+  ['show_github_repo', 'a GitHub repo card (stars, language, description).'],
+  ['show_wikipedia', 'a Wikipedia summary card (title, extract, image).'],
+  ['show_youtube', 'embed a playable YouTube video.'],
+  ['show_images', 'a grid of real photos for a query.'],
+  ['show_chart', 'an interactive chart (bar/line/area/pie/donut/scatter) from data you provide.'],
+  ['show_crypto', 'a coin price card with a 7-day sparkline.'],
+  ['show_dictionary', "a word's pronunciation, definitions, and examples."],
+  ['show_spotify', 'embed a Spotify track/album/playlist (needs a real link).'],
+  ['show_link_preview', 'a rich preview card for any web page URL.'],
+  ['show_diagram', 'render a Mermaid diagram (flowchart, sequence, mind map, etc.).'],
+  ['show_currency', 'convert between two currencies at the latest rate.'],
+  ['show_npm', 'an npm package card (version, downloads, description).'],
+  ['show_hackernews', 'the top Hacker News story for a topic.'],
+  ['show_table', 'a clean data table from columns and rows you provide.'],
+  ['show_news', 'recent news headlines for a topic.'],
+  ['show_countdown', 'a live countdown to a date/time.'],
+  ['show_color_palette', 'copyable hex color swatches.'],
+  ['show_qr', 'a scannable QR code for a URL or text.'],
+  ['show_math_plot', 'graph a function y = f(x) over a range.'],
+];
+
+const EMPTY_DISABLED = new Set();
+
+function widgetPolicyFor(disabled) {
+  const lines = WIDGET_LINES.filter(([name]) => !disabled.has(name)).map(([name, desc]) => `- ${name} — ${desc}`);
+  if (!lines.length) return null;
+  return `## Widgets\nYou can drop interactive cards right into the chat:\n${lines.join('\n')}\nCall them whenever they'd help — e.g. after recommending a restaurant, show_map for it; a repo, show_github_repo; a topic, show_wikipedia. The card renders for the user automatically, so don't paste a link, id, or coordinates — just call the tool, then add a short sentence. You may use more than one in a reply.`;
+}
 
 const GATE_POLICY = `## Project mode
 You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git; dev servers may bind ports 3000-3009), saves your plan as PLAN.md, and unlocks file and shell tools.
@@ -421,8 +433,20 @@ function slugify(name) {
     .replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-function withToolsPolicy(promptMessages, wsRow, imageAllowed = true) {
-  const parts = [wsRow ? ACTIVE_POLICY : GATE_POLICY, ...(imageAllowed ? [IMAGE_POLICY] : []), SEARCH_POLICY, WIDGET_POLICY];
+function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, userLoc = null, disabled = EMPTY_DISABLED) {
+  const locPolicy = userLoc
+    ? `## User location\nThe user has shared their approximate location (lat ${userLoc.lat}, lon ${userLoc.lon}). You may omit place/query in show_weather or show_map to use it — do not ask them where they are.`
+    : `## User location\nThe user has NOT shared their location. Never omit place/query in show_weather or show_map expecting it to fall back to "where they are" — it will fail. Ask what place they mean, or tell them to tap the location pin next to the composer.`;
+  const showGate = !wsRow && !disabled.has('start_project');
+  const showImage = imageAllowed && !disabled.has('generate_image');
+  const showSearch = !disabled.has('web_search');
+  const parts = [
+    wsRow ? ACTIVE_POLICY : (showGate ? GATE_POLICY : null),
+    showImage ? IMAGE_POLICY : null,
+    showSearch ? SEARCH_POLICY : null,
+    widgetPolicyFor(disabled),
+    locPolicy,
+  ].filter(Boolean);
   if (wsRow) {
     const files = listTree(wsRow).slice(0, 60)
       .map((f) => (f.dir ? `${f.path}/` : f.path)).join('\n');
@@ -795,8 +819,9 @@ export default async function chatRoutes(app) {
         ? db.prepare('SELECT * FROM workspaces WHERE id = ? AND user_id = ?').get(conv.workspace_id, req.user.id)
         : null;
       const imgPrefs = getUserImagePrefs(req.user.id);
+      const disabledTools = new Set(conv._settings.disabledTools ?? []);
       const promptMessages = withToolsPolicy(
-        buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed);
+        buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
       // deep-research mode: prepend the directive to the leading system message
       if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
@@ -844,8 +869,8 @@ export default async function chatRoutes(app) {
       let res;
       let toolsOn = true;
       try {
-        const baseTools = wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS]
-          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS];
+        const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS]
+          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS], disabledTools);
         res = await streamChat({
           model: conv.model_id, messages: promptMessages,
           params: {
@@ -877,10 +902,10 @@ export default async function chatRoutes(app) {
       if (toolsOn && res.toolCalls?.length && wantsInlineTools && !callNames.has('start_project')) {
         // inline-tools turn: web search (with live trace + citations) and/or
         // interactive widgets, in one batched loop; the model answers at the end.
-        const searchTools = [
+        const searchTools = filterTools([
           ...(imgPrefs.allowed ? [GENERATE_IMAGE_TOOL] : []),
           WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS,
-        ];
+        ], disabledTools);
         const r = await runInlineSearch({
           conv, userId: req.user.id, userLoc, promptMessages, firstResult: res, params,
           searchTools, imgPrefs, caps: modeCfg, send, abort, onDelta, log: req.log,
@@ -989,7 +1014,7 @@ export default async function chatRoutes(app) {
           }
           const gateResult = `Project workspace "${wsRow.name}" created${gargs.plan?.trim() ? ' and your plan saved as PLAN.md' : ''}. You now have list_files, read_file, write_file and run_command — implement the plan, then verify it by running it.`;
           emitRunEvent(run.id, 'tool_result', { call_id: gateCall.id, name: 'start_project', step: -1, result: gateResult });
-          loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed);
+          loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
           loopMessages.push({ role: 'assistant', content: res.content ?? '', tool_calls: [gateCall] });
           loopMessages.push({ role: 'tool', tool_call_id: gateCall.id, content: gateResult });
           firstResult = null; // the loop streams fresh with the full toolset
@@ -1002,7 +1027,7 @@ export default async function chatRoutes(app) {
           result = await agentLoop({
             run, ws: wsRow, messages: loopMessages, model: conv.model_id,
             genParams: params, abortSignal: abort.signal, firstResult,
-            tools: imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'),
+            tools: filterTools(imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'), disabledTools),
           });
         } catch (err) {
           req.log.error({ err, run: run.id }, 'agent loop failed');

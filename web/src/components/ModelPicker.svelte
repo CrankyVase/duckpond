@@ -5,6 +5,7 @@
   import { toast } from '../lib/toast.svelte.js';
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Info from '@lucide/svelte/icons/info';
   import Power from '@lucide/svelte/icons/power';
   import Search from '@lucide/svelte/icons/search';
   import Star from '@lucide/svelte/icons/star';
@@ -82,8 +83,8 @@
     <div class="menu slide-up">
       <div class="searchrow">
         <Search size={14} />
-        <input bind:this={inputEl} bind:value={search} placeholder="Search models…"
-          onkeydown={keydown} />
+        <input type="search" name="model-search" bind:this={inputEl} bind:value={search} placeholder="Search models…"
+          autocomplete="off" autocorrect="off" spellcheck="false" onkeydown={keydown} />
       </div>
       <div class="list">
         {#each filtered as m, i (m.id)}
@@ -99,6 +100,12 @@
                 {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1024)}k ctx{/if}
               </span>
             </span>
+            {#if m.blurb}
+              <button class="info" onclick={(e) => e.stopPropagation()}
+                title={m.blurb}>
+                <Info size={13} />
+              </button>
+            {/if}
             <button class="star" class:on={app.user?.default_model_id === m.id}
               onclick={(e) => setDefault(m, e)}
               title={app.user?.default_model_id === m.id ? 'Default model — click to clear' : 'Make default for new chats'}>
@@ -159,6 +166,15 @@
   .opt.sel .oname { color: var(--accent); }
   .meta { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
   .check { color: var(--accent); display: grid; place-items: center; }
+  .info {
+    all: unset; cursor: help;
+    display: grid; place-items: center;
+    width: 24px; height: 22px; border-radius: 6px;
+    color: var(--text-faint);
+    opacity: 0; transition: opacity 120ms ease, color 120ms ease;
+  }
+  .opt:hover .info { opacity: 1; }
+  .info:hover { color: var(--accent); }
   .star {
     all: unset; cursor: pointer;
     display: grid; place-items: center;

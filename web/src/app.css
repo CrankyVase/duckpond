@@ -87,9 +87,17 @@ input, textarea, select {
 }
 input:focus, textarea:focus, select:focus {
   border-color: var(--accent-dim);
-  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 input::placeholder, textarea::placeholder { color: var(--text-faint); }
+
+/* type="search" keeps browser password managers away, but strip its native
+   chrome (magnifier icon, Safari's rounded pill shape, the built-in clear-x)
+   so it looks identical to a normal text input under our own styling. */
+input[type='search'] { -webkit-appearance: none; appearance: none; }
+input[type='search']::-webkit-search-decoration,
+input[type='search']::-webkit-search-cancel-button,
+input[type='search']::-webkit-search-results-button,
+input[type='search']::-webkit-search-results-decoration { -webkit-appearance: none; appearance: none; }
 
 /* range sliders (settings panel) */
 input[type='range'] {

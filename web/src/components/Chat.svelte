@@ -13,7 +13,6 @@
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Globe from '@lucide/svelte/icons/globe';
   import Lightbulb from '@lucide/svelte/icons/lightbulb';
-  import MapPin from '@lucide/svelte/icons/map-pin';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import Telescope from '@lucide/svelte/icons/telescope';
   import Square from '@lucide/svelte/icons/square';
@@ -241,7 +240,7 @@
     pendText = ''; pendThink = ''; toolBuf = null;
     // include opt-in location + search depth so the server can tailor the turn
     const outBody = { ...body, researchMode: prefs.researchMode };
-    if (prefs.shareLocation && prefs.userLoc) outBody.userLoc = prefs.userLoc;
+    if (prefs.userLoc) outBody.userLoc = prefs.userLoc;
     stream = sse(`/api/conversations/${app.conv.id}/chat`, outBody, handleEvent);
     try {
       await stream.done;
@@ -311,27 +310,33 @@
     toast(`Search depth: ${RESEARCH[prefs.researchMode]}${prefs.researchMode === 'ultra' ? ' — deep, slow, ~400 sources' : ''}`);
   }
 
-  // opt-in geolocation for weather/map widgets. First tap asks the browser and
-  // caches coarse coords; tapping again turns sharing off.
-  let locBusy = $state(false);
-  async function toggleLocation() {
-    if (prefs.shareLocation) {
-      prefs.shareLocation = false; prefs.userLoc = null; savePrefs();
-      toast('Location sharing off');
-      return;
+  // Silent location capture — no button, no toast. Asks the browser's native
+  // permission prompt once per app load (a no-op if already granted/denied —
+  // the browser remembers and answers instantly either way). If it errors out
+  // (e.g. "Network location provider ... 400", common on a desktop with no
+  // WiFi radio for Chrome to triangulate from) or the user denies it, fall
+  // back to a coarse server-side IP lookup (user-approved) so weather/map
+  // widgets still have something to work with.
+  let locTried = false;
+  async function ensureLocation() {
+    if (prefs.userLoc || locTried || !app.conv) return;
+    locTried = true;
+    if (navigator.geolocation) {
+      const got = await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({ lat: +pos.coords.latitude.toFixed(3), lon: +pos.coords.longitude.toFixed(3) }),
+          () => resolve(null),
+          { enableHighAccuracy: false, timeout: 8000, maximumAge: 600_000 },
+        );
+      });
+      if (got) { prefs.userLoc = got; savePrefs(); return; }
     }
-    if (!navigator.geolocation) { toast('Geolocation not available', 'error'); return; }
-    locBusy = true;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        prefs.userLoc = { lat: +pos.coords.latitude.toFixed(3), lon: +pos.coords.longitude.toFixed(3) };
-        prefs.shareLocation = true; savePrefs(); locBusy = false;
-        toast('Location on — weather & maps can use where you are', 'ok');
-      },
-      (err) => { locBusy = false; toast(`Location denied: ${err.message}`, 'error'); },
-      { enableHighAccuracy: false, timeout: 10_000, maximumAge: 600_000 },
-    );
+    try {
+      const g = await api('/api/geoip');
+      if (g.ok) { prefs.userLoc = { lat: g.lat, lon: g.lon, label: g.label }; savePrefs(); }
+    } catch { /* no location this session — the model will just ask for a place */ }
   }
+  $effect(() => { if (app.conv) ensureLocation(); });
 
   async function approve(ok) {
     const runId = app.streaming?.run?.id;
@@ -504,9 +509,6 @@
           {#if prefs.researchMode === 'ultra'}<Telescope size={15} />{:else}<Globe size={15} />{/if}
           {#if prefs.researchMode !== 'normal'}<span class="rlbl">{prefs.researchMode === 'ultra' ? 'Ultra' : 'Quick'}</span>{/if}
         </button>
-        <button class="tool" class:on={prefs.shareLocation} disabled={locBusy}
-          title={prefs.shareLocation ? 'Location on — weather & maps use where you are (click to turn off)' : 'Share location for weather & maps'}
-          onclick={toggleLocation}><MapPin size={15} /></button>
         <button class="tool" class:on={thinkingOn} disabled={!model}
           title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
           onclick={toggleThinking}><Lightbulb size={15} /></button>
@@ -571,7 +573,7 @@
     padding: 10px 10px 8px 16px;
     transition: border-color 180ms ease, box-shadow 180ms ease;
   }
-  .composer:focus-within { border-color: var(--accent-dim); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .composer:focus-within { border-color: var(--accent-dim); }
   .composer textarea {
     resize: none; max-height: 200px;
     background: none; border: none; box-shadow: none; padding: 2px 0 6px;
