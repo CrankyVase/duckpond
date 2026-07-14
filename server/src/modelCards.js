@@ -14,7 +14,7 @@ const timeout = (ms) => AbortSignal.timeout(ms);
 
 // file-format / quant tokens in a gguf filename that say nothing about which
 // model it is — dropped before searching HF
-const NOISE_TOKEN = /^(i?q\d.*|k|s|m|l|xs|xxs|xl|f16|f32|bf16|fp16|gguf|ggml|imatrix|ud)$/;
+const NOISE_TOKEN = /^(i?q\d.*|k|s|m|l|xs|xxs|xl|f16|f32|bf16|fp\d+|nvfp\d+|mlx|\d+bit|gguf|ggml|imatrix|ud|unquantized|\d{1,2})$/;
 
 const tokens = (s) => String(s).toLowerCase().replace(/[^a-z0-9.]+/g, ' ').trim().split(/\s+/).filter(Boolean);
 
@@ -22,12 +22,23 @@ function searchTerms(modelId) {
   return tokens(modelId).filter((t) => !NOISE_TOKEN.test(t));
 }
 
-// how much of the query does this repo name cover? (0..1)
+// Symmetric match: coverage (how much of the query the repo name hits) ×
+// precision (how much of the repo name the query explains). Coverage alone let
+// a junk repo with the right two tokens buried in ten others win — a wrong
+// card is worse than no card.
 function scoreRepo(queryTokens, repoId) {
+  if (!queryTokens.length) return 0;
   const hay = new Set(tokens(repoId));
   let hit = 0;
   for (const t of queryTokens) if (hay.has(t)) hit++;
-  return queryTokens.length ? hit / queryTokens.length : 0;
+  const coverage = hit / queryTokens.length;
+  const namePart = String(repoId).split('/').pop();
+  const nameTokens = tokens(namePart).filter((t) => !NOISE_TOKEN.test(t));
+  const qset = new Set(queryTokens);
+  let nameHit = 0;
+  for (const t of nameTokens) if (qset.has(t)) nameHit++;
+  const precision = nameTokens.length ? nameHit / nameTokens.length : 0;
+  return Math.sqrt(coverage * precision);
 }
 
 async function hfSearch(terms) {
