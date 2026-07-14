@@ -14,6 +14,11 @@ export const DEFAULT_SETTINGS = {
   system_prompt: '',
   thinking: 'auto',   // auto | high | low | none — applied only if model supports it
   disabledTools: [],  // tool ids this model profile is never offered; all on by default
+  mirostat: 0,        // 0 off | 1 v1 | 2 v2 — llama.cpp entropy-target sampling
+  mirostat_tau: 5,    // target entropy (higher = more surprising text)
+  mirostat_eta: 0.1,  // learning rate of the controller
+  grammar: '',        // GBNF grammar constraining the whole output (llama.cpp native)
+  json_schema: '',    // JSON schema (string) — output is forced to match; wins over grammar
 };
 
 export function modelSettings(modelId) {
