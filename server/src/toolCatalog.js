@@ -32,6 +32,7 @@ export const TOOL_CATALOG = [
   { id: 'show_color_palette', label: 'Color palette', category: 'Widgets', description: 'Copyable hex color swatches.' },
   { id: 'show_qr', label: 'QR code', category: 'Widgets', description: 'A scannable QR code for a URL or bit of text.' },
   { id: 'show_math_plot', label: 'Math plot', category: 'Widgets', description: 'Graphs a function y = f(x) over a range.' },
+  { id: 'show_dashboard', label: 'Dashboard', category: 'Widgets', description: 'Lets the model compose several widgets into one titled grid. Only offered to larger models — small ones fumble the nested layout.' },
   { id: 'generate_slides', label: 'PowerPoint deck', category: 'Media', description: 'Builds a real downloadable .pptx presentation from an outline the model writes (also opens in Google Slides).' },
   { id: 'export_csv', label: 'CSV export', category: 'Media', description: 'Saves tabular data as a downloadable CSV file.' },
 ];

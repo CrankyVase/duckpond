@@ -11,10 +11,12 @@ import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imageg
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
 import {
   makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
-  makeDictionaryWidget, makeFileWidget, makeGithubWidget, makeHackerNewsWidget, makeImagesWidget,
-  makeLinkPreviewWidget, makeMapWidget, makeMathPlotWidget, makeMermaidWidget, makeNewsWidget,
-  makeNpmWidget, makeQrWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
+  makeDashboardWidget, makeDictionaryWidget, makeFileWidget, makeGithubWidget, makeHackerNewsWidget,
+  makeImagesWidget, makeLinkPreviewWidget, makeMapWidget, makeMathPlotWidget, makeMermaidWidget,
+  makeNewsWidget, makeNpmWidget, makeQrWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget,
+  makeYoutubeWidget,
 } from '../widgets.js';
+import { modelParamsB } from '../modelDescribe.js';
 import { buildCsv, buildPptx } from '../exports.js';
 import { modelSettings } from './models.js';
 import { convDocs, retrieveChunks } from '../docs.js';
@@ -292,6 +294,42 @@ const SHOW_MATHPLOT_TOOL = { type: 'function', function: {
   }, required: ['expr'] },
 } };
 
+// Generative UI (EPIC 3): the model composes several of the widgets above into
+// one titled grid instead of scattering separate cards. Only offered to models
+// big enough to reliably author the nested tool-call JSON — see
+// dashboardCapable() and the gate where disabledTools is built in the route.
+const DASHBOARD_PANEL_TOOLS = [
+  SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL, SHOW_WIKIPEDIA_TOOL,
+  SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
+  SHOW_DICTIONARY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL, SHOW_CURRENCY_TOOL,
+  SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL, SHOW_NEWS_TOOL,
+  SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL, SHOW_MATHPLOT_TOOL,
+];
+const DASHBOARD_PANEL_NAMES = new Set(DASHBOARD_PANEL_TOOLS.map((t) => t.function.name));
+
+const SHOW_DASHBOARD_TOOL = { type: 'function', function: {
+  name: 'show_dashboard',
+  description: 'Compose 2-8 of the other show_* widgets into ONE titled dashboard grid. Use it when the user wants an overview that naturally spans several cards: a trip (weather + map + currency), a project (github repo + npm + chart), a market snapshot (crypto cards + a chart). Each panel names a widget tool and passes exactly the arguments that tool takes. When several cards clearly belong together, prefer one dashboard over separate widget calls.',
+  parameters: { type: 'object', properties: {
+    title: { type: 'string', description: 'short dashboard title, e.g. "Tokyo trip"' },
+    panels: {
+      type: 'array',
+      description: '2-8 panels in display order',
+      items: { type: 'object', properties: {
+        tool: { type: 'string', enum: [...DASHBOARD_PANEL_NAMES], description: 'which widget fills this panel' },
+        args: { type: 'object', description: 'the arguments you would pass to that widget tool' },
+        wide: { type: 'boolean', description: 'span the full dashboard width — good for charts, tables, news' },
+      }, required: ['tool', 'args'] },
+    },
+  }, required: ['title', 'panels'] },
+} };
+
+// Models below this many (total) params too often fumble the nested tool-call
+// JSON a dashboard needs; unknown sizes count as not capable — the model can
+// still show every widget individually.
+const DASHBOARD_MIN_TOTAL_B = 9;
+const dashboardCapable = (modelId) => (modelParamsB(modelId).totalB ?? 0) >= DASHBOARD_MIN_TOTAL_B;
+
 const GENERATE_SLIDES_TOOL = { type: 'function', function: {
   name: 'generate_slides',
   description: 'Create a real downloadable PowerPoint (.pptx) presentation from an outline you write. Use when the user wants slides, a deck, or a presentation (it also opens in Google Slides via upload). You write ALL the content: a deck title and one entry per slide with a title and bullet points.',
@@ -320,8 +358,29 @@ const EXPORT_CSV_TOOL = { type: 'function', function: {
   }, required: ['columns', 'rows'] },
 } };
 
-// name → builder(args, ctx). ctx has { userLoc, userId }. Each returns a widget object.
-const WIDGET_BUILDERS = {
+// A dashboard call fans out into the panel widgets' own builders, in parallel.
+// A failed panel becomes an error tile instead of sinking the whole grid; only
+// when every panel fails does the tool itself error.
+async function dashboardPanels(a, ctx) {
+  const raw = Array.isArray(a.panels) ? a.panels.slice(0, 8) : [];
+  if (raw.length < 2) throw new Error('a dashboard needs 2-8 panels, each { tool, args }');
+  const panels = await Promise.all(raw.map(async (p) => {
+    const tool = String(p?.tool ?? '');
+    const wide = !!p?.wide;
+    if (!DASHBOARD_PANEL_NAMES.has(tool)) return { wide, tool, error: 'not a widget tool that can be used inside a dashboard' };
+    try { return { wide, widget: await WIDGET_BUILDERS[tool](p.args ?? {}, ctx) }; }
+    catch (err) { return { wide, tool, error: String(err.message ?? err).slice(0, 200) }; }
+  }));
+  if (!panels.some((p) => p.widget)) {
+    throw new Error(`every panel failed: ${panels.map((p) => `${p.tool} (${p.error})`).join('; ')}`.slice(0, 400));
+  }
+  return panels;
+}
+
+// name → builder(args, ctx). ctx has { userLoc, userId }. Each returns a widget
+// object. Exported so the builders can be exercised without booting the server.
+export const WIDGET_BUILDERS = {
+  show_dashboard: async (a, ctx) => makeDashboardWidget({ title: a.title, panels: await dashboardPanels(a, ctx) }),
   generate_slides: async (a, ctx) => {
     const f = await buildPptx(ctx.userId, a);
     return makeFileWidget({ ...f, detail: `${f.slides} slides` });
@@ -366,7 +425,7 @@ const WIDGET_TOOLS = [
   SHOW_DICTIONARY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
   SHOW_CURRENCY_TOOL, SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL,
   SHOW_NEWS_TOOL, SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL, SHOW_MATHPLOT_TOOL,
-  GENERATE_SLIDES_TOOL, EXPORT_CSV_TOOL,
+  SHOW_DASHBOARD_TOOL, GENERATE_SLIDES_TOOL, EXPORT_CSV_TOOL,
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
@@ -455,6 +514,7 @@ const WIDGET_LINES = [
   ['show_color_palette', 'copyable hex color swatches.'],
   ['show_qr', 'a scannable QR code for a URL or text.'],
   ['show_math_plot', 'graph a function y = f(x) over a range.'],
+  ['show_dashboard', 'compose 2-8 of the widgets above into ONE titled grid — prefer it over separate calls when the cards belong together (a trip: weather + map + currency; a project: repo + npm + chart).'],
   ['generate_slides', 'build a real downloadable PowerPoint deck from an outline you write.'],
   ['export_csv', 'save tabular data as a downloadable CSV file.'],
 ];
@@ -927,6 +987,9 @@ export default async function chatRoutes(app) {
         : null;
       const imgPrefs = getUserImagePrefs(req.user.id);
       const disabledTools = new Set(conv._settings.disabledTools ?? []);
+      // capability gate (generative UI): small models fumble the nested
+      // tool-call JSON a dashboard needs — don't offer or describe it to them
+      if (!dashboardCapable(conv.model_id)) disabledTools.add('show_dashboard');
       const promptMessages = withToolsPolicy(
         buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
       // deep-research mode: prepend the directive to the leading system message

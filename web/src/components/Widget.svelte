@@ -21,13 +21,15 @@
   import ColorPaletteWidget from './widgets/ColorPaletteWidget.svelte';
   import QrWidget from './widgets/QrWidget.svelte';
   import FileWidget from './widgets/FileWidget.svelte';
+  import DashboardWidget from './widgets/DashboardWidget.svelte';
   import Download from '@lucide/svelte/icons/download';
 
   let { widget } = $props();
   let node = $state(null);
   let saving = $state(false);
-  // exclude embeds/WebGL that html-to-image can't capture (map=WebGL, iframes=cross-origin)
-  const NO_SAVE = new Set(['map', 'youtube', 'file']);
+  // exclude embeds/WebGL that html-to-image can't capture (map=WebGL,
+  // iframes=cross-origin, dashboard=may nest either)
+  const NO_SAVE = new Set(['map', 'youtube', 'file', 'dashboard']);
   const canSave = $derived(widget?.type && !NO_SAVE.has(widget.type));
 
   async function savePng() {
@@ -85,6 +87,8 @@
     <QrWidget data={widget.data} />
   {:else if widget?.type === 'file'}
     <FileWidget data={widget.data} />
+  {:else if widget?.type === 'dashboard'}
+    <DashboardWidget data={widget.data} />
   {:else}
     <div class="wunknown">Unsupported widget: {widget?.type}</div>
   {/if}

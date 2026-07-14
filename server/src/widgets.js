@@ -384,3 +384,11 @@ export async function makeMapWidget({ query, lat, lon, label, zoom = 14 }) {
 export function makeFileWidget({ name, url, size, kind, detail }) {
   return widget('file', { name, url, size, kind, detail });
 }
+
+// Model-composed dashboard (generative UI): a titled grid of other widgets.
+// The caller (routes/chat.js) has already run each panel's builder — panels
+// arrive as [{ wide, widget }] for successes and [{ wide, tool, error }] for
+// builders that failed, so a partly-broken dashboard still renders.
+export function makeDashboardWidget({ title, panels }) {
+  return widget('dashboard', { title: title ? String(title).slice(0, 120) : null, panels });
+}

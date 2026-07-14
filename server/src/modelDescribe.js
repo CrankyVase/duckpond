@@ -39,16 +39,23 @@ function quantBlurb(id) {
   return null;
 }
 
-export function describeModel(id, ctxSize) {
+// total[-active] params in billions parsed from the id, e.g. "35b-a3b" (MoE)
+// or "12b" (dense). Exported for capability gating (the dashboard tool is only
+// offered to models big enough to compose nested tool calls reliably).
+export function modelParamsB(id) {
   const lower = String(id).toLowerCase();
-  const family = FAMILIES.find(([key]) => lower.includes(key));
-
-  // total[-active] params in billions, e.g. "35b-a3b" (MoE) or "12b" (dense)
   const moe = lower.match(/(\d+(?:\.\d+)?)b-a(\d+(?:\.\d+)?)b/);
   const dense = !moe && lower.match(/(?:^|[-_])(\d+(?:\.\d+)?)b(?:[-_]|$)/);
   const effective = !moe && !dense && lower.match(/\be(\d+(?:\.\d+)?)b\b/); // gemma "e2b" style
   const totalB = moe ? Number(moe[1]) : dense ? Number(dense[1]) : effective ? Number(effective[1]) : null;
-  const activeB = moe ? Number(moe[2]) : totalB;
+  return { totalB, activeB: moe ? Number(moe[2]) : totalB, moe: !!moe };
+}
+
+export function describeModel(id, ctxSize) {
+  const lower = String(id).toLowerCase();
+  const family = FAMILIES.find(([key]) => lower.includes(key));
+
+  const { totalB, activeB, moe } = modelParamsB(id);
 
   const traits = [];
   if (/reasoning|thinking/.test(lower)) traits.push('does visible step-by-step reasoning before answering');
