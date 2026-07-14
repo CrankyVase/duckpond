@@ -20,13 +20,14 @@
   import CountdownWidget from './widgets/CountdownWidget.svelte';
   import ColorPaletteWidget from './widgets/ColorPaletteWidget.svelte';
   import QrWidget from './widgets/QrWidget.svelte';
+  import FileWidget from './widgets/FileWidget.svelte';
   import Download from '@lucide/svelte/icons/download';
 
   let { widget } = $props();
   let node = $state(null);
   let saving = $state(false);
   // exclude embeds/WebGL that html-to-image can't capture (map=WebGL, iframes=cross-origin)
-  const NO_SAVE = new Set(['map', 'youtube']);
+  const NO_SAVE = new Set(['map', 'youtube', 'file']);
   const canSave = $derived(widget?.type && !NO_SAVE.has(widget.type));
 
   async function savePng() {
@@ -82,6 +83,8 @@
     <ColorPaletteWidget data={widget.data} />
   {:else if widget?.type === 'qr'}
     <QrWidget data={widget.data} />
+  {:else if widget?.type === 'file'}
+    <FileWidget data={widget.data} />
   {:else}
     <div class="wunknown">Unsupported widget: {widget?.type}</div>
   {/if}

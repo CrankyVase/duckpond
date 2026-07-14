@@ -11,10 +11,11 @@ import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imageg
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
 import {
   makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
-  makeDictionaryWidget, makeGithubWidget, makeHackerNewsWidget, makeImagesWidget, makeLinkPreviewWidget,
-  makeMapWidget, makeMathPlotWidget, makeMermaidWidget, makeNewsWidget, makeNpmWidget, makeQrWidget,
-  makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
+  makeDictionaryWidget, makeFileWidget, makeGithubWidget, makeHackerNewsWidget, makeImagesWidget,
+  makeLinkPreviewWidget, makeMapWidget, makeMathPlotWidget, makeMermaidWidget, makeNewsWidget,
+  makeNpmWidget, makeQrWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
+import { buildCsv, buildPptx } from '../exports.js';
 import { modelSettings } from './models.js';
 import { convDocs, retrieveChunks } from '../docs.js';
 import { indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories } from '../memory.js';
@@ -291,8 +292,44 @@ const SHOW_MATHPLOT_TOOL = { type: 'function', function: {
   }, required: ['expr'] },
 } };
 
-// name → builder(args, ctx). ctx has { userLoc }. Each returns a widget object.
+const GENERATE_SLIDES_TOOL = { type: 'function', function: {
+  name: 'generate_slides',
+  description: 'Create a real downloadable PowerPoint (.pptx) presentation from an outline you write. Use when the user wants slides, a deck, or a presentation (it also opens in Google Slides via upload). You write ALL the content: a deck title and one entry per slide with a title and bullet points.',
+  parameters: { type: 'object', properties: {
+    title: { type: 'string', description: 'deck title for the cover slide' },
+    subtitle: { type: 'string', description: 'optional cover subtitle, e.g. author or date' },
+    slides: {
+      type: 'array',
+      description: 'the content slides, in order (max 40)',
+      items: { type: 'object', properties: {
+        title: { type: 'string' },
+        bullets: { type: 'array', items: { type: 'string' }, description: 'up to ~8 concise bullet points' },
+        notes: { type: 'string', description: 'optional speaker notes' },
+      }, required: ['title'] },
+    },
+  }, required: ['title', 'slides'] },
+} };
+
+const EXPORT_CSV_TOOL = { type: 'function', function: {
+  name: 'export_csv',
+  description: 'Create a downloadable CSV file from tabular data you provide. Use when the user wants data as a file/spreadsheet rather than just shown in chat.',
+  parameters: { type: 'object', properties: {
+    name: { type: 'string', description: 'short file name, e.g. "expenses-2026"' },
+    columns: { type: 'array', items: { type: 'string' } },
+    rows: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'rows of cell values aligned to columns' },
+  }, required: ['columns', 'rows'] },
+} };
+
+// name → builder(args, ctx). ctx has { userLoc, userId }. Each returns a widget object.
 const WIDGET_BUILDERS = {
+  generate_slides: async (a, ctx) => {
+    const f = await buildPptx(ctx.userId, a);
+    return makeFileWidget({ ...f, detail: `${f.slides} slides` });
+  },
+  export_csv: async (a, ctx) => {
+    const f = await buildCsv(ctx.userId, a);
+    return makeFileWidget({ ...f, detail: `${f.rows} rows` });
+  },
   show_weather: (a, ctx) => makeWeatherWidget({
     place: a.place?.trim() || undefined, lat: ctx.userLoc?.lat, lon: ctx.userLoc?.lon,
     label: a.place?.trim() ? undefined : ctx.userLoc?.label,
@@ -329,6 +366,7 @@ const WIDGET_TOOLS = [
   SHOW_DICTIONARY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
   SHOW_CURRENCY_TOOL, SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL,
   SHOW_NEWS_TOOL, SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL, SHOW_MATHPLOT_TOOL,
+  GENERATE_SLIDES_TOOL, EXPORT_CSV_TOOL,
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
@@ -417,6 +455,8 @@ const WIDGET_LINES = [
   ['show_color_palette', 'copyable hex color swatches.'],
   ['show_qr', 'a scannable QR code for a URL or text.'],
   ['show_math_plot', 'graph a function y = f(x) over a range.'],
+  ['generate_slides', 'build a real downloadable PowerPoint deck from an outline you write.'],
+  ['export_csv', 'save tabular data as a downloadable CSV file.'],
 ];
 
 const EMPTY_DISABLED = new Set();
@@ -686,7 +726,7 @@ async function runInlineSearch({
         }
       } else if (WIDGET_BUILDERS[name]) {
         try {
-          const wg = await WIDGET_BUILDERS[name](args, { userLoc });
+          const wg = await WIDGET_BUILDERS[name](args, { userLoc, userId });
           send({ type: 'widget', widget: wg });
           mdWidgets.push('```duckwidget\n' + JSON.stringify(wg) + '\n```');
           const where = wg.data.place || wg.data.label || wg.data.title || wg.data.name || wg.data.query || 'it';

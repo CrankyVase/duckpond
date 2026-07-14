@@ -378,3 +378,9 @@ export async function makeMapWidget({ query, lat, lon, label, zoom = 14 }) {
     label: label || loc.label, address: loc.address,
   });
 }
+
+// Downloadable file the model produced (pptx deck, csv...) — the data is just
+// a pointer; the bytes live in data/exports/ behind an ownership-checked route.
+export function makeFileWidget({ name, url, size, kind, detail }) {
+  return widget('file', { name, url, size, kind, detail });
+}
