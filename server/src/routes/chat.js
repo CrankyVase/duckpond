@@ -1067,7 +1067,10 @@ export default async function chatRoutes(app) {
       // thinking control: enable_thinking is honored by qwen-style templates,
       // reasoning_effort by gpt-oss-style ones; unsupported kwargs are ignored
       const think = conv._settings.thinking;
-      if (think === 'none') params.chat_template_kwargs = { enable_thinking: false };
+      // A grammar/schema constrains the WHOLE output — with thinking on,
+      // llama-server's reasoning parser swallows the constrained tokens as
+      // reasoning_content and the visible reply comes back empty.
+      if (think === 'none' || constrained) params.chat_template_kwargs = { enable_thinking: false };
       else if (modeCfg.ultra) params.reasoning_effort = 'high';
       else if (think === 'high' || think === 'low') params.reasoning_effort = think;
 
