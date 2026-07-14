@@ -13,6 +13,7 @@ import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
 import imageRoutes from './routes/images.js';
 import modelRoutes from './routes/models.js';
+import docRoutes from './routes/docs.js';
 import searchRoutes from './routes/search.js';
 import statsRoutes from './routes/stats.js';
 import ttsRoutes from './routes/tts.js';
@@ -38,6 +39,7 @@ await app.register(imageRoutes);
 await app.register(ttsRoutes);
 await app.register(voiceRoutes);
 await app.register(searchRoutes);
+await app.register(docRoutes);
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(dist)) {

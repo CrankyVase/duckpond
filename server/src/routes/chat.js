@@ -16,6 +16,7 @@ import {
   makeTableWidget, makeWeatherWidget, makeWikipediaWidget, makeYoutubeWidget,
 } from '../widgets.js';
 import { modelSettings } from './models.js';
+import { convDocs, retrieveChunks } from '../docs.js';
 import { indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories } from '../memory.js';
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
@@ -911,6 +912,28 @@ export default async function chatRoutes(app) {
             promptMessages[0] = { role: 'system', content: memBlock + '\n\n' + promptMessages[0].content };
           }
         } catch { /* embed service down — the turn proceeds memoryless */ }
+      }
+      // attached documents (RAG): pull the excerpts relevant to this message
+      // and pin them at the END of the system prompt, closest to the question
+      if (promptLeaf?.content && promptMessages[0]?.role === 'system') {
+        try {
+          const attached = convDocs(conv.id);
+          if (attached.length) {
+            const hits = await retrieveChunks(req.user.id, attached.map((d) => d.id), promptLeaf.content);
+            const names = attached.map((d) => d.name).join(', ');
+            let block = `## Attached documents\nThe user attached these documents to this conversation: ${names}.`;
+            if (hits.length) {
+              req.log.info({ hits: hits.length }, 'doc excerpts injected');
+              block += '\nRelevant excerpts for this message — answer from them when they apply, cite the '
+                + "document by name when you use one, and if they don't contain the answer say so honestly:\n\n"
+                + hits.map((h) => `[${h.name} · part ${h.idx + 1}]\n${h.text.slice(0, 900)}`).join('\n\n');
+            } else {
+              block += '\nNo excerpt matched this message — if the user asks about the documents, say you '
+                + "couldn't find it in them rather than guessing.";
+            }
+            promptMessages[0] = { role: 'system', content: promptMessages[0].content + '\n\n' + block };
+          }
+        } catch { /* embed service down — the turn proceeds without excerpts */ }
       }
       const params = { max_tokens: -1 };
       for (const k of GEN_PARAM_KEYS) params[k] = conv._settings[k];

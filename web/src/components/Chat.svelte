@@ -15,6 +15,8 @@
   import Welcome from './Welcome.svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import AudioLines from '@lucide/svelte/icons/audio-lines';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import X from '@lucide/svelte/icons/x';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Globe from '@lucide/svelte/icons/globe';
   import Lightbulb from '@lucide/svelte/icons/lightbulb';
@@ -324,6 +326,39 @@
 
   function stop() { stream?.abort(); }
 
+  // ---- attached documents (RAG) ----
+  let attachedDocs = $state([]);
+  let fileInput = $state(null);
+  let uploading = $state(false);
+  $effect(() => {
+    const id = app.conv?.id;
+    attachedDocs = [];
+    if (id) api(`/api/conversations/${id}/docs`).then((d) => { if (app.conv?.id === id) attachedDocs = d; }).catch(() => {});
+  });
+  async function uploadDocs(files) {
+    if (!app.conv || !files?.length) return;
+    uploading = true;
+    for (const f of files) {
+      try {
+        toast(`Reading ${f.name}…`);
+        const res = await fetch(`/api/docs?name=${encodeURIComponent(f.name)}&conv=${app.conv.id}`, {
+          method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f,
+        });
+        const doc = await res.json();
+        if (!res.ok) throw new Error(doc.error ?? `HTTP ${res.status}`);
+        attachedDocs = [...attachedDocs, doc];
+        toast(`${f.name} attached — ${doc.chunks} sections indexed`, 'ok');
+      } catch (err) {
+        toast(`${f.name}: ${err.message ?? err}`, 'error');
+      }
+    }
+    uploading = false;
+  }
+  async function detachDocChip(doc) {
+    await api(`/api/conversations/${app.conv.id}/docs/${doc.id}`, { method: 'DELETE' });
+    attachedDocs = attachedDocs.filter((d) => d.id !== doc.id);
+  }
+
   // ---- voice mode ----
   // A spoken utterance arrives whenever the transcription lands — possibly a
   // beat before the previous stream has fully wound down (barge-in aborts it,
@@ -506,12 +541,27 @@
       </button>
     {/if}
     <div class="composer" class:active={busy}>
+      {#if attachedDocs.length}
+        <div class="docchips">
+          {#each attachedDocs as d (d.id)}
+            <span class="docchip" title={`${d.chunks} indexed sections — the model reads the relevant parts each message`}>
+              <FileText size={12} />
+              <span class="dname">{d.name}</span>
+              <button class="dx" onclick={() => detachDocChip(d)} title="Detach from this chat"><X size={11} /></button>
+            </span>
+          {/each}
+        </div>
+      {/if}
       <textarea rows="1" placeholder="Message {app.conv?.model_id ?? 'DuckPond'}…"
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
         disabled={!app.conv}></textarea>
       <div class="bar">
-        <button class="tool" title="Attach files — coming soon"
-          onclick={() => toast('Attachments coming soon')}><Paperclip size={15} /></button>
+        <input type="file" multiple hidden bind:this={fileInput}
+          accept=".pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
+          onchange={(e) => { uploadDocs([...e.target.files]); e.target.value = ''; }} />
+        <button class="tool" class:on={attachedDocs.length > 0} disabled={!app.conv || uploading}
+          title={uploading ? 'Reading…' : 'Attach documents — the model answers from them with citations'}
+          onclick={() => fileInput?.click()}><Paperclip size={15} /></button>
         <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
           title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
           onclick={cycleResearch}>
@@ -595,6 +645,20 @@
     line-height: 1.5;
   }
   .composer textarea:focus { box-shadow: none; }
+  .docchips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+  .docchip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; color: var(--text-dim);
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    border-radius: 999px; padding: 3px 5px 3px 10px;
+  }
+  .docchip :global(svg:first-child) { color: var(--accent); flex-shrink: 0; }
+  .dname { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dx {
+    all: unset; cursor: pointer; display: grid; place-items: center;
+    width: 18px; height: 18px; border-radius: 50%; color: var(--text-faint);
+  }
+  .dx:hover { background: var(--bg-hover); color: var(--red); }
   .bar { display: flex; align-items: center; gap: 2px; }
   .grow { flex: 1; }
   .tool {

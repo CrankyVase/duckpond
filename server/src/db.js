@@ -208,6 +208,36 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_mem_user ON memories(user_id);
 `);
 
+// Document RAG (Epic 6 thin vertical): uploaded docs are chunked + embedded;
+// conversations attach docs and each turn retrieves the relevant excerpts.
+db.exec(`
+CREATE TABLE IF NOT EXISTS documents (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  chunks INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_docs_user ON documents(user_id);
+
+CREATE TABLE IF NOT EXISTS doc_chunks (
+  id INTEGER PRIMARY KEY,
+  doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL,
+  idx INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  vec BLOB
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON doc_chunks(doc_id);
+
+CREATE TABLE IF NOT EXISTS conv_docs (
+  conv_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  PRIMARY KEY (conv_id, doc_id)
+);
+`);
+
 // additive migrations — ignore "duplicate column" once applied
 try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /* exists */ }
 // chat agent mode: an assistant message can embed an agent run; a conversation
