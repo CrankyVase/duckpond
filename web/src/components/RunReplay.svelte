@@ -11,7 +11,7 @@
   let open = $state(true); // the work IS the message — hide it only on demand
 
   const TERMINAL = new Set(['done', 'error', 'stopped']);
-  const SKIP = new Set(['delta', 'tool_delta', 'status']);
+  const SKIP = new Set(['delta', 'tool_delta', 'status', 'image_job', 'image_progress', 'image_preview', 'image_done']);
 
   $effect(() => {
     events = []; run = null;
