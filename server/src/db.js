@@ -252,6 +252,23 @@ CREATE TABLE IF NOT EXISTS model_cards (
 );
 `);
 
+// Speech Lab clips: audio rendered from cloned/designed voices by the speech
+// bridge (:8766). Files live in data/speech-clips/<user_id>/; rows are the
+// user-facing library.
+db.exec(`
+CREATE TABLE IF NOT EXISTS speech_clips (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  voice_id TEXT,
+  voice_name TEXT,
+  text TEXT NOT NULL,
+  file TEXT NOT NULL,
+  seconds REAL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_clips_user ON speech_clips(user_id, id DESC);
+`);
+
 // additive migrations — ignore "duplicate column" once applied
 try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /* exists */ }
 // chat agent mode: an assistant message can embed an agent run; a conversation

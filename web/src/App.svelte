@@ -5,6 +5,7 @@
   import Login from './components/Login.svelte';
   import SettingsPanel from './components/SettingsPanel.svelte';
   import Sidebar from './components/Sidebar.svelte';
+  import SpeechPanel from './components/SpeechPanel.svelte';
   import StatsPanel from './components/StatsPanel.svelte';
   import Toast from './components/Toast.svelte';
   import Topbar from './components/Topbar.svelte';
@@ -73,6 +74,8 @@
       <Topbar />
       {#if app.view === 'stats'}
         <StatsPanel />
+      {:else if app.view === 'speech'}
+        <SpeechPanel />
       {:else}
         <Chat />
       {/if}

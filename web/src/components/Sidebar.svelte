@@ -2,6 +2,8 @@
   import { api } from '../lib/api.js';
   import { app, loadConversations, newConversation, openConversation } from '../lib/state.svelte.js';
   import Duck from './Duck.svelte';
+  import AudioWaveform from '@lucide/svelte/icons/audio-waveform';
+  import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Search from '@lucide/svelte/icons/search';
@@ -127,6 +129,15 @@
       {/if}
     </nav>
 
+    <div class="pages">
+      <button class="page" onclick={() => (app.view = 'stats')}>
+        <BarChart3 size={14} /> Stats
+      </button>
+      <button class="page" onclick={() => (app.view = 'speech')}>
+        <AudioWaveform size={14} /> Speech Lab
+      </button>
+    </div>
+
     <div class="bottom">
       <span class="avatar">{app.user?.username?.[0]?.toUpperCase() ?? '?'}</span>
       <span class="who">
@@ -229,6 +240,20 @@
     background: var(--accent-deep); color: #16110a;
     font-size: 13px; font-weight: 700;
   }
+  .pages {
+    display: flex; gap: 6px; padding: 8px 12px 2px;
+    border-top: 1px solid var(--border-soft);
+  }
+  .page {
+    all: unset; cursor: pointer; flex: 1;
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 8px 10px; border-radius: 9px;
+    font-size: 12px; font-weight: 500; color: var(--text-dim);
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+  }
+  .page:hover { background: var(--bg-hover); color: var(--text); }
+  .page :global(svg) { color: var(--accent); }
+
   .who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
   .wname { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wrole { font-size: 11px; color: var(--text-faint); }

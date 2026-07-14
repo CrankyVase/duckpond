@@ -5,16 +5,11 @@
     app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
-  import {
-    bindVoice, startVoice, stopVoice, voice, voiceFeedDelta, voiceFeedDone, voiceResetBuffer,
-  } from '../lib/voice.svelte.js';
   import ChatFiles from './ChatFiles.svelte';
   import Message from './Message.svelte';
   import RunFeed from './RunFeed.svelte';
-  import VoiceOrb from './VoiceOrb.svelte';
   import Welcome from './Welcome.svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
-  import AudioLines from '@lucide/svelte/icons/audio-lines';
   import FileText from '@lucide/svelte/icons/file-text';
   import X from '@lucide/svelte/icons/x';
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
@@ -128,7 +123,6 @@
       case 'thinking': if (s) { s.loading = false; pendThink += ev.text; scheduleFlush(); } break;
       case 'delta':
         if (s) { s.loading = false; pendText += ev.text; scheduleFlush(); }
-        if (voice.open && here) voiceFeedDelta(ev.text);
         break;
       case 'tok_s': if (s) { s.tokS = ev.value; s.n = ev.n; } break;
       case 'tool_delta':
@@ -180,7 +174,6 @@
       case 'done':
         if (raf) { cancelAnimationFrame(raf); raf = 0; pendText = ''; pendThink = ''; }
         toolBuf = null;
-        if (voice.open && here) voiceFeedDone();
         if (here) {
           app.conv.messages.push(ev.msg);
           app.conv.active_leaf_id = ev.msg.id;
@@ -229,7 +222,6 @@
         if (raf) { cancelAnimationFrame(raf); raf = 0; }
         pendText = '';
         if (s) s.text = '';
-        if (voice.open && here) voiceResetBuffer();
         break;
       case 'widget':
         // an interactive card the model summoned — show it live; it's also baked
@@ -250,7 +242,6 @@
         break;
       case 'error':
         if (s) s.error = ev.message;
-        if (voice.open && here) voiceFeedDone();
         break;
     }
   }
@@ -359,19 +350,6 @@
     attachedDocs = attachedDocs.filter((d) => d.id !== doc.id);
   }
 
-  // ---- voice mode ----
-  // A spoken utterance arrives whenever the transcription lands — possibly a
-  // beat before the previous stream has fully wound down (barge-in aborts it,
-  // but the finally{} cleanup is async). Wait briefly for the slot.
-  async function voiceUtterance(text) {
-    for (let i = 0; i < 60 && app.streaming; i++) await new Promise((r) => setTimeout(r, 100));
-    if (app.streaming || !app.conv) { voice.state = 'listening'; return; }
-    run({ content: text });
-  }
-  $effect(() => {
-    bindVoice({ onUtterance: voiceUtterance, onBargeIn: stop });
-    return () => { if (voice.open) stopVoice(); };
-  });
 
   // web-search depth: cycle quick → normal → ultra
   const RESEARCH = { quick: 'Quick', normal: 'Normal', ultra: 'Ultra research' };
@@ -571,9 +549,6 @@
         <button class="tool" class:on={thinkingOn} disabled={!model}
           title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
           onclick={toggleThinking}><Lightbulb size={15} /></button>
-        <button class="tool" class:on={voice.open} disabled={!app.conv}
-          title={voice.open ? 'End voice conversation' : 'Talk to the duck — live voice conversation'}
-          onclick={() => (voice.open ? stopVoice() : startVoice())}><AudioLines size={15} /></button>
         <div class="grow"></div>
         {#if busy}
           <button class="send stop" onclick={stop} title="Stop generating">
@@ -592,9 +567,6 @@
  </div>
  {#if app.conv?.workspace_id}
    <ChatFiles />
- {/if}
- {#if voice.open}
-   <VoiceOrb />
  {/if}
 </div>
 

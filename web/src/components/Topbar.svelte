@@ -2,7 +2,6 @@
   import { app } from '../lib/state.svelte.js';
   import ContextBar from './ContextBar.svelte';
   import ModelPicker from './ModelPicker.svelte';
-  import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
   import Settings2 from '@lucide/svelte/icons/settings-2';
@@ -21,14 +20,12 @@
     </button>
     <ModelPicker />
   {:else}
-    <span class="viewtitle">Stats</span>
+    <button class="ghost iconb" onclick={() => (app.view = 'chat')} title="Back to chat">
+      <MessageSquare size={16} />
+    </button>
+    <span class="viewtitle">{app.view === 'stats' ? 'Stats' : 'Speech Lab'}</span>
   {/if}
   <div class="spacer"></div>
-  <button class="ghost iconb" class:activeview={app.view === 'stats'}
-    onclick={() => (app.view = app.view === 'stats' ? 'chat' : 'stats')}
-    title={app.view === 'stats' ? 'Back to chat' : 'Open usage stats'}>
-    {#if app.view === 'stats'}<MessageSquare size={16} />{:else}<BarChart3 size={16} />{/if}
-  </button>
   {#if vram}
     <span class="vram" class:hot={vramPct > 0.9} title="GPU VRAM used / total">
       <span class="vlabel">VRAM</span> {vram}
@@ -50,7 +47,6 @@
   }
   .spacer { flex: 1; }
   .iconb { padding: 7px; display: grid; place-items: center; border-radius: 9px; }
-  .iconb.activeview { color: var(--accent); background: var(--bg-hover); }
   .viewtitle { font-size: 13px; font-weight: 600; color: var(--text-dim); padding-left: 4px; }
   .vram {
     font-family: var(--mono); font-size: 11px; color: var(--text-dim);
