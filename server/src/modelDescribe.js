@@ -51,6 +51,14 @@ export function modelParamsB(id) {
   return { totalB, activeB: moe ? Number(moe[2]) : totalB, moe: !!moe };
 }
 
+// The one dynamic sentence (depends on the router's ctx preset, not the model
+// name) — appended to Hugging Face card blurbs too, see routes/models.js.
+export function ctxBlurb(ctxSize) {
+  if (!ctxSize) return null;
+  const pages = Math.max(1, Math.round((ctxSize * 0.75) / 250));
+  return `Remembers roughly the last ${pages.toLocaleString()} pages worth of this conversation before it starts forgetting the oldest parts.`;
+}
+
 export function describeModel(id, ctxSize) {
   const lower = String(id).toLowerCase();
   const family = FAMILIES.find(([key]) => lower.includes(key));
@@ -77,10 +85,8 @@ export function describeModel(id, ctxSize) {
   if (tier) sentences.push(`${tier.speed[0].toUpperCase()}${tier.speed.slice(1)} to respond — ${tier.quality}.`);
   if (quant) sentences.push(quant[0].toUpperCase() + quant.slice(1) + '.');
   if (traits.length) sentences.push(traits.map((t) => t[0].toUpperCase() + t.slice(1)).join('. ') + '.');
-  if (ctxSize) {
-    const pages = Math.max(1, Math.round((ctxSize * 0.75) / 250));
-    sentences.push(`Remembers roughly the last ${pages.toLocaleString()} pages worth of this conversation before it starts forgetting the oldest parts.`);
-  }
+  const ctx = ctxBlurb(ctxSize);
+  if (ctx) sentences.push(ctx);
 
   return {
     blurb: sentences.join(' ') || 'A local language model. No further details could be inferred from its filename.',

@@ -990,8 +990,17 @@ export default async function chatRoutes(app) {
       // capability gate (generative UI): small models fumble the nested
       // tool-call JSON a dashboard needs — don't offer or describe it to them
       if (!dashboardCapable(conv.model_id)) disabledTools.add('show_dashboard');
-      const promptMessages = withToolsPolicy(
-        buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
+      // constrained output (Settings → Structured output): a GBNF grammar or
+      // JSON schema forces the shape of the WHOLE reply, which is incompatible
+      // with tool-call JSON — the turn runs plain, and the system prompt skips
+      // the tool policies it couldn't honor anyway
+      const schemaStr = String(conv._settings.json_schema ?? '').trim();
+      const grammarStr = String(conv._settings.grammar ?? '').trim();
+      const constrained = !!(schemaStr || grammarStr);
+      const promptMessages = constrained
+        ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
+        : withToolsPolicy(
+          buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
       // deep-research mode: prepend the directive to the leading system message
       if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
@@ -1040,6 +1049,21 @@ export default async function chatRoutes(app) {
       }
       const params = { max_tokens: -1 };
       for (const k of GEN_PARAM_KEYS) params[k] = conv._settings[k];
+      // Mirostat (llama.cpp native): when on, the entropy controller replaces
+      // top-k/top-p sampling. Passed straight through to llama-server.
+      if (Number(conv._settings.mirostat) > 0) {
+        params.mirostat = Number(conv._settings.mirostat) === 2 ? 2 : 1;
+        params.mirostat_tau = Number(conv._settings.mirostat_tau) || 5;
+        params.mirostat_eta = Number(conv._settings.mirostat_eta) || 0.1;
+      }
+      // GBNF grammar / JSON-schema passthrough to llama-server (schema wins
+      // when both are set — it's the more specific ask)
+      if (schemaStr) {
+        try { params.json_schema = JSON.parse(schemaStr); }
+        catch { send({ type: 'error', message: 'The saved JSON schema for this model is not valid JSON — fix or clear it in Settings.' }); return; }
+      } else if (grammarStr) {
+        params.grammar = grammarStr;
+      }
       // thinking control: enable_thinking is honored by qwen-style templates,
       // reasoning_effort by gpt-oss-style ones; unsupported kwargs are ignored
       const think = conv._settings.thinking;
@@ -1112,25 +1136,33 @@ export default async function chatRoutes(app) {
       };
 
       // first call offers the tools (just the start_project gate until the
-      // conversation has a workspace); if the template rejects them, retry plain
+      // conversation has a workspace); if the template rejects them, retry
+      // plain. Constrained turns (grammar/schema) never get tools at all.
       let res;
-      let toolsOn = true;
+      let toolsOn = !constrained;
       try {
-        const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS]
-          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS], disabledTools);
-        res = await streamChat({
-          model: conv.model_id, messages: promptMessages,
-          params: {
-            ...params,
-            tools: imgPrefs.allowed
-              ? baseTools
-              : baseTools.filter((t) => t.function.name !== 'generate_image'),
-            tool_choice: 'auto',
-          },
-          abortSignal: abort.signal, onDelta,
-        });
+        if (constrained) {
+          res = await streamChat({
+            model: conv.model_id, messages: promptMessages, params,
+            abortSignal: abort.signal, onDelta,
+          });
+        } else {
+          const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS]
+            : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS], disabledTools);
+          res = await streamChat({
+            model: conv.model_id, messages: promptMessages,
+            params: {
+              ...params,
+              tools: imgPrefs.allowed
+                ? baseTools
+                : baseTools.filter((t) => t.function.name !== 'generate_image'),
+              tool_choice: 'auto',
+            },
+            abortSignal: abort.signal, onDelta,
+          });
+        }
       } catch (err) {
-        if (abort.signal.aborted || !/tool/i.test(String(err.message))) throw err;
+        if (abort.signal.aborted || constrained || !/tool/i.test(String(err.message))) throw err;
         req.log.warn({ model: conv.model_id }, 'template rejected tools — plain chat fallback');
         toolsOn = false;
         res = await streamChat({

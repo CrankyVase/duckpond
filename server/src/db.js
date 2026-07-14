@@ -238,6 +238,20 @@ CREATE TABLE IF NOT EXISTS conv_docs (
 );
 `);
 
+// Hugging Face model-card lookups (modelCards.js): one row per local model id,
+// ok=0 rows are negative cache ("no good match") so we don't re-search HF on
+// every /api/models until the TTL expires.
+db.exec(`
+CREATE TABLE IF NOT EXISTS model_cards (
+  model_id TEXT PRIMARY KEY,
+  repo TEXT,
+  url TEXT,
+  blurb TEXT,
+  ok INTEGER NOT NULL DEFAULT 0,
+  fetched_at INTEGER NOT NULL
+);
+`);
+
 // additive migrations — ignore "duplicate column" once applied
 try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /* exists */ }
 // chat agent mode: an assistant message can embed an agent run; a conversation

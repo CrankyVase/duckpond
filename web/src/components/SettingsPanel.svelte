@@ -183,6 +183,10 @@
   }
 
   async function saveAll() {
+    if (form?.json_schema?.trim()) {
+      try { JSON.parse(form.json_schema); }
+      catch { toast('The JSON schema is not valid JSON', 'error'); return; }
+    }
     saving = true;
     try {
       if (model && form) {
@@ -308,6 +312,29 @@
           <div class="shead"><span>Repeat penalty</span><span class="sval mono">{form.repeat_penalty.toFixed(2)}</span></div>
           <input type="range" min="1" max="1.6" step="0.01" bind:value={form.repeat_penalty} />
         </div>
+        <div class="row">
+          <div class="rlabel">
+            <div class="rt">Mirostat</div>
+            <div class="rd">entropy-target sampling — replaces Top P / Top K while on</div>
+          </div>
+          <select bind:value={form.mirostat}>
+            <option value={0}>off</option>
+            <option value={1}>v1</option>
+            <option value={2}>v2</option>
+          </select>
+        </div>
+        {#if form.mirostat}
+          <div class="srow">
+            <div class="shead"><span>Mirostat tau</span><span class="sval mono">{Number(form.mirostat_tau).toFixed(1)}</span></div>
+            <input type="range" min="1" max="10" step="0.5" bind:value={form.mirostat_tau} />
+            <div class="hint">target surprise — lower reads focused, higher reads adventurous</div>
+          </div>
+          <div class="srow">
+            <div class="shead"><span>Mirostat eta</span><span class="sval mono">{Number(form.mirostat_eta).toFixed(2)}</span></div>
+            <input type="range" min="0.01" max="1" step="0.01" bind:value={form.mirostat_eta} />
+            <div class="hint">how quickly the controller corrects toward tau</div>
+          </div>
+        {/if}
         <div class="srow">
           <div class="shead"><span>Context budget</span><span class="sval mono">{Math.round(form.ctx_size / 1024)}k</span></div>
           <input type="range" min="4096" max="131072" step="4096" bind:value={form.ctx_size} />
@@ -327,6 +354,14 @@
         </div>
         <label class="sys">System prompt
           <textarea rows="3" bind:value={form.system_prompt} placeholder="(none)"></textarea>
+        </label>
+        <div class="substitle">Structured output</div>
+        <div class="hint">Force every reply from this model into a shape: a GBNF grammar or a JSON schema (both llama.cpp native). While either is set the model can only answer in that shape — tools, search, and widgets are off. Schema wins if both are filled in.</div>
+        <label class="sys">GBNF grammar
+          <textarea rows="3" class="monota" bind:value={form.grammar} placeholder={'root ::= …   (empty = off)'}></textarea>
+        </label>
+        <label class="sys">JSON schema
+          <textarea rows="3" class="monota" bind:value={form.json_schema} placeholder={'{"type": "object", …}   (empty = off)'}></textarea>
         </label>
       {:else}
         <div class="hint">Pick a model to edit its generation settings.</div>
@@ -622,6 +657,7 @@
 
   .sys { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-dim); }
   .sys textarea { resize: vertical; font-size: 13px; }
+  .monota { font-family: var(--mono); font-size: 12px !important; line-height: 1.5; }
 
   .tog {
     all: unset; cursor: pointer; flex-shrink: 0;

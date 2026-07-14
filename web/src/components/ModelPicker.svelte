@@ -100,7 +100,13 @@
                 {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1024)}k ctx{/if}
               </span>
             </span>
-            {#if m.blurb}
+            {#if m.card?.url}
+              <a class="info" href={m.card.url} target="_blank" rel="noreferrer"
+                onclick={(e) => e.stopPropagation()}
+                title="{m.blurb}{'\n\n'}(from {m.card.repo} — click to open the model card)">
+                <Info size={13} />
+              </a>
+            {:else if m.blurb}
               <button class="info" onclick={(e) => e.stopPropagation()}
                 title={m.blurb}>
                 <Info size={13} />
