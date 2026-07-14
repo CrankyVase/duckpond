@@ -232,15 +232,24 @@ export async function execTool(run, ws, name, args) {
     case 'generate_image': {
       if (!args.prompt?.trim()) return 'ERROR: prompt is required (a complete visual description)';
       try {
+        // live progress streams to watchers as transient events (store:false —
+        // preview frames are big base64 blobs that don't belong in the replay
+        // DB); chat.js forwards them to the same imgjob UI plain chat uses
+        emit(run.id, 'image_job', { prompt: args.prompt }, { store: false });
         const r = await generateViaBridge({
           userId: run.user_id, prompt: args.prompt, size: args.size ?? '1024x1024',
           steps: stepsForQuality(getUserImagePrefs(run.user_id).quality),
+          onProgress: (ev) => emit(run.id, ev.type === 'preview' ? 'image_preview' : 'image_progress',
+            ev.type === 'preview' ? { b64: ev.b64 } : { phase: ev.phase, step: ev.step, steps: ev.steps },
+            { store: false }),
         });
+        emit(run.id, 'image_done', {}, { store: false });
         for (const im of r.images) {
           emit(run.id, 'image', { image_id: im.id, url: im.url, prompt: args.prompt, model: r.model_used });
         }
         return `Image generated and already shown to the user (${r.images.map((im) => im.url).join(', ')}). Do not repeat the URL; just reference the image briefly.`;
       } catch (err) {
+        emit(run.id, 'image_done', {}, { store: false });
         return `ERROR: image generation failed: ${err.message}`;
       }
     }

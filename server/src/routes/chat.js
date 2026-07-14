@@ -1181,6 +1181,11 @@ export default async function chatRoutes(app) {
             else if (e.reasoning) send({ type: 'thinking', text: e.reasoning });
           } else if (e.type === 'tool_delta') {
             send({ type: 'tool_delta', index: e.index, name: e.name, args: e.args });
+          } else if (e.type === 'image_job' || e.type === 'image_progress'
+              || e.type === 'image_preview' || e.type === 'image_done') {
+            // live image progress from an agent-run generate_image → the same
+            // top-level events (and imgjob UI) a plain chat image turn uses
+            send({ type: e.type, prompt: e.prompt, phase: e.phase, step: e.step, steps: e.steps, b64: e.b64 });
           } else {
             send({ type: 'agent', event: e });
           }
