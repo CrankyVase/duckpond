@@ -1,7 +1,8 @@
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { gpuVram, listModels, loadModel, unloadModel } from '../llama.js';
-import { describeModel } from '../modelDescribe.js';
+import { ctxBlurb, describeModel } from '../modelDescribe.js';
+import { cardFor, queueCardFetch } from '../modelCards.js';
 import { TOOL_CATALOG } from '../toolCatalog.js';
 
 // Defaults per spec §1; overridable per model, stored in model_settings.
@@ -29,9 +30,21 @@ export function modelSettings(modelId) {
 export default async function modelRoutes(app) {
   app.addHook('preHandler', requireAuth);
 
-  app.get('/api/models', async () => {
+  app.get('/api/models', async (req) => {
     const models = await listModels();
-    return models.map((m) => ({ ...m, settings: modelSettings(m.id), ...describeModel(m.id, m.ctxSize) }));
+    // background: fill/refresh Hugging Face card blurbs (never blocks this reply)
+    queueCardFetch(models.map((m) => m.id), req.log);
+    return models.map((m) => {
+      const h = describeModel(m.id, m.ctxSize);
+      const card = cardFor(m.id);
+      if (card) {
+        // the real card description beats filename guessing; keep the dynamic
+        // context sentence and the heuristic tags either way
+        h.blurb = [card.blurb, ctxBlurb(m.ctxSize)].filter(Boolean).join(' ');
+        h.card = { repo: card.repo, url: card.url };
+      }
+      return { ...m, settings: modelSettings(m.id), ...h };
+    });
   });
 
   app.post('/api/models/:id/load', async (req) => {
