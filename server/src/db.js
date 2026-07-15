@@ -298,4 +298,20 @@ try { db.exec('ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 
 try { db.exec('ALTER TABLE memories ADD COLUMN repetitions INTEGER NOT NULL DEFAULT 1'); } catch { /* exists */ }
 try { db.exec("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'extracted'"); } catch { /* exists */ }
 
+// per-user read-aloud voice (Voxtral voice_id incl. emotion suffix)
+try { db.exec('ALTER TABLE users ADD COLUMN tts_voice TEXT'); } catch { /* exists */ }
+
+// Theme marketplace: user-published themes (full color map + layout + effects
+// + css bundled in theme_json). Seeded by routes/themes.js on first boot.
+db.exec(`CREATE TABLE IF NOT EXISTS community_themes (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  author TEXT NOT NULL,
+  name TEXT NOT NULL,
+  blurb TEXT NOT NULL DEFAULT '',
+  theme_json TEXT NOT NULL,
+  downloads INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+)`);
+
 export function nowSec() { return Math.floor(Date.now() / 1000); }

@@ -1,4 +1,0 @@
-# Speech bridge image: the imagegen ROCm base (torch + RDNA4 support) plus
-# OmniVoice and the tiny API layer. Rebuild: podman build -t duckpond-speech .
-FROM localhost/cranky-imagegen-rocm:latest
-RUN python3 -m pip install --no-cache-dir omnivoice fastapi uvicorn soundfile

@@ -181,6 +181,38 @@ export const PRESETS = [
       'scrollbar': '#1e321e',
     },
   },
+  {
+    id: 'synthwave',
+    name: 'Synthwave',
+    dark: true,
+    blurb: 'neon magenta on midnight, glow it up',
+    effects: { glow: true, anim: 'full', bg: 'animated', bgA: '#170b2b', bgB: '#0b1d33', bgAngle: 160 },
+    colors: {
+      'bg': '#120a20', 'bg-sidebar': '#160d27', 'bg-raised': '#221338', 'bg-card': '#24153b',
+      'bg-hover': '#301c4d', 'bg-input': '#1b1030', 'bg-code': '#0e081a', 'bg-code-inline': '#281845',
+      'border': '#3d2660', 'border-soft': '#2c1b47',
+      'text': '#f2e7ff', 'text-dim': '#b49fd4', 'text-faint': '#7d6a9e',
+      'accent': '#ff5ec4', 'accent-deep': '#d63aa2', 'accent-dim': '#8e2d6f', 'on-accent': '#1c0514',
+      'green': '#4fe3c1', 'yellow': '#ffd166', 'red': '#ff5a6a',
+      'scrollbar': '#3d2a5c',
+    },
+  },
+  {
+    id: 'abyss',
+    name: 'Abyss',
+    dark: true,
+    blurb: 'deep-ocean blues, made for glass',
+    effects: { glass: 'liquid', glassBlur: 22, glassOpacity: 0.52, bg: 'gradient', bgA: '#02060d', bgB: '#0a2438', bgAngle: 170 },
+    colors: {
+      'bg': '#040a12', 'bg-sidebar': '#061019', 'bg-raised': '#0d1c2a', 'bg-card': '#0e1f2f',
+      'bg-hover': '#14293c', 'bg-input': '#091724', 'bg-code': '#030910', 'bg-code-inline': '#102334',
+      'border': '#1c3850', 'border-soft': '#122839',
+      'text': '#dcebf5', 'text-dim': '#8fadc2', 'text-faint': '#5b7a8e',
+      'accent': '#3fc1de', 'accent-deep': '#2596b3', 'accent-dim': '#1a6a83', 'on-accent': '#03141c',
+      'green': '#4ec98f', 'yellow': '#d9b95c', 'red': '#d95f65',
+      'scrollbar': '#1d3a52',
+    },
+  },
 ];
 
 export const LAYOUT_OPTIONS = {
@@ -206,5 +238,41 @@ export const LAYOUT_OPTIONS = {
 };
 
 export const DEFAULT_LAYOUT = { chatWidth: 'normal', sidebar: 'left', radius: 'soft', bubbles: 'bubbles' };
+
+// ---- effects: glass, glow, motion, backgrounds, scale, type ----
+export const GLASS_MODES = [
+  ['off', 'Off', 'solid surfaces'],
+  ['frosted', 'Frosted', 'soft blur, quiet tint'],
+  ['liquid', 'Liquid', 'deep blur, wet shine'],
+];
+export const ANIM_MODES = [
+  ['off', 'Off', 'no motion at all'],
+  ['subtle', 'Subtle', 'the stock fades'],
+  ['full', 'Full', 'lively hovers & entrances'],
+];
+export const BG_MODES = [
+  ['solid', 'Solid', 'theme background'],
+  ['gradient', 'Gradient', 'two-color blend'],
+  ['animated', 'Animated', 'slow drifting blend'],
+];
+export const FONT_OPTIONS = [
+  ['default', 'Pond', "'Inter Variable', 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif"],
+  ['rounded', 'Rounded', "ui-rounded, 'SF Pro Rounded', 'Nunito', 'Varela Round', 'Quicksand', sans-serif"],
+  ['serif', 'Serif', "'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif"],
+  ['mono', 'Terminal', "'JetBrains Mono', ui-monospace, Menlo, monospace"],
+];
+
+export const DEFAULT_EFFECTS = {
+  glass: 'off',        // off | frosted | liquid
+  glassBlur: 14,       // px, 4..32
+  glassOpacity: 0.6,   // surface tint strength, 0.3..0.92
+  glow: false,         // accent glow on primary controls
+  anim: 'subtle',      // off | subtle | full
+  bg: 'solid',         // solid | gradient | animated
+  bgA: '', bgB: '',    // gradient stops ('' → derived from the theme)
+  bgAngle: 160,        // degrees
+  uiScale: 1,          // 0.85..1.25
+  font: 'default',
+};
 
 export const presetById = (id) => PRESETS.find((p) => p.id === id) ?? PRESETS[0];

@@ -1,6 +1,31 @@
-# Voxtral TTS on CPU: official vLLM CPU build + the vllm-omni layer.
-# --no-deps keeps pip from replacing the CPU vllm with the CUDA wheel;
-# omni's real deps are added explicitly.
+# Voxtral-4B-TTS on CPU — BLOCKED upstream, kept for the day it isn't.
+#
+# vllm-omni (the only runtime for Voxtral TTS) ships cuda/rocm/npu/xpu
+# platforms only — NO CPU platform as of 0.24.0. This image builds and the
+# server starts, but engine init dies in resolve_stage_configs with
+# NotImplementedError (current_omni_platform has no CPU implementation), and
+# the worker classes it would need (vllm_omni/worker/gpu_*.py, ~2300 lines
+# per platform port judging by the NPU tree) don't exist for CPU.
+#
+# DuckPond therefore talks to Voxtral through api.mistral.ai (same model,
+# hosted) via server/src/speechEngine.js. If vllm-omni ever grows a CPU
+# platform: rebuild this, run it, and paste http://127.0.0.1:8767 into the
+# Speech page's "local vLLM-Omni URL" box — everything else already works.
+#
+#   podman build -t duckpond-voxtral-cpu -f Containerfile .
+#   podman run -d --name voxtral-tts -p 8767:8000 \
+#     -v /home/lewis/speech-models/Voxtral-4B-TTS-2603:/model:z \
+#     -e VLLM_CPU_KVCACHE_SPACE=8 duckpond-voxtral-cpu \
+#     /model --omni --tokenizer-mode mistral --config-format mistral \
+#     --load-format mistral --served-model-name voxtral-tts --host 0.0.0.0 --port 8000
+
 FROM public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.18.0
-RUN pip install --no-cache-dir --no-deps vllm-omni && \
-    pip install --no-cache-dir "mistral-common>=1.10.0" soundfile librosa
+
+# vllm-omni MUST match vllm's minor version (0.24 against 0.18 breaks on
+# internal APIs). --no-deps keeps pip from clobbering the CPU torch build
+# with CUDA wheels, so the runtime deps it actually imports are listed by hand.
+RUN pip install --no-cache-dir \
+      "mistral-common>=1.10.0" soundfile librosa \
+      aenum==3.1.16 omegaconf prettytable einops janus msgpack pyzmq \
+      av imageio gguf onnxruntime resampy pydub \
+ && pip install --no-cache-dir --no-deps "vllm-omni==0.18.0"

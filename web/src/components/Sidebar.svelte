@@ -134,9 +134,14 @@
       <button class="page" onclick={() => (app.view = 'stats')}>
         <BarChart3 size={14} /> Stats
       </button>
+      <!-- Speech Lab hidden 2026-07-15: local Voxtral turned out impossible
+           (vllm-omni has no CPU platform) and the hosted-API fallback was NOT
+           okay with Lewis. Next TTS model: ResembleAI/chatterbox — re-enable
+           this button when that's built.
       <button class="page" onclick={() => (app.view = 'speech')}>
         <AudioWaveform size={14} /> Speech Lab
       </button>
+      -->
     </div>
 
     <div class="bottom">

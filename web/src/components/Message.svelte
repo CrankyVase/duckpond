@@ -197,12 +197,15 @@
             </span>
           {/if}
           <button class="ic" onclick={copyMsg} title={copied ? 'Copied' : 'Copy'}><Copy size={14} /></button>
+          <!-- Read-aloud hidden 2026-07-15 with the rest of TTS; comes back
+               with the ResembleAI/chatterbox build.
           <button class="ic" class:on={speech.playingId === msg.id}
             class:pulse={speech.loadingId === msg.id}
             onclick={() => toggleSpeech(msg)}
             title={speech.playingId === msg.id ? 'Stop reading' : 'Read aloud'}>
             {#if speech.playingId === msg.id}<Square size={13} />{:else}<Volume2 size={14} />{/if}
           </button>
+          -->
           <button class="ic" onclick={() => onregenerate?.(msg)} title="Regenerate (branches)"><RotateCcw size={14} /></button>
           <button class="ic" class:on={msg.pinned} onclick={() => onpin?.(msg)} title={msg.pinned ? 'Unpin' : 'Pin — survives compaction'}>
             {#if msg.pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}

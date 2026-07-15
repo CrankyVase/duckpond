@@ -18,6 +18,7 @@ import exportRoutes from './routes/exports.js';
 import searchRoutes from './routes/search.js';
 import speechRoutes from './routes/speech.js';
 import statsRoutes from './routes/stats.js';
+import themeRoutes from './routes/themes.js';
 import ttsRoutes from './routes/tts.js';
 import voiceRoutes from './routes/voice.js';
 
@@ -44,6 +45,7 @@ await app.register(searchRoutes);
 await app.register(docRoutes);
 await app.register(exportRoutes);
 await app.register(speechRoutes);
+await app.register(themeRoutes);
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(dist)) {
