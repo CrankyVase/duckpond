@@ -12,13 +12,15 @@
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
 
-  // Duck Pond Control (ex-LlamaDash) — same host, port 8082 locally
+  // Duck Pond Control — owner only. Prod: dash.crankyvase.site · local: :8082
   function controlUrl() {
     const { protocol, hostname, port } = location;
+    if (hostname === 'aii.crankyvase.site' || hostname.endsWith('.crankyvase.site')) {
+      return `${protocol}//dash.crankyvase.site`;
+    }
     if (port === '3000' || port === '5199' || port === '8090') {
       return `${protocol}//${hostname}:8082`;
     }
-    // Same-origin tunnel edge cases — still try :8082
     return `${protocol}//${hostname}:8082`;
   }
 
@@ -154,9 +156,11 @@
         onclick={(e) => { e.preventDefault(); app.view = 'stats'; }}>
         <BarChart3 size={14} /> Stats
       </a>
-      <a class="page" href={controlUrl()} title="Duck Pond Control — hardware, models, router">
-        <Gauge size={14} /> Control
-      </a>
+      {#if app.user?.role === 'owner'}
+        <a class="page" href={controlUrl()} title="Duck Pond Control — owner only">
+          <Gauge size={14} /> Control
+        </a>
+      {/if}
       <!-- Speech Lab hidden 2026-07-15: local Voxtral turned out impossible
            (vllm-omni has no CPU platform) and the hosted-API fallback was NOT
            okay with Lewis. Next TTS model: ResembleAI/chatterbox — re-enable

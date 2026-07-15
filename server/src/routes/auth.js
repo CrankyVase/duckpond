@@ -8,11 +8,28 @@ import { DEFAULT_CORE_PROMPT, getSetting, setSetting } from '../settings.js';
 
 const INVITE_TTL_SEC = 7 * 24 * 60 * 60; // unused links die after a week
 
-const COOKIE_OPTS = {
-  path: '/', httpOnly: true, sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
-  maxAge: 60 * 60 * 24 * 30,
-};
+// Cookie must work across aii.crankyvase.site (chat) and dash.crankyvase.site
+// (Duck Pond Control). Host-only cookies do NOT cross subdomains — set Domain
+// when the request is on *.crankyvase.site. Secure when the client hit us via
+// HTTPS (Cloudflare sets x-forwarded-proto), so LAN plain-HTTP logins still work.
+function cookieOpts(req) {
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(':')[0].toLowerCase();
+  const proto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  const https = proto === 'https' || process.env.COOKIE_SECURE === '1';
+  const opts = {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: https,
+    maxAge: 60 * 60 * 24 * 30,
+  };
+  // Share with all subdomains of crankyvase.site (aii + dash)
+  if (host === 'crankyvase.site' || host.endsWith('.crankyvase.site')) {
+    opts.domain = '.crankyvase.site';
+  }
+  return opts;
+}
 
 export default async function authRoutes(app) {
   // First-run: if no users exist, the first signup becomes the owner.
@@ -25,7 +42,7 @@ export default async function authRoutes(app) {
       return reply.code(400).send({ error: 'username 2-32 chars [a-zA-Z0-9_-], password ≥ 8 chars' });
     }
     const id = await createUser(username, password, 'owner');
-    reply.setCookie('dp_session', createSession(id), COOKIE_OPTS);
+    reply.setCookie('dp_session', createSession(id), cookieOpts(req));
     return { ok: true, username, role: 'owner' };
   });
 
@@ -46,12 +63,16 @@ export default async function authRoutes(app) {
       return reply.code(401).send({ error: 'invalid credentials' });
     }
     clearFailures(username, ip);
-    reply.setCookie('dp_session', createSession(user.id), COOKIE_OPTS);
+    reply.setCookie('dp_session', createSession(user.id), cookieOpts(req));
     return { ok: true, username: user.username, role: user.role };
   });
 
   app.post('/api/auth/logout', async (req, reply) => {
     if (req.cookies?.dp_session) destroySession(req.cookies.dp_session);
+    // Must clear with the same Domain/Path/Secure that set it, or the browser
+    // keeps the host-only or domain cookie around.
+    reply.clearCookie('dp_session', cookieOpts(req));
+    // Also clear any legacy host-only cookie from before Domain was added
     reply.clearCookie('dp_session', { path: '/' });
     return { ok: true };
   });
@@ -214,7 +235,7 @@ export default async function authRoutes(app) {
       db.prepare('DELETE FROM users WHERE id = ?').run(id);
       return reply.code(410).send({ error: 'invite link is no longer valid' });
     }
-    reply.setCookie('dp_session', createSession(id), COOKIE_OPTS);
+    reply.setCookie('dp_session', createSession(id), cookieOpts(req));
     return { ok: true, username, role: 'friend' };
   });
 

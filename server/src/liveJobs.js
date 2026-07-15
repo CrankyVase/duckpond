@@ -17,7 +17,8 @@ const jobs = new Map();
 
 // Keep finished jobs briefly so a client that refreshes mid-done still gets
 // the final message without a race against the conversation reload.
-const DONE_TTL_MS = 60_000;
+// Keep finished jobs long enough for a client reconnect after Cloudflare blips
+const DONE_TTL_MS = 5 * 60_000;
 
 export function getLiveJob(convId) {
   return jobs.get(Number(convId)) ?? null;
@@ -54,6 +55,7 @@ export function createLiveJob(convId, userId) {
       run: null,
       events: [],
       liveTool: null,
+      lastWrite: null,
       pendingApproval: null,
       image: null,
       diffusion: null,
@@ -108,10 +110,18 @@ export function applyLiveEvent(job, ev) {
       const e = ev.event;
       if (!e) break;
       if (e.type === 'assistant') {
-        s.text = '';
+        if (s.liveTool?.content) {
+          s.lastWrite = { path: s.liveTool.path, content: s.liveTool.content, name: s.liveTool.name };
+        }
+        s.text = e.content || '';
         s.liveTool = null;
         s.events = [...(s.events || []), e];
       } else if (e.type === 'tool_call') {
+        if (s.liveTool?.content) {
+          s.lastWrite = { path: s.liveTool.path, content: s.liveTool.content, name: s.liveTool.name };
+        } else if (e.name === 'write_file' && e.args?.content) {
+          s.lastWrite = { path: e.args.path, content: e.args.content, name: 'write_file' };
+        }
         s.liveTool = null;
         s.events = [...(s.events || []), e];
       } else if (e.type === 'approval_request') {

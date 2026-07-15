@@ -1279,7 +1279,7 @@ export default async function chatRoutes(app) {
           armThink();
           reasoningTail = (reasoningTail + meta.reasoning).slice(-REPEAT_SCAN * 2);
           if (checkRepeat()) {
-            send({ type: 'error', message: 'Stopped — the model got stuck repeating itself instead of thinking.' });
+            send({ type: 'error', message: 'Stopped — the model got stuck repeating the same text.' });
             abort.abort();
             return;
           }

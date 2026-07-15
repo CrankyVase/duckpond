@@ -172,12 +172,27 @@
         if (!s) break;
         const e = ev.event;
         if (e.type === 'assistant') {
-          // step narration materializes as an event; the live buffer resets
+          // Step narration becomes a feed event. Keep any in-progress write
+          // preview (lastWrite) so code doesn't vanish between steps.
           if (raf) { cancelAnimationFrame(raf); raf = 0; }
           pendText = ''; toolBuf = null;
-          s.text = ''; s.liveTool = null;
+          if (s.liveTool?.content && (s.liveTool.name === 'write_file' || s.liveTool.path)) {
+            s.lastWrite = { path: s.liveTool.path, content: s.liveTool.content, name: s.liveTool.name };
+          }
+          s.text = e.content || '';
+          s.liveTool = null;
           (s.events ??= []).push(e);
         } else if (e.type === 'tool_call') {
+          // Freeze the streamed write into lastWrite before clearing the live buffer
+          if (s.liveTool?.content && (s.liveTool.name === 'write_file' || e.name === 'write_file')) {
+            s.lastWrite = {
+              path: s.liveTool.path || e.args?.path || null,
+              content: s.liveTool.content,
+              name: s.liveTool.name || e.name,
+            };
+          } else if (e.name === 'write_file' && e.args?.content) {
+            s.lastWrite = { path: e.args.path || null, content: e.args.content, name: 'write_file' };
+          }
           toolBuf = null; s.liveTool = null;
           s.events?.push(e);
         } else if (e.type === 'approval_request') {
@@ -304,6 +319,7 @@
           run: ev.run ?? null,
           events: ev.events ?? [],
           liveTool: ev.liveTool ?? null,
+          lastWrite: ev.lastWrite ?? null,
           pendingApproval: ev.pendingApproval ?? null,
           image: ev.image ?? null,
           diffusion: ev.diffusion ?? null,
@@ -324,7 +340,8 @@
   function emptyStreaming(convId) {
     return {
       convId, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
-      run: null, events: [], liveTool: null, pendingApproval: null, image: null, diffusion: null, queued: 0,
+      run: null, events: [], liveTool: null, lastWrite: null, pendingApproval: null,
+      image: null, diffusion: null, queued: 0,
       search: null, widgets: [],
     };
   }
@@ -357,8 +374,15 @@
   function snapHasContent(snap) {
     if (!snap) return false;
     return !!(snap.text || snap.thinking || snap.error || snap.run
-      || snap.events?.length || snap.liveTool || snap.widgets?.length
-      || snap.image || snap.diffusion);
+      || snap.events?.length || snap.liveTool || snap.lastWrite
+      || snap.widgets?.length || snap.image || snap.diffusion);
+  }
+
+  function codeFenceFromWrite(w) {
+    if (!w?.content) return '';
+    const lang = (w.path || '').split('.').pop() || '';
+    const head = w.path ? `// ${w.path}\n` : '';
+    return `${head}\`\`\`${lang}\n${w.content}\n\`\`\``;
   }
 
   /** Keep partial work as a real bubble so it never silently vanishes. */
@@ -368,19 +392,29 @@
     const last = app.conv.messages[app.conv.messages.length - 1];
     if (last?.role === 'assistant' && snap.text && last.content === snap.text) return;
     let content = snap.text || '';
-    if (snap.liveTool?.content) {
-      const lang = snap.liveTool.path?.split('.').pop() || '';
-      content += (content ? '\n\n' : '')
-        + `\`\`\`${lang}\n${snap.liveTool.content}\n\`\`\``;
-      if (snap.liveTool.path) content = `// ${snap.liveTool.path}\n` + content;
-    } else if (snap.liveTool?.path) {
-      content += (content ? '\n\n' : '') + `(writing ${snap.liveTool.path}…)`;
+    const write = snap.liveTool?.content ? snap.liveTool : snap.lastWrite;
+    if (write?.content) {
+      content += (content ? '\n\n' : '') + codeFenceFromWrite(write);
+    } else if (write?.path) {
+      content += (content ? '\n\n' : '') + `(writing ${write.path}…)`;
+    }
+    // Pull write_file args out of agent events if live buffers were cleared
+    if (!write?.content && snap.events?.length) {
+      for (let i = snap.events.length - 1; i >= 0; i--) {
+        const e = snap.events[i];
+        if (e.type === 'tool_call' && e.name === 'write_file' && e.args?.content) {
+          content += (content ? '\n\n' : '') + codeFenceFromWrite({
+            path: e.args.path, content: e.args.content,
+          });
+          break;
+        }
+      }
     }
     if (!content && snap.events?.length) {
-      content = '(reply interrupted — agent steps are saved in the run replay if present)';
+      content = '(work in progress — open Project files to see what was written)';
     }
     if (!content && !snap.error) return;
-    app.conv.messages.push({
+    const msg = {
       id: `tmp-${Date.now()}`,
       conv_id: convId,
       parent_id: app.conv.active_leaf_id,
@@ -390,7 +424,9 @@
       thinking: snap.thinking || null,
       widgets: snap.widgets ?? null,
       pinned: 0,
-    });
+    };
+    app.conv.messages.push(msg);
+    app.conv.active_leaf_id = msg.id;
   }
 
   async function endStream(convId) {
@@ -477,6 +513,7 @@
             if (!ev.text && preserveSnap.text) ev.text = preserveSnap.text;
             if (!ev.thinking && preserveSnap.thinking) ev.thinking = preserveSnap.thinking;
             if (!ev.liveTool && preserveSnap.liveTool) ev.liveTool = preserveSnap.liveTool;
+            if (!ev.lastWrite && preserveSnap.lastWrite) ev.lastWrite = preserveSnap.lastWrite;
             if (!ev.events?.length && preserveSnap.events?.length) ev.events = preserveSnap.events;
             if (!ev.widgets?.length && preserveSnap.widgets?.length) ev.widgets = preserveSnap.widgets;
             if (!ev.run && preserveSnap.run) ev.run = preserveSnap.run;
@@ -807,6 +844,14 @@
           <div class="agentwork live fade-in">
             <RunFeed events={[]} liveTool={streamingHere.liveTool} />
           </div>
+        {:else if streamingHere.lastWrite?.content}
+          <!-- Keep last write visible after the tool call finishes so code doesn't vanish -->
+          <div class="agentwork live fade-in lastwrite">
+            <div class="lw-head">
+              wrote {streamingHere.lastWrite.path || 'file'}
+            </div>
+            <pre class="lw-body">{streamingHere.lastWrite.content}</pre>
+          </div>
         {/if}
         {#if streamingHere.diffusion}
           {#if streamingHere.diffusion.phase === 'load' || streamingHere.diffusion.step === 0}
@@ -1058,6 +1103,15 @@
     font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
     color: var(--text-dim); white-space: pre-wrap; word-break: break-word;
     max-height: 340px; overflow: auto;
+  }
+  .lastwrite .lw-head {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 8px; font-family: var(--mono);
+  }
+  .lastwrite .lw-body {
+    margin: 0; max-height: 360px; overflow: auto;
+    font-family: var(--mono); font-size: 12px; line-height: 1.55;
+    color: var(--text-dim); white-space: pre-wrap; word-break: break-word;
   }
 
   /* queued follow-up messages (greyed under the live reply) */
