@@ -82,7 +82,7 @@
   .sites { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
   .sites li a {
     display: flex; align-items: center; gap: 7px;
-    padding: 3px 8px; border-radius: 7px; text-decoration: none;
+    padding: 3px 8px; border-radius: calc(7px * var(--rf)); text-decoration: none;
     color: var(--text-dim); font-size: 12px;
     transition: background 120ms ease;
   }

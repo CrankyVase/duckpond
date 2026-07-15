@@ -127,12 +127,12 @@
   .totals { display: flex; gap: 12px; margin-bottom: 28px; }
   .card {
     flex: 1; background: var(--bg-card); border: 1px solid var(--border-soft);
-    border-radius: 14px; padding: 16px 18px;
+    border-radius: calc(14px * var(--rf)); padding: 16px 18px;
   }
   .cardlabel { font-size: 12px; color: var(--text-faint); margin-bottom: 6px; }
   .cardval { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
-  section { margin-bottom: 30px; max-width: 780px; }
+  section { margin-bottom: 30px; }
   h2 { font-size: 13px; font-weight: 600; color: var(--text-dim); margin: 0 0 12px; }
 
   .bars { display: flex; flex-direction: column; gap: 10px; }
@@ -149,7 +149,7 @@
   .speedbars .barsvg { height: 14px; }
   .speedlbl { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
 
-  .tablewrap { overflow-x: auto; border: 1px solid var(--border-soft); border-radius: 12px; }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf)); }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th, td { text-align: left; padding: 8px 12px; white-space: nowrap; }
   th { color: var(--text-faint); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--border-soft); }

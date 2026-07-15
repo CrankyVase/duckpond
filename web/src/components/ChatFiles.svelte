@@ -133,7 +133,7 @@
     all: unset; cursor: pointer; align-self: flex-start;
     display: flex; flex-direction: column; align-items: center; gap: 8px;
     padding: 12px 7px; margin: 10px 8px 0 0;
-    border: 1px solid var(--border-soft); border-radius: 10px;
+    border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf));
     color: var(--text-faint); background: var(--bg-sidebar);
   }
   .rail:hover { color: var(--text); background: var(--bg-hover); }
@@ -141,7 +141,7 @@
 
   .panel {
     width: 212px; flex-shrink: 0; margin: 10px 10px 10px 0;
-    border: 1px solid var(--border-soft); border-radius: 12px;
+    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     background: var(--bg-sidebar);
     display: flex; flex-direction: column; min-height: 0; max-height: calc(100% - 20px);
   }
@@ -153,7 +153,7 @@
   .names { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .title { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-faint); }
   .ws { font-size: 11.5px; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .hbtn { all: unset; cursor: pointer; padding: 3px; border-radius: 6px; color: var(--text-faint); display: grid; place-items: center; }
+  .hbtn { all: unset; cursor: pointer; padding: 3px; border-radius: calc(6px * var(--rf)); color: var(--text-faint); display: grid; place-items: center; }
   .hbtn:hover { color: var(--text); background: var(--bg-hover); }
 
   .tree { overflow-y: auto; flex: 1; padding: 4px 0; }
@@ -176,7 +176,7 @@
   .card {
     width: min(760px, 90vw); max-height: 80vh;
     background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 14px; overflow: hidden;
+    border-radius: calc(14px * var(--rf)); overflow: hidden;
     display: flex; flex-direction: column;
     box-shadow: var(--shadow-lg);
   }

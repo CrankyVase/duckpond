@@ -117,6 +117,6 @@
   .dl:disabled { opacity: 0.4; }
   .wunknown {
     margin: 10px 0; padding: 8px 12px; font-size: 12px; color: var(--text-faint);
-    border: 1px dashed var(--border); border-radius: 10px;
+    border: 1px dashed var(--border); border-radius: calc(10px * var(--rf));
   }
 </style>

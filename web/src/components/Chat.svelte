@@ -574,12 +574,12 @@
   .chat { flex: 1; display: flex; min-width: 0; min-height: 0; }
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   .scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-padding-bottom: 40px; }
-  .thread { max-width: 780px; margin: 0 auto; padding: 20px 24px 0; }
+  .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 20px 24px 0; }
   .pad { height: 24px; }
   .agentwork {
     margin: 14px 0 8px 42px;
     padding: 12px 14px;
-    border: 1px solid var(--border-soft); border-radius: 12px;
+    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     background: var(--bg-card);
   }
   .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 42px; min-height: 26px; }
@@ -593,7 +593,7 @@
   }
   @keyframes shimmer { to { background-position: -200% 0; } }
 
-  .dock { position: relative; max-width: 780px; width: 100%; margin: 0 auto; padding: 4px 24px 10px; }
+  .dock { position: relative; max-width: var(--chat-maxw); width: 100%; margin: 0 auto; padding: 4px 24px 10px; }
   .tobottom {
     position: absolute; top: -46px; left: 50%; transform: translateX(-50%);
     color: var(--text-dim);
@@ -606,7 +606,7 @@
     display: flex; flex-direction: column;
     background: var(--bg-input);
     border: 1px solid var(--border);
-    border-radius: 18px;
+    border-radius: calc(18px * var(--rf));
     padding: 10px 10px 8px 16px;
     transition: border-color 180ms ease, box-shadow 180ms ease;
   }
@@ -636,7 +636,7 @@
   .tool {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 30px; height: 28px; border-radius: 8px;
+    width: 30px; height: 28px; border-radius: calc(8px * var(--rf));
     color: var(--text-faint);
     transition: background 120ms ease, color 120ms ease;
   }
@@ -664,12 +664,12 @@
     display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
   }
   .imgpreview {
-    width: min(320px, 70%); border-radius: 12px;
+    width: min(320px, 70%); border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
     box-shadow: 0 8px 32px color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .imgshimmer {
-    width: min(320px, 70%); aspect-ratio: 1; border-radius: 12px;
+    width: min(320px, 70%); aspect-ratio: 1; border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
     background: linear-gradient(110deg, var(--bg-raised) 40%, var(--bg-hover) 50%, var(--bg-raised) 60%);
     background-size: 220% 100%; animation: imgshim 1.6s linear infinite;
@@ -690,7 +690,7 @@
   .diffphase { font-family: var(--mono); font-size: 12px; }
   .diffcanvas {
     margin: 0; padding: 12px 14px;
-    background: var(--bg); border: 1px solid var(--border-soft); border-radius: 12px;
+    background: var(--bg); border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
     color: var(--text-dim); white-space: pre-wrap; word-break: break-word;
     max-height: 340px; overflow: auto;

@@ -6,6 +6,7 @@
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
+  import Palette from '@lucide/svelte/icons/palette';
   import Search from '@lucide/svelte/icons/search';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
@@ -144,6 +145,9 @@
         <span class="wname">{app.user?.username}</span>
         <span class="wrole">{app.user?.role}</span>
       </span>
+      <button class="ghost out" onclick={() => (app.themeStudioOpen = true)} title="Theme Studio — customize the look">
+        <Palette size={14} />
+      </button>
       <button class="ghost out" onclick={logout} title="Sign out"><LogOut size={14} /></button>
     </div>
   </div>
@@ -156,6 +160,10 @@
     transition: width 240ms cubic-bezier(0.25, 1, 0.35, 1);
   }
   aside.collapsed { width: 0; border-right-color: transparent; }
+  :global(html[data-sidebar='right']) aside {
+    border-right: none; border-left: 1px solid var(--border-soft);
+  }
+  :global(html[data-sidebar='right']) aside.collapsed { border-left-color: transparent; }
   .inner { width: 268px; height: 100%; display: flex; flex-direction: column; }
 
   .brand {
@@ -166,7 +174,7 @@
   }
   .mark {
     display: grid; place-items: center;
-    width: 30px; height: 30px; border-radius: 9px;
+    width: 30px; height: 30px; border-radius: calc(9px * var(--rf));
     background: var(--bg-raised); border: 1px solid var(--border-soft);
   }
 
@@ -179,7 +187,7 @@
   .new :global(svg) { color: var(--accent); }
   .search {
     display: flex; align-items: center; gap: 8px;
-    padding: 0 11px; border-radius: 10px;
+    padding: 0 11px; border-radius: calc(10px * var(--rf));
     background: var(--bg-input); border: 1px solid var(--border-soft);
     color: var(--text-faint);
   }
@@ -198,7 +206,7 @@
   }
   .item {
     display: flex; align-items: center; gap: 8px;
-    padding: 7px 8px 7px 10px; border-radius: 9px; cursor: pointer;
+    padding: 7px 8px 7px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer;
     color: var(--text-dim); font-size: 13.5px;
     transition: background 110ms ease, color 110ms ease;
   }
@@ -209,7 +217,7 @@
   .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .del {
     all: unset; cursor: pointer; display: grid; place-items: center;
-    width: 22px; height: 22px; border-radius: 6px;
+    width: 22px; height: 22px; border-radius: calc(6px * var(--rf));
     color: var(--text-dim);
     opacity: 0; transition: opacity 120ms ease, background 120ms ease;
   }
@@ -247,7 +255,7 @@
   .page {
     all: unset; cursor: pointer; flex: 1;
     display: flex; align-items: center; justify-content: center; gap: 7px;
-    padding: 8px 10px; border-radius: 9px;
+    padding: 8px 10px; border-radius: calc(9px * var(--rf));
     font-size: 12px; font-weight: 500; color: var(--text-dim);
     background: var(--bg-raised); border: 1px solid var(--border-soft);
   }

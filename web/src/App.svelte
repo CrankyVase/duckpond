@@ -7,6 +7,7 @@
   import Sidebar from './components/Sidebar.svelte';
   import SpeechPanel from './components/SpeechPanel.svelte';
   import StatsPanel from './components/StatsPanel.svelte';
+  import ThemeStudio from './components/ThemeStudio.svelte';
   import Toast from './components/Toast.svelte';
   import Topbar from './components/Topbar.svelte';
   import { applyPrefs } from './lib/prefs.svelte.js';
@@ -54,6 +55,7 @@
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); app.modelPickerOpen = !app.modelPickerOpen; }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newConversation(); }
     if (e.key === 'Escape' && app.settingsOpen) app.settingsOpen = false;
+    if (e.key === 'Escape' && app.themeStudioOpen) app.themeStudioOpen = false;
   }
 </script>
 
@@ -81,6 +83,7 @@
       {/if}
     </main>
     <SettingsPanel />
+    <ThemeStudio />
   </div>
 {/if}
 <Toast />
@@ -90,5 +93,6 @@
   .pulse { animation: pulse 1.2s ease infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .layout { display: flex; height: 100vh; }
+  :global(html[data-sidebar='right']) .layout { flex-direction: row-reverse; }
   main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 </style>

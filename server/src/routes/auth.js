@@ -60,7 +60,7 @@ export default async function authRoutes(app) {
     const user = sessionUser(req.cookies?.dp_session);
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
     const row = db.prepare(
-      'SELECT default_model_id, allow_image_gen, image_quality, memory_enabled FROM users WHERE id = ?',
+      'SELECT default_model_id, allow_image_gen, image_quality, memory_enabled, ui_theme FROM users WHERE id = ?',
     ).get(user.id);
     return {
       id: user.id, username: user.username, role: user.role,
@@ -68,6 +68,7 @@ export default async function authRoutes(app) {
       allow_image_gen: !!row.allow_image_gen,
       image_quality: row.image_quality,
       memory_enabled: !!row.memory_enabled,
+      ui_theme: row.ui_theme ? JSON.parse(row.ui_theme) : null,
     };
   });
 
@@ -89,6 +90,14 @@ export default async function authRoutes(app) {
     if (req.body?.memory_enabled !== undefined) {
       db.prepare('UPDATE users SET memory_enabled = ? WHERE id = ?')
         .run(req.body.memory_enabled ? 1 : 0, req.user.id);
+    }
+    if (req.body?.ui_theme !== undefined) {
+      // whole-theme JSON blob from the Theme Studio; size-capped, shape-checked
+      const json = req.body.ui_theme === null ? null : JSON.stringify(req.body.ui_theme);
+      if (json && (json.length > 64_000 || typeof req.body.ui_theme !== 'object')) {
+        return { ok: false, error: 'theme too large' };
+      }
+      db.prepare('UPDATE users SET ui_theme = ? WHERE id = ?').run(json, req.user.id);
     }
     return { ok: true };
   });

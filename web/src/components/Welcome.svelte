@@ -63,7 +63,7 @@
     display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
     text-align: left; padding: 14px 16px;
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    border-radius: 14px;
+    border-radius: calc(14px * var(--rf));
     transition: border-color 150ms ease, background 150ms ease, transform 120ms ease;
   }
   .card:hover { border-color: var(--accent-dim); background: var(--bg-card); transform: translateY(-1px); }

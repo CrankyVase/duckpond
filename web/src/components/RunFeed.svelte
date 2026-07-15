@@ -128,7 +128,7 @@
   .note :global(p) { margin: 0 0 6px; }
   .note :global(p:last-child) { margin-bottom: 0; }
   .note :global(pre) {
-    background: var(--bg); border: 1px solid var(--border-soft); border-radius: 8px;
+    background: var(--bg); border: 1px solid var(--border-soft); border-radius: calc(8px * var(--rf));
     padding: 8px 10px; overflow-x: auto; font-size: 11.5px;
   }
   .note :global(code) { font-family: var(--mono); font-size: 0.92em; }
@@ -142,7 +142,7 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
-  .out { border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg); overflow: hidden; }
+  .out { border: 1px solid var(--border-soft); border-radius: calc(8px * var(--rf)); background: var(--bg); overflow: hidden; }
   .outhead {
     all: unset; display: flex; align-items: center; gap: 8px; width: 100%;
     box-sizing: border-box; padding: 6px 10px; cursor: pointer;
@@ -168,20 +168,20 @@
   .appr {
     border: 1px solid color-mix(in srgb, var(--yellow) 35%, transparent);
     background: color-mix(in srgb, var(--yellow) 7%, transparent);
-    border-radius: 10px; padding: 10px 12px;
+    border-radius: calc(10px * var(--rf)); padding: 10px 12px;
     display: flex; flex-direction: column; gap: 8px;
   }
   .appr.settled { opacity: 0.6; }
   .apphead { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--yellow); font-weight: 600; }
   .appcmd {
     font-family: var(--mono); font-size: 12px; color: var(--text);
-    background: var(--bg); border-radius: 6px; padding: 6px 9px;
+    background: var(--bg); border-radius: calc(6px * var(--rf)); padding: 6px 9px;
     white-space: pre-wrap; word-break: break-all;
   }
   .appbtns { display: flex; gap: 8px; }
   .appbtns button {
     all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 8px;
+    font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: calc(8px * var(--rf));
   }
   .appbtns .ok { background: var(--green); color: #10130d; }
   .appbtns .no { background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--border-soft); }
@@ -192,7 +192,7 @@
 
   .imgevent { display: block; max-width: 340px; margin: 0; }
   .imgevent img {
-    max-width: 100%; border-radius: 10px; border: 1px solid var(--border-soft);
+    max-width: 100%; border-radius: calc(10px * var(--rf)); border: 1px solid var(--border-soft);
     display: block;
   }
   .imgevent figcaption { margin-top: 4px; font-size: 11px; color: var(--text-faint); }
@@ -200,10 +200,10 @@
   .err {
     border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
     background: color-mix(in srgb, var(--red) 8%, transparent);
-    color: var(--red); border-radius: 8px; padding: 8px 11px; font-size: 12.5px;
+    color: var(--red); border-radius: calc(8px * var(--rf)); padding: 8px 11px; font-size: 12.5px;
   }
 
-  .live { border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg); overflow: hidden; }
+  .live { border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); background: var(--bg); overflow: hidden; }
   .livehead {
     display: flex; align-items: center; gap: 7px;
     padding: 6px 10px; font-size: 12px; color: var(--text-dim);

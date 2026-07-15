@@ -1,4 +1,5 @@
 import { api } from './api.js';
+import { adoptServerTheme } from './theme.svelte.js';
 
 export const app = $state({
   user: null,
@@ -13,6 +14,7 @@ export const app = $state({
   view: 'chat',          // 'chat' | 'bench' (agentic workbench) | 'images' (image studio)
   modelPickerOpen: false,
   settingsOpen: false,
+  themeStudioOpen: false,
   sidebarCollapsed: false,
   compacting: false,
   filesVersion: 0,       // bumped when the agent writes files → chat file rail refreshes
@@ -21,6 +23,7 @@ export const app = $state({
 export async function checkAuth() {
   try {
     app.user = await api('/api/auth/me');
+    adoptServerTheme(app.user?.ui_theme); // server copy wins — synced across devices + Duck Pond Control
   } catch {
     app.user = null;
     const s = await api('/api/auth/setup-needed').catch(() => ({ setupNeeded: false }));

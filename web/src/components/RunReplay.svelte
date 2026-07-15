@@ -58,7 +58,7 @@
 
 <style>
   .replay {
-    border: 1px solid var(--border-soft); border-radius: 12px;
+    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     background: var(--bg-card); overflow: hidden; margin-bottom: 10px;
   }
   .head { display: flex; align-items: center; }

@@ -25,7 +25,7 @@
   .toast {
     display: flex; align-items: center; gap: 9px;
     background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 12px; padding: 9px 16px;
+    border-radius: calc(12px * var(--rf)); padding: 9px 16px;
     font-size: 13.5px; color: var(--text);
     box-shadow: var(--shadow-lg);
   }

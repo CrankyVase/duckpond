@@ -57,7 +57,7 @@
   .compact {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 20px; height: 18px; border-radius: 5px;
+    width: 20px; height: 18px; border-radius: calc(5px * var(--rf));
     color: var(--text-faint);
     transition: color 120ms ease, background 120ms ease;
   }

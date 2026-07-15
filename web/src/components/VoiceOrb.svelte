@@ -58,7 +58,7 @@
     padding: 14px 14px 14px 16px;
     max-width: 340px;
     background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 18px; box-shadow: var(--shadow-lg);
+    border-radius: calc(18px * var(--rf)); box-shadow: var(--shadow-lg);
   }
   .orbwrap { position: relative; width: 74px; height: 74px; flex-shrink: 0; display: grid; place-items: center; }
 
@@ -114,7 +114,7 @@
   .vbtn {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 28px; height: 26px; border-radius: 7px;
+    width: 28px; height: 26px; border-radius: calc(7px * var(--rf));
     color: var(--text-dim);
     transition: background 120ms ease, color 120ms ease;
   }

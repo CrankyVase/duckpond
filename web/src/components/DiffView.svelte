@@ -64,7 +64,7 @@
 
 <style>
   .diff {
-    border: 1px solid var(--border-soft); border-radius: 8px;
+    border: 1px solid var(--border-soft); border-radius: calc(8px * var(--rf));
     background: var(--bg); overflow: hidden;
   }
   .stats {

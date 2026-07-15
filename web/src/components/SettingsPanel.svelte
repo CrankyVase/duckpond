@@ -392,6 +392,9 @@
     <!-- appearance -->
     <section>
       <div class="stitle"><Palette size={13} />Appearance</div>
+      <button class="wide" onclick={() => { app.settingsOpen = false; app.themeStudioOpen = true; }}>
+        <Palette size={14} />Open Theme Studio — colors, layouts, custom CSS
+      </button>
       <div class="row">
         <div class="rlabel"><div class="rt">Font size</div><div class="rd">message text size</div></div>
         <select bind:value={prefs.fontSize} onchange={() => { savePrefs(); applyPrefs(); }}>
@@ -629,7 +632,7 @@
   .conn {
     display: flex; align-items: center; gap: 9px;
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    border-radius: 10px; padding: 10px 13px; font-size: 13px;
+    border-radius: calc(10px * var(--rf)); padding: 10px 13px; font-size: 13px;
   }
   .cdot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; }
   .cdot.ok { background: var(--green); box-shadow: 0 0 6px rgba(107, 158, 90, 0.6); }
@@ -676,7 +679,7 @@
 
   .toolrow {
     display: flex; align-items: flex-start; gap: 10px; cursor: pointer;
-    padding: 6px 2px; border-radius: 8px; transition: background 120ms ease;
+    padding: 6px 2px; border-radius: calc(8px * var(--rf)); transition: background 120ms ease;
   }
   .toolrow:hover { background: var(--bg-hover); }
   .toolrow input[type='checkbox'] { margin-top: 3px; flex-shrink: 0; width: 15px; height: 15px; accent-color: var(--accent); }
@@ -695,7 +698,7 @@
   .uname { font-size: 13.5px; display: flex; align-items: center; gap: 7px; }
   .crown {
     font-style: normal; font-size: 10px; color: var(--accent);
-    border: 1px solid var(--accent-dim); border-radius: 5px; padding: 0 5px;
+    border: 1px solid var(--accent-dim); border-radius: calc(5px * var(--rf)); padding: 0 5px;
   }
   .umeta { font-size: 10.5px; color: var(--text-faint); }
   .del:hover { color: var(--red); }
@@ -724,14 +727,14 @@
   .memlist { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
   .memrow {
     display: flex; align-items: center; gap: 8px;
-    padding: 6px 8px; border-radius: 8px; font-size: 12px;
+    padding: 6px 8px; border-radius: calc(8px * var(--rf)); font-size: 12px;
   }
   .memrow:hover { background: var(--bg-hover); }
   .memtext { flex: 1; min-width: 0; color: var(--text-dim); line-height: 1.45; }
   .memmeta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
   .memdel {
     all: unset; cursor: pointer; display: grid; place-items: center;
-    width: 20px; height: 20px; border-radius: 5px; color: var(--text-faint);
+    width: 20px; height: 20px; border-radius: calc(5px * var(--rf)); color: var(--text-faint);
     opacity: 0; transition: opacity 120ms ease;
   }
   .memrow:hover .memdel { opacity: 0.8; }

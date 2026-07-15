@@ -322,10 +322,10 @@
   .mono { font-family: var(--mono); }
   .none { padding: 14px 0; color: var(--text-faint); font-size: 12.5px; }
   .offline {
-    margin-bottom: 20px; padding: 10px 14px; border-radius: 10px; font-size: 13px;
+    margin-bottom: 20px; padding: 10px 14px; border-radius: calc(10px * var(--rf)); font-size: 13px;
     background: rgba(192, 96, 79, 0.12); color: var(--red); border: 1px solid rgba(192, 96, 79, 0.3);
   }
-  section { margin-bottom: 34px; max-width: 860px; }
+  section { margin-bottom: 34px; }
   h2 { font-size: 13px; font-weight: 600; color: var(--text-dim); margin: 0 0 12px; }
   h3 {
     display: flex; align-items: center; gap: 7px;
@@ -336,7 +336,7 @@
 
   .voicegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 18px; }
   .vcard {
-    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: 12px;
+    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 4px;
     transition: border-color 120ms ease;
   }
@@ -348,25 +348,25 @@
   .vuse { font-size: 11px; color: var(--accent); }
   .vdel {
     all: unset; cursor: pointer; display: grid; place-items: center;
-    width: 22px; height: 22px; border-radius: 6px; color: var(--text-faint);
+    width: 22px; height: 22px; border-radius: calc(6px * var(--rf)); color: var(--text-faint);
   }
   .vdel:hover { background: rgba(192, 96, 79, 0.15); color: var(--red); }
 
   .makers { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 860px) { .makers { grid-template-columns: 1fr; } }
   .maker {
-    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: 14px;
+    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: calc(14px * var(--rf));
     padding: 16px 18px; display: flex; flex-direction: column; gap: 9px;
   }
   .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .ok { font-size: 12px; color: var(--green); }
   .maker input, .studio textarea, .adhoc {
-    background: var(--bg-input); border: 1px solid var(--border-soft); border-radius: 10px;
+    background: var(--bg-input); border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf));
     padding: 8px 12px; font-size: 13px; color: var(--text); width: 100%;
   }
   .btn {
     display: inline-flex; align-items: center; gap: 7px;
-    padding: 7px 13px; border-radius: 9px; font-size: 12.5px; cursor: pointer;
+    padding: 7px 13px; border-radius: calc(9px * var(--rf)); font-size: 12.5px; cursor: pointer;
     background: var(--bg-raised); border: 1px solid var(--border-soft); color: var(--text);
   }
   .btn:hover { background: var(--bg-hover); }
@@ -382,7 +382,7 @@
   .chip.on { color: var(--accent); border-color: var(--accent); }
 
   .studio {
-    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: 14px;
+    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: calc(14px * var(--rf));
     padding: 16px 18px; display: flex; flex-direction: column; gap: 10px;
   }
   .studio textarea { resize: vertical; min-height: 84px; font-family: inherit; line-height: 1.5; }
@@ -394,7 +394,7 @@
   .cliplist { display: flex; flex-direction: column; gap: 8px; }
   .clip {
     display: flex; align-items: center; gap: 12px;
-    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: 12px;
+    background: var(--bg-card); border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     padding: 10px 14px;
   }
   .pbtn {
@@ -408,7 +408,7 @@
   .cmeta { font-size: 10.5px; color: var(--text-faint); }
   .cbtn {
     all: unset; cursor: pointer; display: grid; place-items: center;
-    width: 26px; height: 26px; border-radius: 7px; color: var(--text-dim); flex-shrink: 0;
+    width: 26px; height: 26px; border-radius: calc(7px * var(--rf)); color: var(--text-dim); flex-shrink: 0;
   }
   .cbtn:hover { background: var(--bg-hover); color: var(--text); }
   .cbtn.del:hover { background: rgba(192, 96, 79, 0.15); color: var(--red); }

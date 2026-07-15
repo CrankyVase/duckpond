@@ -152,19 +152,19 @@
     position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
     width: 400px; max-height: 440px; display: flex; flex-direction: column;
     background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 14px; padding: 8px; box-shadow: var(--shadow-lg);
+    border-radius: calc(14px * var(--rf)); padding: 8px; box-shadow: var(--shadow-lg);
   }
   .searchrow {
     display: flex; align-items: center; gap: 8px;
     padding: 0 10px; margin-bottom: 6px;
-    background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg-input); border: 1px solid var(--border); border-radius: calc(10px * var(--rf));
     color: var(--text-faint);
   }
   .searchrow input { flex: 1; background: none; border: none; box-shadow: none; padding: 8px 0; }
   .list { overflow-y: auto; }
   .opt {
     display: flex; align-items: center; gap: 10px;
-    padding: 8px 10px; border-radius: 9px; cursor: pointer; font-size: 13.5px;
+    padding: 8px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer; font-size: 13.5px;
   }
   .opt.hover { background: var(--bg-hover); }
   .col { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
@@ -175,7 +175,7 @@
   .info {
     all: unset; cursor: help;
     display: grid; place-items: center;
-    width: 24px; height: 22px; border-radius: 6px;
+    width: 24px; height: 22px; border-radius: calc(6px * var(--rf));
     color: var(--text-faint);
     opacity: 0; transition: opacity 120ms ease, color 120ms ease;
   }
@@ -184,7 +184,7 @@
   .star {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 24px; height: 22px; border-radius: 6px;
+    width: 24px; height: 22px; border-radius: calc(6px * var(--rf));
     color: var(--text-faint);
     opacity: 0; transition: opacity 120ms ease, color 120ms ease;
   }
@@ -194,7 +194,7 @@
   .eject {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 24px; height: 22px; border-radius: 6px;
+    width: 24px; height: 22px; border-radius: calc(6px * var(--rf));
     color: var(--text-dim);
     transition: background 120ms ease, color 120ms ease;
   }

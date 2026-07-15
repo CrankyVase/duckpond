@@ -285,5 +285,9 @@ try { db.exec('ALTER TABLE messages ADD COLUMN search_json TEXT'); } catch { /* 
 // long-term memory opt-out (on by default in this self-hosted, two-user pond;
 // the Settings panel shows and edits everything remembered — full transparency)
 try { db.exec('ALTER TABLE users ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1'); } catch { /* exists */ }
+// Theme Studio: the whole look (preset + color overrides + layout + custom
+// CSS) in one JSON blob — server-side so it follows the account across
+// devices and into Duck Pond Control
+try { db.exec('ALTER TABLE users ADD COLUMN ui_theme TEXT'); } catch { /* exists */ }
 
 export function nowSec() { return Math.floor(Date.now() / 1000); }

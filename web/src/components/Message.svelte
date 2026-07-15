@@ -223,10 +223,16 @@
     max-width: 68%;
     background: var(--bg-card);
     border: 1px solid var(--border-soft);
-    border-radius: 16px 16px 5px 16px;
+    border-radius: calc(16px * var(--rf)) calc(16px * var(--rf)) calc(5px * var(--rf)) calc(16px * var(--rf));
     padding: 10px 16px;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  /* Theme Studio "minimal" style: flat, full-width, accent edge instead of a bubble */
+  :global(html[data-bubbles='minimal']) .ububble {
+    max-width: 100%; background: transparent; border: none;
+    border-left: 3px solid var(--accent-dim); border-radius: 0;
+    padding: 2px 14px;
   }
   .urow.pinned .ububble { box-shadow: inset 0 0 0 1px var(--accent-dim); }
   .editbox { width: 78%; }
@@ -244,7 +250,7 @@
     width: 30px; height: 30px; flex-shrink: 0;
     display: grid; place-items: center;
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    border-radius: 9px; margin-top: 2px;
+    border-radius: calc(9px * var(--rf)); margin-top: 2px;
   }
   .abody { flex: 1; min-width: 0; }
   .arow.pinned .abody { border-left: 2px solid var(--accent-dim); padding-left: 12px; }
@@ -286,7 +292,7 @@
   .nocontent {
     font-size: 13px; color: var(--text-dim);
     background: var(--bg-raised); border: 1px dashed var(--border);
-    border-radius: 10px; padding: 9px 14px;
+    border-radius: calc(10px * var(--rf)); padding: 9px 14px;
   }
   .nocontent b { color: var(--accent); font-weight: 500; }
 
@@ -310,7 +316,7 @@
   .ic {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 26px; height: 24px; border-radius: 6px;
+    width: 26px; height: 24px; border-radius: calc(6px * var(--rf));
     color: var(--text-dim);
     opacity: 0.8; transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
   }
@@ -324,7 +330,7 @@
     display: inline-flex; align-items: center; gap: 1px;
     font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    border-radius: 7px; padding: 0 2px; margin-right: 4px;
+    border-radius: calc(7px * var(--rf)); padding: 0 2px; margin-right: 4px;
   }
   .branch .ic { width: 20px; height: 20px; font-size: 13px; color: var(--text-dim); }
   .bn { padding: 0 2px; }
@@ -338,7 +344,7 @@
   .abody :global(.citepill) {
     display: inline-flex; align-items: center; gap: 4px;
     vertical-align: baseline; margin: 0 1px; padding: 1px 7px 1px 6px;
-    border: 1px solid var(--border-soft); border-radius: 6px;
+    border: 1px solid var(--border-soft); border-radius: calc(6px * var(--rf));
     background: var(--bg-raised); color: var(--text-dim);
     font-size: 11.5px; line-height: 1.5; text-decoration: none;
     transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
@@ -352,7 +358,7 @@
   .compaction {
     font-size: 13px; color: var(--text-dim);
     background: var(--bg-raised); border: 1px dashed var(--border);
-    border-radius: 10px; padding: 8px 14px; margin: 10px 0;
+    border-radius: calc(10px * var(--rf)); padding: 8px 14px; margin: 10px 0;
   }
   .compaction .tag {
     color: var(--accent); margin-right: 8px;
