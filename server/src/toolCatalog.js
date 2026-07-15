@@ -35,7 +35,10 @@ export const TOOL_CATALOG = [
   { id: 'show_dashboard', label: 'Dashboard', category: 'Widgets', description: 'Lets the model compose several widgets into one titled grid. Only offered to larger models — small ones fumble the nested layout.' },
   { id: 'generate_slides', label: 'PowerPoint deck', category: 'Media', description: 'Builds a real downloadable .pptx presentation from an outline the model writes (also opens in Google Slides).' },
   { id: 'export_csv', label: 'CSV export', category: 'Media', description: 'Saves tabular data as a downloadable CSV file.' },
+  { id: 'save_memory', label: 'Save memory', category: 'Memory', description: 'Lets the model store a durable fact about you in its long-term memory the moment you share it.' },
+  { id: 'update_memory', label: 'Update memory', category: 'Memory', description: "Lets the model correct one of its memories when you point out it's wrong or outdated." },
+  { id: 'forget_memory', label: 'Forget memory', category: 'Memory', description: 'Lets the model delete one of its memories when you ask it to forget something.' },
 ];
 
-export const TOOL_CATEGORIES = ['Coding', 'Search', 'Media', 'Widgets'];
+export const TOOL_CATEGORIES = ['Coding', 'Search', 'Media', 'Widgets', 'Memory'];
 export const ALL_TOOL_IDS = TOOL_CATALOG.map((t) => t.id);

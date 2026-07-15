@@ -20,7 +20,10 @@ import { modelParamsB } from '../modelDescribe.js';
 import { buildCsv, buildPptx } from '../exports.js';
 import { modelSettings } from './models.js';
 import { convDocs, retrieveChunks } from '../docs.js';
-import { indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories } from '../memory.js';
+import {
+  deleteMemory, indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories,
+  saveMemoryDirect, updateMemory,
+} from '../memory.js';
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
 import { acquireGpu } from '../gpuqueue.js';
@@ -429,6 +432,56 @@ const WIDGET_TOOLS = [
 ];
 const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
 
+// Memory tools: the model's direct line into its own long-term memory, on top
+// of the automatic post-exchange extraction. Recalled memories are injected
+// with their ids, so update/forget can target them precisely.
+const MEMORY_TOOLS = [
+  { type: 'function', function: {
+    name: 'save_memory',
+    description: 'Save a durable fact about the user to your long-term memory, so you still know it in future conversations. Use when the user tells you something worth keeping (their name, people in their life, preferences, projects) or asks you to remember something. Facts are also extracted automatically after each exchange — reach for this when something clearly matters or the user says "remember this".',
+    parameters: { type: 'object', properties: {
+      text: { type: 'string', description: 'the fact, one short third-person sentence, e.g. "Lewis\'s dog is named Pretzel"' },
+      tier: { type: 'string', enum: ['core', 'durable', 'context'], description: 'core = permanent identity (name, family, where they live) — never fades. durable = preferences, tools, interests — fades slowly if never used. context = current project / temporary situation — fades in weeks. Default durable.' },
+    }, required: ['text'] },
+  } },
+  { type: 'function', function: {
+    name: 'update_memory',
+    description: 'Correct or update one of your existing memories about the user (they are listed with ids in your system prompt when recalled). Use when the user corrects you or a remembered fact is outdated.',
+    parameters: { type: 'object', properties: {
+      id: { type: 'integer', description: 'the memory id, from the recalled list' },
+      text: { type: 'string', description: 'the corrected fact (omit to keep the text)' },
+      tier: { type: 'string', enum: ['core', 'durable', 'context'], description: 'new tier (omit to keep)' },
+    }, required: ['id'] },
+  } },
+  { type: 'function', function: {
+    name: 'forget_memory',
+    description: 'Permanently delete one of your memories about the user, by id. Use when the user asks you to forget something or a memory is plain wrong with no correction.',
+    parameters: { type: 'object', properties: {
+      id: { type: 'integer', description: 'the memory id, from the recalled list' },
+    }, required: ['id'] },
+  } },
+];
+const MEMORY_TOOL_NAMES = new Set(MEMORY_TOOLS.map((t) => t.function.name));
+
+async function execMemoryTool(name, args, { userId, convId }) {
+  if (name === 'save_memory') {
+    const r = await saveMemoryDirect({ userId, text: args.text, tier: args.tier, convId, source: 'tool' });
+    if (r.error) return `ERROR: ${r.error}`;
+    return r.action === 'reinforced'
+      ? `You already had a memory very close to that (id ${r.id}) — it was strengthened instead of duplicated.`
+      : `Saved to long-term memory (id ${r.id}). You will recall this in future conversations when it's relevant. No need to announce the mechanics — a brief natural acknowledgement is enough.`;
+  }
+  if (name === 'update_memory') {
+    const r = await updateMemory({ userId, id: Number(args.id), text: args.text, tier: args.tier });
+    return r.error ? `ERROR: ${r.error}` : `Memory ${r.id} updated.`;
+  }
+  if (name === 'forget_memory') {
+    return deleteMemory(userId, Number(args.id))
+      ? `Memory ${args.id} deleted.` : `ERROR: no memory with id ${args.id}`;
+  }
+  return `ERROR: unknown memory tool ${name}`;
+}
+
 // Small models sometimes hallucinate a markdown image (![alt](url), often with
 // a bogus/empty url) right next to a widget/generated-image tool call — as if
 // narrating "here's a photo" on top of the card that's already rendered. Every
@@ -792,6 +845,9 @@ async function runInlineSearch({
           const where = wg.data.place || wg.data.label || wg.data.title || wg.data.name || wg.data.query || 'it';
           result = `The ${wg.type} card for ${where} is now shown to the user, right below your reply. Add ONE short sentence about it in plain text — no links, ids, coordinates, and critically no markdown image syntax like ![...](...); the card is not a photo you need to embed, it is already rendered.`;
         } catch (err) { result = `ERROR: ${err.message}. Tell the user briefly.`; }
+      } else if (MEMORY_TOOL_NAMES.has(name)) {
+        try { result = await execMemoryTool(name, args, { userId, convId: conv.id }); }
+        catch (err) { result = `ERROR: memory unavailable right now (${err.message})`; }
       } else {
         result = `Tool "${name}" is not available here. Use web_search, fetch_page, show_weather, show_map, or just answer.`;
       }
@@ -1006,24 +1062,37 @@ export default async function chatRoutes(app) {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
       }
       // long-term memory: what the duck remembers about this user, retrieved
-      // by meaning against this turn (retrieval also reinforces — see memory.js)
+      // by meaning against this turn (retrieval also reinforces — see
+      // memory.js). The explainer is ALWAYS injected while memory is on, even
+      // with zero recalls — models that don't know they have a memory system
+      // tell the user "I'm stateless and will forget you", which is worse
+      // than any missing fact (seen live, 2026-07-14).
       if (promptLeaf?.content && promptMessages[0]?.role === 'system' && memoryEnabled(req.user.id)) {
-        try {
-          const mems = await retrieveMemories(req.user.id, promptLeaf.content);
-          if (mems.length) {
-            req.log.info({ count: mems.length }, 'memories injected');
-            const lines = mems.map((m) => `- (${new Date(m.created_at * 1000).toISOString().slice(0, 10)}) ${m.text}`);
-            // leads the system prompt: small models pay the most attention to
-            // the top, and a memory that gets ignored is worse than none
-            const memBlock = '## What you know about this user\n'
-              + 'You remember these facts about this user from your previous conversations with them. '
-              + 'They are true — when the user asks about themselves or the facts are relevant, use them '
-              + 'directly and confidently instead of asking the user to repeat things. This overrides any '
-              + 'impulse to say you have no access to personal information: you DO have these remembered '
-              + "facts. Don't recite this list unprompted.\n" + lines.join('\n');
-            promptMessages[0] = { role: 'system', content: memBlock + '\n\n' + promptMessages[0].content };
-          }
-        } catch { /* embed service down — the turn proceeds memoryless */ }
+        let mems = [];
+        try { mems = await retrieveMemories(req.user.id, promptLeaf.content); }
+        catch { /* embed service down — explainer still goes in */ }
+        if (mems.length) req.log.info({ count: mems.length }, 'memories injected');
+        const lines = mems.map((m) => {
+          const conf = m.confidence >= 0.65 ? '' : ' — stated offhand once, could be a joke; treat as uncertain';
+          return `- [id ${m.id} · ${m.tier} · noted ${new Date(m.created_at * 1000).toISOString().slice(0, 10)}] ${m.text}${conf}`;
+        });
+        // leads the system prompt: small models pay the most attention to
+        // the top, and a memory that gets ignored is worse than none
+        const memBlock = '## Your long-term memory\n'
+          + 'You HAVE a persistent long-term memory about this user. It survives across conversations '
+          + 'and sessions: facts are extracted automatically as you chat, and you can manage it yourself '
+          + 'with your memory tools — save_memory (keep a new fact: core = permanent identity, durable = '
+          + 'preferences/interests, context = current projects), update_memory (fix a wrong or outdated '
+          + 'memory by its id), forget_memory (delete one by id). Never tell the user you are stateless, '
+          + 'that you cannot remember them, or that everything resets between chats — none of that is true. '
+          + "If they ask you to remember something, call save_memory; if they correct a remembered fact, "
+          + 'call update_memory.\n'
+          + (lines.length
+            ? 'Recalled as relevant to this message (use them directly and confidently; don\'t recite the '
+              + 'list unprompted):\n' + lines.join('\n')
+            : 'Nothing in memory matched this particular message — but your memory may still hold other '
+              + 'facts about them; absence here is not evidence you know nothing.');
+        promptMessages[0] = { role: 'system', content: memBlock + '\n\n' + promptMessages[0].content };
       }
       // attached documents (RAG): pull the excerpts relevant to this message
       // and pin them at the END of the system prompt, closest to the question
@@ -1150,8 +1219,9 @@ export default async function chatRoutes(app) {
             abortSignal: abort.signal, onDelta,
           });
         } else {
-          const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS]
-            : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS], disabledTools);
+          const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
+          const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS, ...memTools]
+            : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS, ...memTools], disabledTools);
           res = await streamChat({
             model: conv.model_id, messages: promptMessages,
             params: {
@@ -1181,13 +1251,16 @@ export default async function chatRoutes(app) {
 
       const callNames = new Set((res.toolCalls ?? []).map((t) => t.function.name));
       const wantsInlineTools = callNames.has('web_search') || callNames.has('fetch_page')
-        || [...WIDGET_TOOL_NAMES].some((n) => callNames.has(n));
+        || [...WIDGET_TOOL_NAMES].some((n) => callNames.has(n))
+        || [...MEMORY_TOOL_NAMES].some((n) => callNames.has(n));
       if (toolsOn && res.toolCalls?.length && wantsInlineTools && !callNames.has('start_project')) {
-        // inline-tools turn: web search (with live trace + citations) and/or
-        // interactive widgets, in one batched loop; the model answers at the end.
+        // inline-tools turn: web search (with live trace + citations),
+        // interactive widgets, and/or memory ops, in one batched loop;
+        // the model answers at the end.
         const searchTools = filterTools([
           ...(imgPrefs.allowed ? [GENERATE_IMAGE_TOOL] : []),
           WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS,
+          ...(memoryEnabled(req.user.id) ? MEMORY_TOOLS : []),
         ], disabledTools);
         const r = await runInlineSearch({
           conv, userId: req.user.id, userLoc, promptMessages, firstResult: res, params,

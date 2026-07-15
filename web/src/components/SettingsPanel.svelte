@@ -472,9 +472,11 @@
         <div class="memlist">
           {#each memories as m (m.id)}
             <div class="memrow">
+              <span class="memtier {m.tier}" title={m.tier === 'core' ? 'core — never fades' : m.tier === 'context' ? 'context — fades in weeks unless it comes up' : 'durable — fades slowly unless it comes up'}>{m.tier}</span>
               <span class="memtext">{m.text}</span>
-              <span class="memmeta mono" title="how firmly this is remembered right now">
-                {Math.round(m.retention * 100)}% · {memAge(m.last_seen)}
+              <span class="memmeta mono"
+                title={`confidence ${Math.round((m.confidence ?? 0.6) * 100)}% (${m.repetitions ?? 1}× seen) · retention ${Math.round(m.retention * 100)}%`}>
+                {Math.round((m.confidence ?? 0.6) * 100)}% sure · {memAge(m.last_seen)}
               </span>
               <button class="memdel" onclick={() => forgetMemory(m.id)} title="Forget this"><X size={12} /></button>
             </div>
@@ -730,6 +732,13 @@
     padding: 6px 8px; border-radius: calc(8px * var(--rf)); font-size: 12px;
   }
   .memrow:hover { background: var(--bg-hover); }
+  .memtier {
+    flex-shrink: 0; font-size: 9.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px;
+    color: var(--text-faint); border: 1px solid var(--border);
+  }
+  .memtier.core { color: var(--accent); border-color: var(--accent-dim); }
+  .memtier.context { color: var(--text-faint); border-style: dashed; }
   .memtext { flex: 1; min-width: 0; color: var(--text-dim); line-height: 1.45; }
   .memmeta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
   .memdel {

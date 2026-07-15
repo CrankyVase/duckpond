@@ -1,0 +1,6 @@
+# Voxtral TTS on CPU: official vLLM CPU build + the vllm-omni layer.
+# --no-deps keeps pip from replacing the CPU vllm with the CUDA wheel;
+# omni's real deps are added explicitly.
+FROM public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.18.0
+RUN pip install --no-cache-dir --no-deps vllm-omni && \
+    pip install --no-cache-dir "mistral-common>=1.10.0" soundfile librosa

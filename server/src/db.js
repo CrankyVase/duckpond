@@ -289,5 +289,13 @@ try { db.exec('ALTER TABLE users ADD COLUMN memory_enabled INTEGER NOT NULL DEFA
 // CSS) in one JSON blob — server-side so it follows the account across
 // devices and into Duck Pond Control
 try { db.exec('ALTER TABLE users ADD COLUMN ui_theme TEXT'); } catch { /* exists */ }
+// Memory v2: permanence tiers (core = identity, never fades; durable =
+// preferences/tools; context = current-project facts, fades fast), a
+// confidence score fed by repetition + how explicitly it was stated, and a
+// source trail (extracted vs. the model's own save_memory tool vs. user edit)
+try { db.exec("ALTER TABLE memories ADD COLUMN tier TEXT NOT NULL DEFAULT 'durable'"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 0.6'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE memories ADD COLUMN repetitions INTEGER NOT NULL DEFAULT 1'); } catch { /* exists */ }
+try { db.exec("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'extracted'"); } catch { /* exists */ }
 
 export function nowSec() { return Math.floor(Date.now() / 1000); }
