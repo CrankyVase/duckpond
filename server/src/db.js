@@ -131,8 +131,11 @@ CREATE TABLE IF NOT EXISTS invites (
 );
 
 -- generated images (files live in data/images/)
+-- AUTOINCREMENT is required: without it SQLite reuses deleted ids, and
+-- browsers that cached /api/images/N/file as immutable keep showing the
+-- deleted (sometimes NSFW) bytes under the new row.
 CREATE TABLE IF NOT EXISTS images (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   prompt TEXT NOT NULL,
   enhanced_prompt TEXT,
@@ -143,6 +146,40 @@ CREATE TABLE IF NOT EXISTS images (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, id DESC);
+
+-- batch edit / upscale jobs (Files → Batches)
+-- each item lives under data/batches/<userId>/<batchId>/<folder>/
+CREATE TABLE IF NOT EXISTS image_batches (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  instruction TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'auto',          -- auto | edit | upscale
+  model TEXT NOT NULL DEFAULT 'auto',
+  upscale_target TEXT NOT NULL DEFAULT '4k',
+  status TEXT NOT NULL DEFAULT 'draft',       -- draft | queued | running | done | done_with_errors | error | paused
+  error TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  started_at INTEGER,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_image_batches_user ON image_batches(user_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS image_batch_items (
+  id INTEGER PRIMARY KEY,
+  batch_id INTEGER NOT NULL REFERENCES image_batches(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  folder TEXT NOT NULL,
+  source_file TEXT NOT NULL,
+  result_file TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',     -- pending | running | done | error
+  error TEXT,
+  bytes_in INTEGER NOT NULL DEFAULT 0,
+  bytes_out INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_image_batch_items_batch ON image_batch_items(batch_id, id);
 
 -- lifetime + per-day usage aggregates
 CREATE TABLE IF NOT EXISTS usage_stats (
@@ -297,6 +334,79 @@ try { db.exec("ALTER TABLE memories ADD COLUMN tier TEXT NOT NULL DEFAULT 'durab
 try { db.exec('ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 0.6'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE memories ADD COLUMN repetitions INTEGER NOT NULL DEFAULT 1'); } catch { /* exists */ }
 try { db.exec("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'extracted'"); } catch { /* exists */ }
+// Preferred local diffusion model id for generate_image / studio (e.g. Juggernaut).
+// 'auto' lets the bridge pick; anything else is a ready bridge model id.
+try { db.exec("ALTER TABLE users ADD COLUMN image_model TEXT NOT NULL DEFAULT 'auto'"); } catch { /* exists */ }
+// Content filter: off | safe | strict (see contentFilter.js)
+try { db.exec("ALTER TABLE users ADD COLUMN content_filter TEXT NOT NULL DEFAULT 'off'"); } catch { /* exists */ }
+
+// Migrate images → AUTOINCREMENT if the live table was created without it.
+// Without this, delete+regenerate reuses id N and immutable browser caches
+// keep serving the deleted image forever.
+(() => {
+  try {
+    const row = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='images'",
+    ).get();
+    if (!row?.sql || /AUTOINCREMENT/i.test(row.sql)) return;
+    db.exec('BEGIN');
+    db.exec(`
+      CREATE TABLE images__ai (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        prompt TEXT NOT NULL,
+        enhanced_prompt TEXT,
+        model TEXT,
+        size TEXT,
+        steps INTEGER,
+        file TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+      INSERT INTO images__ai (id, user_id, prompt, enhanced_prompt, model, size, steps, file, created_at)
+        SELECT id, user_id, prompt, enhanced_prompt, model, size, steps, file, created_at FROM images;
+      DROP TABLE images;
+      ALTER TABLE images__ai RENAME TO images;
+      CREATE INDEX IF NOT EXISTS idx_images_user ON images(user_id, id DESC);
+    `);
+    // Keep sequence above any id we've ever issued so deletes never reuse.
+    const max = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM images').get()?.m ?? 0;
+    const keep = Math.max(max, 1000);
+    const seq = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'images'").get();
+    if (seq) {
+      if (Number(seq.seq) < keep) {
+        db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'images'").run(keep);
+      }
+    } else {
+      db.prepare("INSERT INTO sqlite_sequence(name, seq) VALUES('images', ?)").run(keep);
+    }
+    db.exec('COMMIT');
+    console.log('[db] migrated images table to AUTOINCREMENT (max id', max, ')');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* */ }
+    console.warn('[db] images AUTOINCREMENT migrate skipped:', e.message);
+  }
+})();
+
+// Chat image uploads (vision or auto-described for text-only models).
+db.exec(`
+CREATE TABLE IF NOT EXISTS uploads (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  file TEXT NOT NULL,
+  mime TEXT NOT NULL DEFAULT 'image/png',
+  bytes INTEGER NOT NULL DEFAULT 0,
+  width_height TEXT,
+  description TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_uploads_user ON uploads(user_id, id DESC);
+CREATE TABLE IF NOT EXISTS conv_uploads (
+  conv_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  upload_id INTEGER NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+  PRIMARY KEY (conv_id, upload_id)
+);
+`);
 
 // per-user read-aloud voice (Voxtral voice_id incl. emotion suffix)
 try { db.exec('ALTER TABLE users ADD COLUMN tts_voice TEXT'); } catch { /* exists */ }

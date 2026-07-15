@@ -37,7 +37,7 @@
 
 <div class="wrap">
   <form class="card slide-up" onsubmit={submit}>
-    <div class="logo"><Duck px={4} bob /></div>
+    <div class="logo"><Duck px={4} bob interactive /></div>
     <h1>DuckPond</h1>
     <p class="hint">
       {app.setupNeeded ? 'First run — create the owner account.' : 'Your models, your pond.'}
@@ -55,16 +55,24 @@
 
 <style>
   .wrap {
-    height: 100vh; display: grid; place-items: center;
+    height: 100%; height: 100dvh; display: grid; place-items: center;
+    padding: 16px;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+      max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
     background:
       radial-gradient(ellipse 60% 45% at 50% 0%, rgba(166, 124, 82, 0.07), transparent),
       var(--bg);
+    box-sizing: border-box;
   }
   .card {
-    width: 330px; display: flex; flex-direction: column; gap: 12px;
+    width: min(330px, 100%); display: flex; flex-direction: column; gap: 12px;
     background: var(--bg-sidebar); border: 1px solid var(--border);
     border-radius: 18px; padding: 34px 32px 26px;
     box-shadow: var(--shadow-lg);
+    box-sizing: border-box;
+  }
+  @media (max-width: 420px) {
+    .card { padding: 28px 20px 22px; }
   }
   .logo { display: flex; justify-content: center; margin-bottom: 2px; }
   h1 { margin: 0; font-size: 22px; text-align: center; font-weight: 600; letter-spacing: -0.01em; }

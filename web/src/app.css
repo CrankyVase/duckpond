@@ -39,7 +39,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html, body { height: 100%; height: 100dvh; }
 body {
   margin: 0;
   background: var(--bg);
@@ -50,8 +50,19 @@ body {
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* notch / home-indicator safe areas (iOS, modern Android) */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+           env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
-#app { height: 100vh; }
+#app { height: 100%; height: 100dvh; }
+
+/* prevent iOS zoom-on-focus: inputs need ≥16px */
+@media (max-width: 768px) {
+  input, textarea, select { font-size: 16px !important; }
+  button, a, [role='button'] { -webkit-tap-highlight-color: transparent; }
+  /* prefer taller touch targets without changing desktop */
+  .iconb, button.ghost.iconb { min-width: 40px; min-height: 40px; }
+}
 
 ::selection { background: var(--accent-dim); color: var(--text); }
 
@@ -181,13 +192,24 @@ input[type='range']::-moz-range-thumb {
   background: rgba(10, 9, 8, 0.65);
   display: grid; place-items: center;
   padding: 24px;
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
 }
 .html-preview-card {
-  width: min(1100px, 96vw); height: min(85vh, 900px);
+  width: min(1100px, 96vw); height: min(85vh, 900px); height: min(85dvh, 900px);
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: calc(14px * var(--rf)); overflow: hidden;
   display: flex; flex-direction: column;
   box-shadow: var(--shadow-lg);
+}
+@media (max-width: 768px) {
+  .html-preview-card {
+    width: 100%; height: 100%; max-height: none;
+    border-radius: 0;
+  }
+  .md pre { padding: 34px 10px 13px; border-radius: 10px; }
+  .md table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .md img { max-width: 100%; height: auto; }
 }
 .html-preview-head {
   display: flex; align-items: center; gap: 8px;

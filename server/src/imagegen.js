@@ -27,11 +27,19 @@ export function stepsForQuality(quality) {
 }
 
 export function getUserImagePrefs(userId) {
-  const row = db.prepare('SELECT allow_image_gen, image_quality FROM users WHERE id = ?').get(userId);
-  return { allowed: !!(row?.allow_image_gen ?? 1), quality: row?.image_quality ?? 'medium' };
+  const row = db.prepare(
+    'SELECT allow_image_gen, image_quality, image_model FROM users WHERE id = ?',
+  ).get(userId);
+  return {
+    allowed: !!(row?.allow_image_gen ?? 1),
+    quality: row?.image_quality ?? 'medium',
+    // preferred diffusion model; 'auto' = bridge default / smart select
+    model: row?.image_model || 'auto',
+  };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const min4 = (n) => Math.max(1, Math.min(Number(n) || 1, 4));
 
 // Bridge jobs block for many minutes; fetch's default timeouts would kill the
 // request, so the long POST goes over a plain node:http request instead.
@@ -70,25 +78,44 @@ export async function bridgeGet(path) {
 //   { type:'preview', b64, seq }
 // Resolves { images:[{id,url}], enhanced, model_used }; throws on bridge error.
 export async function generateViaBridge({
-  userId, prompt, model = 'auto', size = '1024x1024', steps = null, n = 1,
-  negative = '', enhance = true, onProgress = () => {},
+  userId, prompt, model = null, size = '1024x1024', steps = null, n = 1,
+  negative = '', enhance = true, seed = null, onProgress = () => {},
 }) {
+  const prefs = getUserImagePrefs(userId);
+  // Explicit non-auto model wins; otherwise the user's preferred model; else auto.
+  const resolvedModel = (model && model !== 'auto')
+    ? model
+    : (prefs.model && prefs.model !== 'auto' ? prefs.model : (model || 'auto'));
   const tag = randomUUID().replace(/-/g, '').slice(0, 12);
   const body = {
-    prompt: prompt.trim(), model, size, tag, enhance,
-    n: Math.max(1, Math.min(Number(n) || 1, 4)),
+    prompt: prompt.trim(), model: resolvedModel, size, tag, enhance,
+    n: min4(Number(n) || 1),
   };
-  if (steps) body.steps = Number(steps);
+  if (steps) body.steps = Math.max(1, Math.min(Number(steps) || 1, 80));
   if (negative?.trim()) body.negative_prompt = negative.trim();
+  if (seed != null && seed !== '' && Number.isFinite(Number(seed)) && Number(seed) > 0) {
+    body.seed = Math.floor(Number(seed));
+  }
+
+  // refuse before burning GPU if the user is over the 15 GB Files quota
+  try {
+    const { assertQuota } = await import('./storage.js');
+    assertQuota(userId, 800_000); // ~typical PNG headroom
+  } catch (e) {
+    if (e?.code === 'QUOTA') throw e;
+  }
 
   const post = bridgePost('/v1/images/generations', body)
     .then((r) => ({ ok: true, r })).catch((e) => ({ ok: false, e }));
 
   let settled = false;
   post.then(() => { settled = true; });
+  // Poll often enough to catch individual denoise steps (900ms was missing
+  // most of them on short flux runs).
   let lastSeq = 0;
+  let lastImage = 0;
   while (!settled) {
-    await sleep(900);
+    await sleep(280);
     const p = await bridgeGet(`/v1/progress?since=${lastSeq}`).catch(() => null);
     if (!p || settled) continue;
     if (p.tag !== tag) {
@@ -97,16 +124,34 @@ export async function generateViaBridge({
       continue;
     }
     const prog = p.progress ?? {};
+    const imageIdx = prog.image ?? 1;
+    const nTotal = prog.n ?? body.n;
     onProgress({
       type: 'progress',
       phase: prog.phase ?? p.phase,
       step: prog.step ?? null, steps: prog.steps ?? null,
-      image: prog.image ?? 1, n: prog.n ?? body.n,
+      image: imageIdx, n: nTotal,
+      steps_requested: prog.steps_requested ?? null,
+      steps_capped: !!prog.steps_capped,
       enhanced_prompt: p.enhanced_prompt ?? null,
     });
+    // New preview frame (latent or finished sample) — always emit when seq moves
     if (p.preview_b64 && p.preview_seq > lastSeq) {
       lastSeq = p.preview_seq;
-      onProgress({ type: 'preview', b64: p.preview_b64, seq: p.preview_seq });
+      onProgress({
+        type: 'preview', b64: p.preview_b64, seq: p.preview_seq,
+        image: imageIdx, n: nTotal,
+        finished: prog.phase === 'image_done',
+      });
+    } else if (prog.seq && prog.seq > lastSeq) {
+      // seq advanced without a new PNG (phase-only) — still advance so we
+      // don't re-download an identical preview forever.
+      lastSeq = prog.seq;
+    }
+    // Multi-image: tell the client when we move on to the next sample
+    if (imageIdx !== lastImage) {
+      lastImage = imageIdx;
+      onProgress({ type: 'progress', phase: prog.phase ?? p.phase, image: imageIdx, n: nTotal, step: prog.step, steps: prog.steps });
     }
   }
 
@@ -114,20 +159,30 @@ export async function generateViaBridge({
   if (!result.ok) throw result.e;
 
   const saved = [];
+  // Stagger timestamps so multi-image batches never collide on the same ms
+  // name, and always keep every sample the bridge returned.
+  let i = 0;
   for (const item of result.r.data ?? []) {
     if (!item.b64_json) continue;
-    const file = `img-${Date.now()}-${randomUUID().slice(0, 8)}.png`;
+    const file = `img-${Date.now()}-${i}-${randomUUID().slice(0, 8)}.png`;
+    i += 1;
     writeFileSync(join(IMAGES_DIR, file), Buffer.from(item.b64_json, 'base64'));
     const info = db.prepare(`
       INSERT INTO images (user_id, prompt, enhanced_prompt, model, size, steps, file)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
       userId, prompt.trim(), result.r.prompt_enhanced ?? null,
-      result.r.model_used ?? model, body.size, body.steps ?? null, file);
-    saved.push({ id: info.lastInsertRowid, url: `/api/images/${info.lastInsertRowid}/file` });
+      result.r.model_used ?? resolvedModel, body.size,
+      result.r.steps_used ?? body.steps ?? null, file);
+    // ?v=filename busts browser caches if an id is ever reused
+    const id = info.lastInsertRowid;
+    saved.push({ id, url: `/api/images/${id}/file?v=${encodeURIComponent(file)}` });
   }
   return {
     images: saved,
     enhanced: result.r.prompt_enhanced ?? null,
     model_used: result.r.model_used ?? null,
+    steps_used: result.r.steps_used ?? body.steps ?? null,
+    steps_requested: result.r.steps_requested ?? body.steps ?? null,
+    steps_capped: !!result.r.steps_capped,
   };
 }

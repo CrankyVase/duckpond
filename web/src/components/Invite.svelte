@@ -39,7 +39,7 @@
 
 <div class="wrap">
   <form class="card slide-up" onsubmit={submit}>
-    <div class="logo"><Duck px={4} bob /></div>
+    <div class="logo"><Duck px={4} bob interactive /></div>
     <h1>DuckPond</h1>
     {#if check === null}
       <p class="hint">Checking your invite…</p>

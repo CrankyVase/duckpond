@@ -2,6 +2,7 @@
 // tokens (CSS custom properties, sans the -- prefix). Presets are complete;
 // user customization stores per-token OVERRIDES on top of a preset, so a
 // preset can evolve without wiping everyone's tweaks.
+import themeCatalog from './themeCatalog.json';
 
 // token metadata drives the color editor UI — order here is display order
 export const TOKEN_GROUPS = [
@@ -105,11 +106,16 @@ body::after {
 }
 .md, .ububble { text-shadow: 0 0 6px rgba(79, 220, 123, 0.18); }`;
 
+// Built-in handcrafted presets. `pond` is the default/featured original.
+// Everything else is browsable under Dark/Light → color group.
 export const PRESETS = [
   {
     id: 'pond',
     name: 'Pond at Dusk',
     dark: true,
+    group: 'gold',
+    featured: true,
+    category: 'featured',
     blurb: 'the original — warm near-black, duck-bill tan',
     colors: {
       'bg': '#0e0d0c', 'bg-sidebar': '#141312', 'bg-raised': '#1b1917', 'bg-card': '#1d1b19',
@@ -126,6 +132,8 @@ export const PRESETS = [
     effects: { glass: 'frosted', glassBlur: 12, glassOpacity: 0.62, bg: 'gradient', bgA: '#08100c', bgB: '#123326', bgAngle: 168 },
     name: 'Mallard',
     dark: true,
+    group: 'green',
+    category: 'fun',
     blurb: 'deep pond greens, jade accent',
     colors: {
       'bg': '#0a100e', 'bg-sidebar': '#0e1512', 'bg-raised': '#16201b', 'bg-card': '#182219',
@@ -142,6 +150,8 @@ export const PRESETS = [
     effects: { glass: 'frosted', glassBlur: 14, glassOpacity: 0.6, bg: 'gradient', bgA: '#0b0e14', bgB: '#1c2c45', bgAngle: 160 },
     name: 'Slate',
     dark: true,
+    group: 'blue',
+    category: 'fun',
     blurb: 'cool graphite, steel-blue accent',
     colors: {
       'bg': '#0e1013', 'bg-sidebar': '#12151a', 'bg-raised': '#191d24', 'bg-card': '#1b2028',
@@ -159,6 +169,8 @@ export const PRESETS = [
     css: SCENE_NIGHTSHADE,
     name: 'Nightshade',
     dark: true,
+    group: 'purple',
+    category: 'fun',
     blurb: 'dark violet, soft neon accent',
     colors: {
       'bg': '#100d14', 'bg-sidebar': '#15111b', 'bg-raised': '#1d1826', 'bg-card': '#201a29',
@@ -176,6 +188,8 @@ export const PRESETS = [
     css: SCENE_EMBER,
     name: 'Ember',
     dark: true,
+    group: 'orange',
+    category: 'fun',
     blurb: 'char-black, burnt-orange glow',
     colors: {
       'bg': '#0d0b0a', 'bg-sidebar': '#131009', 'bg-raised': '#1b1512', 'bg-card': '#1d1713',
@@ -192,6 +206,8 @@ export const PRESETS = [
     effects: { bg: 'gradient', bgA: '#fbf7ef', bgB: '#f0e2c4', bgAngle: 160 },
     name: 'Duckling',
     dark: false,
+    group: 'gold',
+    category: 'fun',
     blurb: 'light warm cream, golden accent',
     shadow: LIGHT_SHADOW,
     colors: {
@@ -208,6 +224,8 @@ export const PRESETS = [
     id: 'paper',
     name: 'Paper',
     dark: false,
+    group: 'blue',
+    category: 'fun',
     blurb: 'clean neutral light, ink & blue',
     shadow: LIGHT_SHADOW,
     colors: {
@@ -226,6 +244,8 @@ export const PRESETS = [
     css: SCENE_PHOSPHOR,
     name: 'Phosphor',
     dark: true,
+    group: 'green',
+    category: 'fun',
     blurb: 'CRT black on green, terminal soul',
     colors: {
       'bg': '#050705', 'bg-sidebar': '#070a07', 'bg-raised': '#0d120d', 'bg-card': '#0e140e',
@@ -241,6 +261,8 @@ export const PRESETS = [
     id: 'synthwave',
     name: 'Synthwave',
     dark: true,
+    group: 'pink',
+    category: 'fun',
     blurb: 'plum dusk, a quiet magenta glow at the horizon',
     effects: { glow: true, bg: 'gradient', bgA: '#191126', bgB: '#251333', bgAngle: 168 },
     css: SCENE_SYNTHWAVE,
@@ -258,6 +280,8 @@ export const PRESETS = [
     id: 'abyss',
     name: 'Abyss',
     dark: true,
+    group: 'teal',
+    category: 'fun',
     blurb: 'deep water — glass panels lit from the surface',
     effects: { glass: 'liquid', glassBlur: 20, glassOpacity: 0.55, bg: 'gradient', bgA: '#04111c', bgB: '#0b2e42', bgAngle: 174 },
     css: SCENE_ABYSS,
@@ -272,6 +296,37 @@ export const PRESETS = [
     },
   },
 ];
+
+// Bulk catalog from scripts/import-vsc-themes.mjs (popular marketplace packs → tokens).
+
+/** Color-group labels for the gallery filters (order = display order). */
+export const COLOR_GROUPS = [
+  ['blue', 'Blue'],
+  ['teal', 'Teal'],
+  ['green', 'Green'],
+  ['purple', 'Purple'],
+  ['pink', 'Pink'],
+  ['red', 'Red'],
+  ['orange', 'Orange'],
+  ['gold', 'Gold'],
+  ['mono', 'Mono'],
+  ['oled', 'OLED'],
+];
+
+/** Default featured theme (original Duck Pond look). */
+export const DEFAULT_PRESET_ID = 'pond';
+
+/** Every selectable preset: handcrafted + catalog. */
+export const ALL_PRESETS = [
+  ...PRESETS,
+  ...themeCatalog.filter((c) => c.id && c.colors && !PRESETS.some((p) => p.id === c.id)),
+];
+
+/** Featured only (shown pinned at top). */
+export const FEATURED_PRESETS = ALL_PRESETS.filter((p) => p.featured || p.id === DEFAULT_PRESET_ID);
+
+/** Everything else, for Dark/Light → color browsing. */
+export const BROWSE_PRESETS = ALL_PRESETS.filter((p) => !p.featured && p.id !== DEFAULT_PRESET_ID);
 
 export const LAYOUT_OPTIONS = {
   chatWidth: [
@@ -333,4 +388,16 @@ export const DEFAULT_EFFECTS = {
   font: 'default',
 };
 
-export const presetById = (id) => PRESETS.find((p) => p.id === id) ?? PRESETS[0];
+export const presetById = (id) => ALL_PRESETS.find((p) => p.id === id) ?? PRESETS[0];
+
+/** Filter browse presets by mode (all|dark|light), color group, and free-text. */
+export function filterPresets(list, { mode = 'all', group = 'all', q = '' } = {}) {
+  const query = String(q || '').trim().toLowerCase();
+  return list.filter((p) => {
+    if (mode === 'dark' && !p.dark) return false;
+    if (mode === 'light' && p.dark) return false;
+    if (group !== 'all' && (p.group || 'mono') !== group) return false;
+    if (query && !`${p.name} ${p.blurb || ''} ${p.group || ''}`.toLowerCase().includes(query)) return false;
+    return true;
+  });
+}

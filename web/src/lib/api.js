@@ -6,10 +6,18 @@ function announceUnauthorized() {
 }
 
 export async function api(path, opts = {}) {
+  // POST/PUT/PATCH without a body still send `{}` so Fastify never 415s on
+  // empty application/json (the Stop button used to hit this and leave runs stuck).
+  const method = String(opts.method || 'GET').toUpperCase();
+  const needsBody = method !== 'GET' && method !== 'HEAD' && method !== 'DELETE';
+  const payload = opts.body !== undefined ? opts.body : (needsBody ? {} : undefined);
   const res = await fetch(path, {
-    headers: opts.body ? { 'content-type': 'application/json' } : {},
     ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    headers: {
+      ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
+      ...(opts.headers || {}),
+    },
+    body: payload !== undefined ? JSON.stringify(payload) : undefined,
   });
   if (res.status === 401) {
     announceUnauthorized();
@@ -50,18 +58,43 @@ async function readSse(res, onEvent, signal) {
 export function sse(path, body, onEvent) {
   const ctrl = new AbortController();
   const done = (async () => {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
+    let res;
+    try {
+      res = await fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      // Browsers surface hard disconnects as TypeError/NetworkError with a
+      // useless message. Translate so the toast is actionable.
+      if (ctrl.signal.aborted) throw err;
+      const msg = String(err?.message ?? err);
+      if (/failed to fetch|networkerror|load failed|network request failed/i.test(msg)) {
+        throw new Error(
+          'Connection dropped (server restart, tunnel blip, or the image bridge crashed). Try again — if it keeps happening, check that duckpond + image-gen-bridge are running.',
+        );
+      }
+      throw err;
+    }
     if (!res.ok || !res.body) {
       if (res.status === 401) announceUnauthorized();
       const j = await res.json().catch(() => ({}));
       throw new Error(j.error ?? `HTTP ${res.status}`);
     }
-    await readSse(res, onEvent, ctrl.signal);
+    try {
+      await readSse(res, onEvent, ctrl.signal);
+    } catch (err) {
+      if (ctrl.signal.aborted) throw err;
+      const msg = String(err?.message ?? err);
+      if (/failed to fetch|networkerror|network|aborted/i.test(msg)) {
+        throw new Error(
+          'Stream cut mid-job (often a service restart or Cloudflare timeout on a long image gen). Check Files for a finished image, then retry.',
+        );
+      }
+      throw err;
+    }
   })();
   return { abort: () => ctrl.abort(), done };
 }

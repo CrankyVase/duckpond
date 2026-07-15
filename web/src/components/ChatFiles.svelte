@@ -220,6 +220,25 @@
     background: var(--bg-sidebar);
     display: flex; flex-direction: column; min-height: 0; max-height: calc(100% - 20px);
   }
+  @media (max-width: 768px) {
+    .rail {
+      position: fixed; right: 10px; bottom: max(72px, calc(56px + env(safe-area-inset-bottom)));
+      z-index: 25; flex-direction: row; gap: 6px;
+      padding: 10px 12px; margin: 0;
+      writing-mode: horizontal-tb;
+      box-shadow: var(--shadow-lg);
+    }
+    .railtxt { writing-mode: horizontal-tb; letter-spacing: 0.02em; }
+    .panel {
+      position: fixed; inset: 0; z-index: 55;
+      width: 100%; max-width: none; margin: 0; max-height: none;
+      border-radius: 0; border: none;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .previewcard { width: 100vw; height: 100dvh; border-radius: 0; }
+    .card { width: 100vw; max-height: 100dvh; border-radius: 0; }
+  }
   .head {
     display: flex; align-items: center; gap: 7px;
     padding: 9px 11px; border-bottom: 1px solid var(--border-soft);

@@ -28,6 +28,13 @@ grind / repeats a known pattern.
 - **Dynamic welcome suggestions** — qwen3.5-2b generates prompt chips from chat
   history for the Welcome screen (`Welcome.svelte`, small resident model, cheap,
   cache per session). *No separate note — this line is the spec.*
+- **Agent writes straight into the project folder** *(user idea 2026-07-15, after
+  themes)* — today the model often stages a file then “adds” it to the workspace
+  tree (or the UI feels like write-then-attach). Prefer: `write_file` lands the
+  file at the real workspace-relative path in one step so Project Files updates
+  live as the tool runs, with no intermediate “write elsewhere then move” flow.
+  Touch: `server/src/routes/agent.js` `write_file`, liveJobs `lastWrite`, Chat
+  project-files panel. *Do after theme catalog work.*
 
 ## Opus (hard / done-right — mostly the widgets build)
 - **Widgets Phase 0** — search hard-cap 200 + thinking watchdog.

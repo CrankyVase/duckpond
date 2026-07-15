@@ -14,6 +14,7 @@
   import PlugZap from '@lucide/svelte/icons/plug-zap';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Save from '@lucide/svelte/icons/save';
+  import Shield from '@lucide/svelte/icons/shield';
   import ShieldCheck from '@lucide/svelte/icons/shield-check';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import ToggleLeft from '@lucide/svelte/icons/toggle-left';
@@ -113,6 +114,34 @@
     await api('/api/auth/me', { method: 'PATCH', body: { image_quality: v } });
     if (app.user) app.user.image_quality = v;
     toast(`Image quality set to ${v}`, 'ok');
+  }
+
+  let imageModels = $state([{ id: 'auto' }]);
+  async function loadImageModels() {
+    try {
+      const m = await api('/api/images/models');
+      imageModels = m.models?.length ? m.models : [{ id: 'auto' }];
+    } catch { imageModels = [{ id: 'auto' }]; }
+  }
+  $effect(() => { if (app.settingsOpen) loadImageModels(); });
+
+  async function setImageModel(e) {
+    const v = e.target.value || 'auto';
+    await api('/api/auth/me', { method: 'PATCH', body: { image_model: v } });
+    if (app.user) app.user.image_model = v;
+    toast(v === 'auto' ? 'Image model: auto' : `Image model: ${v}`, 'ok');
+  }
+
+  async function setContentFilter(e) {
+    const v = e.target.value || 'off';
+    await api('/api/auth/me', { method: 'PATCH', body: { content_filter: v } });
+    if (app.user) app.user.content_filter = v;
+    const labels = {
+      off: 'off (images unrestricted)',
+      safe: 'no nudity on images',
+      strict: 'strict (no sexy image shoots)',
+    };
+    toast(`Content filter: ${labels[v] ?? v}`, 'ok');
   }
 
   async function probe() {
@@ -413,6 +442,26 @@
       </div>
     </section>
 
+    <!-- content filter — image nudity only; chat is free -->
+    <section>
+      <div class="stitle"><Shield size={13} />Content filter</div>
+      <div class="row">
+        <div class="rlabel">
+          <div class="rt">Image nudity filter</div>
+          <div class="rd">blocks nude / explicit-body image prompts only — chat stays unrestricted</div>
+        </div>
+        <select value={app.user?.content_filter ?? 'off'} onchange={setContentFilter}>
+          <option value="off">Off</option>
+          <option value="safe">No nudity</option>
+          <option value="strict">Strict (no sexy shoots either)</option>
+        </select>
+      </div>
+      <div class="hint">
+        Applies to Files studio, in-chat generate_image, and agent image jobs.
+        Chat text is not filtered. Sexual content involving minors is always blocked.
+      </div>
+    </section>
+
     <!-- behavior -->
     <section>
       <div class="stitle"><ToggleLeft size={13} />Behavior</div>
@@ -436,11 +485,19 @@
     <section>
       <div class="stitle"><ImageIcon size={13} />Image generation</div>
       <div class="row">
-        <div class="rlabel"><div class="rt">Let the model generate images</div><div class="rd">in-chat generate_image tool, on top of the Images tab</div></div>
+        <div class="rlabel"><div class="rt">Let the model generate images</div><div class="rd">in-chat generate_image tool, on top of the Files tab</div></div>
         <button class="tog" class:on={app.user?.allow_image_gen} role="switch" aria-checked={app.user?.allow_image_gen}
           onclick={toggleImageGen}>
           <span class="knob"></span>
         </button>
+      </div>
+      <div class="row">
+        <div class="rlabel"><div class="rt">Image model</div><div class="rd">which diffusion model generates pictures (studio + in-chat)</div></div>
+        <select value={app.user?.image_model ?? 'auto'} onchange={setImageModel}>
+          {#each imageModels as m (m.id)}
+            <option value={m.id}>{m.id}</option>
+          {/each}
+        </select>
       </div>
       <div class="row">
         <div class="rlabel"><div class="rt">Quality</div><div class="rd">steps vs. speed — applies everywhere images get generated</div></div>
@@ -608,6 +665,17 @@
     box-shadow: var(--shadow-lg);
   }
   .panel.open { transform: none; }
+  @media (max-width: 768px) {
+    .panel {
+      width: 100%; max-width: 100vw;
+      border-left: none;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .body { padding: 6px 14px 24px; }
+    .row { flex-wrap: wrap; gap: 8px; }
+    .row select { max-width: 100%; width: 100%; }
+  }
   .head {
     display: flex; align-items: center; justify-content: space-between;
     padding: 16px 18px 12px; border-bottom: 1px solid var(--border-soft);

@@ -227,10 +227,20 @@
         if (s) { s.loading = false; s.image = { prompt: ev.prompt, phase: 'starting', step: null, steps: null, preview: null }; }
         break;
       case 'image_progress':
-        if (s?.image) { s.image.phase = ev.phase; s.image.step = ev.step; s.image.steps = ev.steps; }
+        if (s?.image) {
+          s.image.phase = ev.phase;
+          s.image.step = ev.step;
+          s.image.steps = ev.steps;
+          if (ev.image != null) s.image.image = ev.image;
+          if (ev.n != null) s.image.n = ev.n;
+        }
         break;
       case 'image_preview':
-        if (s?.image) s.image.preview = `data:image/png;base64,${ev.b64}`;
+        if (s?.image) {
+          s.image.preview = `data:image/png;base64,${ev.b64}`;
+          if (ev.image != null) s.image.image = ev.image;
+          if (ev.n != null) s.image.n = ev.n;
+        }
         break;
       case 'image_done':
         if (s) s.image = null;
@@ -282,7 +292,10 @@
         loadConversations();
         break;
       case 'error':
+        // Keep the live bubble; the server will follow with a saved partial `done`
+        // so the model can see the error when the user says continue.
         if (s) s.error = ev.message;
+        if (here && ev.message) toast(`Generation hit an error — work kept. Say continue to pick up.`, 'error', 4200);
         break;
       case 'resume': {
         // Reattach after refresh: restore the live bubble from the server snapshot.
@@ -296,14 +309,21 @@
           break;
         }
         if (ev.status === 'stopped' || ev.status === 'error') {
-          if (here && (ev.text || ev.error)) {
+          // Prefer a server-saved finalMsg (has a real id on the tree)
+          if (ev.finalMsg) {
+            if (here && !app.conv.messages.some((m) => m.id === ev.finalMsg.id)) {
+              app.conv.messages.push(ev.finalMsg);
+              app.conv.active_leaf_id = ev.finalMsg.id;
+            }
+          } else if (here && (ev.text || ev.error)) {
             app.conv.messages.push({
               id: `tmp-${Date.now()}`, conv_id: convId,
               parent_id: app.conv.active_leaf_id, role: 'assistant',
               run_id: ev.run?.id ?? null,
-              content: (ev.text || '') + (ev.error ? `\n\n> ${ev.error}` : '\n\n> stopped'),
+              content: (ev.text || '') + (ev.error ? `\n\n> Interrupted: ${ev.error}` : '\n\n> Stopped.'),
               pinned: 0,
             });
+            app.conv.active_leaf_id = app.conv.messages[app.conv.messages.length - 1].id;
           }
           app.streaming = null;
           break;
@@ -351,6 +371,19 @@
   let resuming = false;
   let reconnectBudget = 0;
 
+  /** Resolve a parent id the server will accept (no tmp-* client leaves). */
+  function realParentId() {
+    let parent = app.conv?.active_leaf_id ?? null;
+    if (parent != null && (typeof parent === 'string') && String(parent).startsWith('tmp-')) {
+      const tmp = app.conv.messages.find((m) => m.id === parent);
+      // Prefer the interrupted assistant's parent (the original user turn) only
+      // when we must; usually we want to hang "continue" UNDER the interrupted
+      // asst — but tmp asst isn't in the DB, so use its parent_id (the user msg).
+      parent = tmp?.parent_id ?? null;
+    }
+    return parent;
+  }
+
   async function run(body) {
     if (!app.conv || app.streaming) return;
     const convId = app.conv.id;
@@ -358,16 +391,29 @@
     pendText = ''; pendThink = ''; toolBuf = null;
     intentionalStop = false;
     reconnectBudget = 3;
-    // search depth; location is resolved server-side from the request's IP
-    const outBody = { ...body, researchMode: prefs.researchMode };
+    // Always pass a real DB parent so "continue" after a drop stays on the same branch
+    const outBody = {
+      ...body,
+      parentId: body.parentId !== undefined ? body.parentId : realParentId(),
+      researchMode: prefs.researchMode,
+    };
     stream = sse(`/api/conversations/${convId}/chat`, outBody, (ev) => handleEvent(ev, convId));
+    let reattached = false;
     try {
       await stream.done;
     } catch (err) {
       if (err?.name === 'AbortError') { /* stop / tab close */ }
-      else if (app.streaming) app.streaming.error = String(err.message ?? err);
+      else if (/already generating/i.test(String(err.message ?? ''))) {
+        // Server still working — reattach live bubble, do not start a new turn / wipe
+        toast('Still generating — reconnected to the live reply', 'ok');
+        reattached = true;
+        await tryResume(convId, { nested: false });
+      } else if (app.streaming) {
+        app.streaming.error = String(err.message ?? err);
+      }
     } finally {
-      await endStream(convId);
+      // tryResume owns the live tail when we reattached to an in-flight job
+      if (!reattached) await endStream(convId);
     }
   }
 
@@ -388,9 +434,12 @@
   /** Keep partial work as a real bubble so it never silently vanishes. */
   function promoteSnapToMessage(convId, snap, suffix = '') {
     if (!snap || app.conv?.id !== convId) return;
-    // Don't double-insert if 'done' already landed the same content
+    // Don't double-insert if 'done' already landed a real/same assistant bubble
     const last = app.conv.messages[app.conv.messages.length - 1];
-    if (last?.role === 'assistant' && snap.text && last.content === snap.text) return;
+    if (last?.role === 'assistant') {
+      if (snap.text && (last.content === snap.text || last.content?.startsWith(snap.text.slice(0, 80)))) return;
+      if (/>\s*Interrupted:/i.test(last.content || '') && snap.error) return;
+    }
     let content = snap.text || '';
     const write = snap.liveTool?.content ? snap.liveTool : snap.lastWrite;
     if (write?.content) {
@@ -414,13 +463,22 @@
       content = '(work in progress — open Project files to see what was written)';
     }
     if (!content && !snap.error) return;
+    // Parent under the real leaf before this stream (not a previous tmp- partial)
+    let parent = app.conv.active_leaf_id;
+    if (typeof parent === 'string' && String(parent).startsWith('tmp-')) {
+      const tmp = app.conv.messages.find((m) => m.id === parent);
+      parent = tmp?.parent_id ?? parent;
+    }
     const msg = {
       id: `tmp-${Date.now()}`,
       conv_id: convId,
-      parent_id: app.conv.active_leaf_id,
+      parent_id: parent,
       role: 'assistant',
       run_id: snap.run?.id ?? null,
-      content: content + (snap.error ? `\n\n> ${snap.error}` : '') + suffix,
+      content: content
+        + (snap.error ? `\n\n> Interrupted: ${snap.error}` : '')
+        + suffix
+        + (!suffix && !/continue/i.test(content) ? '\n\n_Say **continue** to pick up from here._' : ''),
       thinking: snap.thinking || null,
       widgets: snap.widgets ?? null,
       pinned: 0,
@@ -471,15 +529,20 @@
       if (app.streaming?.convId === convId) {
         // Still no clean finish — park partial so it never vanishes
         promoteSnapToMessage(convId, app.streaming, '\n\n> connection dropped — partial reply kept');
+        toast('Connection dropped — partial kept. Say continue to pick up.', 'error', 4500);
         app.streaming = null;
       } else {
-        // done applied, or resume said finished — make sure DB view is fresh
+        // done applied (incl. server-saved interrupt) — refresh from DB so continue
+        // hangs under a real message id, not a tmp-* leaf
         try { await openConversation(convId); } catch { /* ignore */ }
       }
       stream = null;
     } else {
       // Out of reconnect attempts — keep whatever we had
-      if (snapHasContent(snap)) promoteSnapToMessage(convId, snap, '\n\n> connection lost');
+      if (snapHasContent(snap)) {
+        promoteSnapToMessage(convId, snap, '\n\n> connection lost');
+        toast('Connection lost — partial kept. Say continue to pick up.', 'error', 4500);
+      }
       app.streaming = null;
       stream = null;
     }
@@ -596,7 +659,8 @@
       scrollToBottom(true);
       return;
     }
-    run({ content });
+    // Hang the new turn under the current leaf (interrupted asst if we just dropped)
+    run({ content, parentId: realParentId() });
   }
 
   function suggest(prompt) {
@@ -618,34 +682,52 @@
     intentionalStop = true;
     const convId = app.streaming?.convId ?? app.conv?.id;
     if (convId) {
-      try { await api(`/api/conversations/${convId}/stop`, { method: 'POST' }); }
+      // body: {} so Fastify never 415s on empty POST (was leaving runs stuck)
+      try { await api(`/api/conversations/${convId}/stop`, { method: 'POST', body: {} }); }
       catch { /* already finished */ }
     }
     stream?.abort();
   }
 
-  // ---- attached documents (RAG) ----
+  // ---- attached documents (RAG) + chat image uploads ----
   let attachedDocs = $state([]);
+  let attachedImgs = $state([]);
   let fileInput = $state(null);
   let uploading = $state(false);
+  const isImageFile = (f) => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif)$/i.test(f.name);
   $effect(() => {
     const id = app.conv?.id;
     attachedDocs = [];
-    if (id) api(`/api/conversations/${id}/docs`).then((d) => { if (app.conv?.id === id) attachedDocs = d; }).catch(() => {});
+    attachedImgs = [];
+    if (id) {
+      api(`/api/conversations/${id}/docs`).then((d) => { if (app.conv?.id === id) attachedDocs = d; }).catch(() => {});
+      api(`/api/conversations/${id}/uploads`).then((d) => { if (app.conv?.id === id) attachedImgs = d; }).catch(() => {});
+    }
   });
   async function uploadDocs(files) {
     if (!app.conv || !files?.length) return;
     uploading = true;
     for (const f of files) {
       try {
-        toast(`Reading ${f.name}…`);
-        const res = await fetch(`/api/docs?name=${encodeURIComponent(f.name)}&conv=${app.conv.id}`, {
-          method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f,
-        });
-        const doc = await res.json();
-        if (!res.ok) throw new Error(doc.error ?? `HTTP ${res.status}`);
-        attachedDocs = [...attachedDocs, doc];
-        toast(`${f.name} attached — ${doc.chunks} sections indexed`, 'ok');
+        if (isImageFile(f)) {
+          toast(`Attaching image ${f.name}…`);
+          const res = await fetch(`/api/uploads?name=${encodeURIComponent(f.name)}&conv=${app.conv.id}`, {
+            method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f,
+          });
+          const up = await res.json();
+          if (!res.ok) throw new Error(up.error ?? `HTTP ${res.status}`);
+          attachedImgs = [...attachedImgs, up];
+          toast(`${f.name} attached — any model can use it (vision sees it; others get a description)`, 'ok');
+        } else {
+          toast(`Reading ${f.name}…`);
+          const res = await fetch(`/api/docs?name=${encodeURIComponent(f.name)}&conv=${app.conv.id}`, {
+            method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f,
+          });
+          const doc = await res.json();
+          if (!res.ok) throw new Error(doc.error ?? `HTTP ${res.status}`);
+          attachedDocs = [...attachedDocs, doc];
+          toast(`${f.name} attached — ${doc.chunks} sections indexed`, 'ok');
+        }
       } catch (err) {
         toast(`${f.name}: ${err.message ?? err}`, 'error');
       }
@@ -655,6 +737,10 @@
   async function detachDocChip(doc) {
     await api(`/api/conversations/${app.conv.id}/docs/${doc.id}`, { method: 'DELETE' });
     attachedDocs = attachedDocs.filter((d) => d.id !== doc.id);
+  }
+  async function detachImgChip(up) {
+    await api(`/api/conversations/${app.conv.id}/uploads/${up.id}`, { method: 'DELETE' });
+    attachedImgs = attachedImgs.filter((u) => u.id !== up.id);
   }
 
 
@@ -876,6 +962,7 @@
               <div class="imgshimmer"></div>
             {/if}
             <span class="imgphase">
+              {#if streamingHere.image.n > 1}image {streamingHere.image.image ?? 1}/{streamingHere.image.n} · {/if}
               {streamingHere.image.phase === 'denoising' && streamingHere.image.step
                 ? `step ${streamingHere.image.step}/${streamingHere.image.steps}`
                 : (IMG_PHASE[streamingHere.image.phase] ?? `${streamingHere.image.phase}…`)}
@@ -883,7 +970,9 @@
           </div>
         {/if}
         <div class="status">
-          {#if streamingHere.queued}
+          {#if streamingHere.error}
+            <span class="stream-err">interrupted — {streamingHere.error}</span>
+          {:else if streamingHere.queued}
             <span class="shimmer">waiting for the GPU… {streamingHere.queued} ahead of you</span>
           {:else if streamingHere.loading}
             <span class="shimmer">loading {app.conv?.model_id}…</span>
@@ -922,8 +1011,15 @@
       </button>
     {/if}
     <div class="composer" class:active={busy}>
-      {#if attachedDocs.length}
+      {#if attachedDocs.length || attachedImgs.length}
         <div class="docchips">
+          {#each attachedImgs as u (u.id)}
+            <span class="docchip imgchip" title={u.description || 'Attached image — vision models see it; others get a description'}>
+              <img class="ithumb" src={`/api/uploads/${u.id}/file`} alt="" />
+              <span class="dname">{u.name}</span>
+              <button class="dx" onclick={() => detachImgChip(u)} title="Detach from this chat"><X size={11} /></button>
+            </span>
+          {/each}
           {#each attachedDocs as d (d.id)}
             <span class="docchip" title={`${d.chunks} indexed sections — the model reads the relevant parts each message`}>
               <FileText size={12} />
@@ -941,10 +1037,10 @@
         disabled={!app.conv}></textarea>
       <div class="bar">
         <input type="file" multiple hidden bind:this={fileInput}
-          accept=".pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
+          accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
           onchange={(e) => { uploadDocs([...e.target.files]); e.target.value = ''; }} />
-        <button class="tool" class:on={attachedDocs.length > 0} disabled={!app.conv || uploading}
-          title={uploading ? 'Reading…' : 'Attach documents — the model answers from them with citations'}
+        <button class="tool" class:on={attachedDocs.length > 0 || attachedImgs.length > 0} disabled={!app.conv || uploading}
+          title={uploading ? 'Reading…' : 'Attach images or documents — images work with any model'}
           onclick={() => fileInput?.click()}><Paperclip size={15} /></button>
         <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
           title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
@@ -982,8 +1078,8 @@
 <style>
   .chat { flex: 1; display: flex; min-width: 0; min-height: 0; }
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  .scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-padding-bottom: 40px; }
-  .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 20px 24px 0; }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-padding-bottom: 40px; -webkit-overflow-scrolling: touch; }
+  .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 20px 24px 0; width: 100%; box-sizing: border-box; }
   .pad { height: 24px; }
   .agentwork {
     margin: 14px 0 8px 42px;
@@ -993,6 +1089,10 @@
   }
   .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 42px; min-height: 26px; }
   .dimtok { opacity: 0.65; }
+  .stream-err {
+    color: var(--red); max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .mono { font-family: var(--mono); }
   .shimmer {
     background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
@@ -1002,7 +1102,12 @@
   }
   @keyframes shimmer { to { background-position: -200% 0; } }
 
-  .dock { position: relative; max-width: var(--chat-maxw); width: 100%; margin: 0 auto; padding: 4px 24px 10px; }
+  .dock {
+    position: relative; max-width: var(--chat-maxw); width: 100%; margin: 0 auto;
+    padding: 4px 24px 10px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    box-sizing: border-box;
+  }
   .tobottom {
     position: absolute; top: -46px; left: 50%; transform: translateX(-50%);
     color: var(--text-dim);
@@ -1034,6 +1139,10 @@
     border-radius: 999px; padding: 3px 5px 3px 10px;
   }
   .docchip :global(svg:first-child) { color: var(--accent); flex-shrink: 0; }
+  .ithumb {
+    width: 22px; height: 22px; border-radius: 5px; object-fit: cover; flex-shrink: 0;
+    border: 1px solid var(--border-soft);
+  }
   .dname { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dx {
     all: unset; cursor: pointer; display: grid; place-items: center;
@@ -1073,12 +1182,15 @@
     display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
   }
   .imgpreview {
-    width: min(320px, 70%); border-radius: calc(12px * var(--rf));
+    width: min(320px, 100%); height: min(320px, 70vw); max-width: 100%;
+    object-fit: contain; background: #0a0a0c;
+    border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
     box-shadow: 0 8px 32px color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .imgshimmer {
-    width: min(320px, 70%); aspect-ratio: 1; border-radius: calc(12px * var(--rf));
+    width: min(320px, 100%); height: min(320px, 70vw); max-width: 100%;
+    border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
     background: linear-gradient(110deg, var(--bg-raised) 40%, var(--bg-hover) 50%, var(--bg-raised) 60%);
     background-size: 220% 100%; animation: imgshim 1.6s linear infinite;
@@ -1145,6 +1257,19 @@
   .qcount {
     font-size: 11px; color: var(--text-faint); font-family: var(--mono);
     padding: 0 6px; white-space: nowrap;
+  }
+
+  @media (max-width: 768px) {
+    .thread { padding: 12px 12px 0; }
+    .dock { padding: 4px 10px max(10px, env(safe-area-inset-bottom)); }
+    .agentwork, .imgjob, .diffjob, .status { margin-left: 0; padding-left: 0; }
+    .status { padding-left: 0; }
+    .finehint { display: none; }
+    .composer { border-radius: calc(14px * var(--rf)); padding: 8px 8px 6px 12px; }
+    .composer textarea { max-height: 140px; font-size: 16px; }
+    .tool { width: 36px; height: 34px; }
+    .send { width: 38px; height: 38px; }
+    .dname { max-width: 140px; }
   }
   .bar .send + .send { margin-left: 4px; }
   .bar .send.stop { margin-right: 2px; }

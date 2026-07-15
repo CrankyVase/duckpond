@@ -18,6 +18,7 @@ const DEFAULTS = {
   effects: { ...DEFAULT_EFFECTS },
   customCss: '',
   custom: [],              // saved custom themes: { id, name, base, colors, layout?, effects?, css? }
+  favorites: [],           // preset ids hearted by the user
 };
 
 const clamp = (n, lo, hi, fb) => (Number.isFinite(+n) ? Math.min(hi, Math.max(lo, +n)) : fb);
@@ -47,6 +48,9 @@ function sanitize(raw) {
   t.colors = Object.fromEntries(Object.entries(t.colors ?? {}).filter(([k]) => ALL_TOKENS.includes(k)));
   t.custom = Array.isArray(t.custom) ? t.custom.slice(0, 30) : [];
   t.customCss = String(t.customCss ?? '').slice(0, 20000);
+  t.favorites = Array.isArray(t.favorites)
+    ? [...new Set(t.favorites.map((id) => String(id)).filter(Boolean))].slice(0, 200)
+    : [];
   return t;
 }
 
@@ -134,10 +138,24 @@ export function applyTheme(t = theme) {
 export const snapshotTheme = () => JSON.parse(JSON.stringify({
   preset: theme.preset, colors: theme.colors, layout: theme.layout,
   effects: theme.effects, customCss: theme.customCss, custom: theme.custom,
+  favorites: theme.favorites ?? [],
 }));
 export function restoreTheme(snap) {
   Object.assign(theme, sanitize(JSON.parse(JSON.stringify(snap))));
   applyTheme();
+}
+
+export function isFavorite(id, t = theme) {
+  return (t.favorites ?? []).includes(id);
+}
+
+export function toggleFavorite(id) {
+  const set = new Set(theme.favorites ?? []);
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+  theme.favorites = [...set].slice(0, 200);
+  saveLocal();
+  return set.has(id);
 }
 
 export function saveLocal() {

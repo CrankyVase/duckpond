@@ -8,17 +8,19 @@
   import { applyPrefs, prefs, savePrefs } from '../lib/prefs.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import {
-    activePresetMeta, applyTheme, persistTheme, resolveColors, restoreTheme,
-    sanitizeEffects, snapshotTheme, theme,
+    activePresetMeta, applyTheme, isFavorite, persistTheme, resolveColors, restoreTheme,
+    sanitizeEffects, snapshotTheme, theme, toggleFavorite,
   } from '../lib/theme.svelte.js';
   import {
-    ANIM_MODES, BG_MODES, DEFAULT_EFFECTS, DEFAULT_LAYOUT, FONT_OPTIONS,
-    GLASS_MODES, LAYOUT_OPTIONS, PRESETS, TOKEN_GROUPS,
+    ALL_PRESETS, ANIM_MODES, BG_MODES, BROWSE_PRESETS, COLOR_GROUPS,
+    DEFAULT_EFFECTS, DEFAULT_LAYOUT, FEATURED_PRESETS, FONT_OPTIONS,
+    filterPresets, GLASS_MODES, LAYOUT_OPTIONS, PRESETS, TOKEN_GROUPS,
   } from '../lib/themes.js';
   import { toast } from '../lib/toast.svelte.js';
   import Brush from '@lucide/svelte/icons/brush';
   import Code from '@lucide/svelte/icons/code';
   import Download from '@lucide/svelte/icons/download';
+  import Heart from '@lucide/svelte/icons/heart';
   import LayoutTemplate from '@lucide/svelte/icons/layout-template';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Save from '@lucide/svelte/icons/save';
@@ -37,12 +39,19 @@
     ['layout', 'Layout', LayoutTemplate],
     ['css', 'Custom CSS', Code],
   ];
+  const PAGE_SIZE = 48;
   let tab = $state('themes');
   let snap = null;               // saved-state snapshot taken when the dialog opens
   let wasOpen = false;
   let saving = $state(false);
   let saveName = $state('');
   let cssDraft = $state('');
+
+  // gallery filters (Dark / Light → color group + search)
+  let toneFilter = $state('dark');   // all | dark | light | favorites
+  let colorFilter = $state('all');   // all | blue | purple | …
+  let themeQuery = $state('');
+  let themeLimit = $state(PAGE_SIZE);
 
   // market
   let market = $state(null);     // null = not loaded yet
@@ -52,7 +61,7 @@
 
   const dirty = $derived.by(() => {
     void theme.preset; void theme.colors; void theme.layout; void theme.effects;
-    void theme.customCss; void theme.custom;
+    void theme.customCss; void theme.custom; void theme.favorites;
     return snap ? JSON.stringify(snapshotTheme()) !== JSON.stringify(snap) : false;
   });
 
@@ -79,7 +88,7 @@
     if (theme.preset === id) return;
     theme.preset = id;
     theme.colors = {}; // tweaks belong to the theme they were made on
-    const p = PRESETS.find((x) => x.id === id);
+    const p = ALL_PRESETS.find((x) => x.id === id);
     if (p) {
       // adopting a preset adopts its whole art direction: effects reset to
       // stock + the preset's signature, scene CSS replaces custom CSS
@@ -95,6 +104,82 @@
     }
     applyTheme();
   }
+
+  function setToneFilter(v) { toneFilter = v; themeLimit = PAGE_SIZE; }
+  function setColorFilter(v) { colorFilter = v; themeLimit = PAGE_SIZE; }
+  function onThemeSearch(e) { themeQuery = e.target.value; themeLimit = PAGE_SIZE; }
+
+  function onHeart(e, id) {
+    e.stopPropagation();
+    e.preventDefault();
+    const on = toggleFavorite(id);
+    toast(on ? 'Added to favorites' : 'Removed from favorites', 'ok', 1400);
+  }
+
+  const favSet = $derived.by(() => {
+    void theme.favorites;
+    return new Set(theme.favorites ?? []);
+  });
+
+  const favoritePresets = $derived.by(() => {
+    void theme.favorites; void theme.custom;
+    const ids = theme.favorites ?? [];
+    return ids.map((id) => {
+      const p = ALL_PRESETS.find((x) => x.id === id);
+      if (p) return p;
+      const c = theme.custom.find((x) => x.id === id);
+      if (c) return { id: c.id, name: c.name, colors: customResolved(c), blurb: 'favorite', dark: true };
+      return null;
+    }).filter(Boolean);
+  });
+
+  /** Currently applied look (preset + live color overrides) for the top pin. */
+  const appliedCard = $derived.by(() => {
+    void theme.preset; void theme.colors; void theme.custom;
+    const meta = activePresetMeta();
+    const colors = resolveColors();
+    const tweaks = Object.keys(theme.colors || {}).length;
+    return {
+      id: meta.id,
+      name: meta.name,
+      colors,
+      blurb: tweaks
+        ? `${tweaks} color tweak${tweaks === 1 ? '' : 's'} · applied now`
+        : (meta.blurb || 'applied now'),
+    };
+  });
+
+  const filteredBrowse = $derived.by(() => {
+    void theme.favorites;
+    let list = BROWSE_PRESETS;
+    if (toneFilter === 'favorites') {
+      const set = new Set(theme.favorites ?? []);
+      list = ALL_PRESETS.filter((p) => set.has(p.id));
+      // also include custom favorites
+      for (const c of theme.custom) {
+        if (set.has(c.id) && !list.some((p) => p.id === c.id)) {
+          list = [...list, { id: c.id, name: c.name, colors: customResolved(c), blurb: 'your theme', dark: true, group: 'mono' }];
+        }
+      }
+      return filterPresets(list, { mode: 'all', group: colorFilter, q: themeQuery });
+    }
+    return filterPresets(list, { mode: toneFilter, group: colorFilter, q: themeQuery });
+  });
+  const visibleBrowse = $derived(filteredBrowse.slice(0, themeLimit));
+  const groupCounts = $derived.by(() => {
+    void theme.favorites;
+    const mode = toneFilter === 'favorites' ? 'all' : toneFilter;
+    let list = BROWSE_PRESETS;
+    if (toneFilter === 'favorites') {
+      const set = new Set(theme.favorites ?? []);
+      list = ALL_PRESETS.filter((p) => set.has(p.id));
+    }
+    const base = filterPresets(list, { mode, group: 'all', q: themeQuery });
+    const m = { all: base.length };
+    for (const [id] of COLOR_GROUPS) m[id] = 0;
+    for (const p of base) m[p.group || 'mono'] = (m[p.group || 'mono'] || 0) + 1;
+    return m;
+  });
 
   function setColor(token, value) {
     if (!/^#[0-9a-fA-F]{6}$/.test(value)) return;
@@ -225,7 +310,7 @@
       + `--p-raised:${colors['bg-raised']};--p-border:${colors['border-soft']};--p-text:${colors.text};`
       + `--p-dim:${colors['text-dim']};--p-accent:${colors.accent};`;
   }
-  const customResolved = (c) => ({ ...(PRESETS.find((p) => p.id === c.base) ?? PRESETS[0]).colors, ...c.colors });
+  const customResolved = (c) => ({ ...(ALL_PRESETS.find((p) => p.id === c.base) ?? PRESETS[0]).colors, ...c.colors });
   const marketResolved = (m) => customResolved({ base: m.theme.base ?? 'pond', colors: m.theme.colors ?? {} });
 
   const resolved = $derived.by(() => {
@@ -273,16 +358,58 @@
 
       <div class="content">
         {#if tab === 'themes'}
+          <div class="subhead">Applied now</div>
           <div class="gallery">
-            {#each PRESETS as p (p.id)}
+            <button class="pcard on applied" style={previewStyle(appliedCard.colors)}
+              onclick={() => pickPreset(appliedCard.id)} title="Your current look">
+              {@render mock()}
+              <span class="pname">{appliedCard.name}<em class="nowtag">now</em></span>
+              <span class="pblurb">{appliedCard.blurb}</span>
+              <span class="pfav" class:on={favSet.has(appliedCard.id)} role="button" tabindex="0"
+                title={favSet.has(appliedCard.id) ? 'Remove favorite' : 'Favorite'}
+                onclick={(e) => onHeart(e, appliedCard.id)}
+                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onHeart(e, appliedCard.id); }}>
+                <Heart size={13} fill={favSet.has(appliedCard.id) ? 'currentColor' : 'none'} />
+              </span>
+            </button>
+          </div>
+
+          <div class="subhead">Default</div>
+          <div class="gallery">
+            {#each FEATURED_PRESETS as p (p.id)}
               <button class="pcard" class:on={theme.preset === p.id} style={previewStyle(p.colors)}
                 onclick={() => pickPreset(p.id)}>
                 {@render mock()}
                 <span class="pname">{p.name}{#if p.effects}<em class="fxdot" title="ships with effects"></em>{/if}</span>
                 <span class="pblurb">{p.blurb}</span>
+                <span class="pfav" class:on={favSet.has(p.id)} role="button" tabindex="0"
+                  title={favSet.has(p.id) ? 'Remove favorite' : 'Favorite'}
+                  onclick={(e) => onHeart(e, p.id)}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onHeart(e, p.id); }}>
+                  <Heart size={13} fill={favSet.has(p.id) ? 'currentColor' : 'none'} />
+                </span>
               </button>
             {/each}
           </div>
+
+          {#if favoritePresets.length}
+            <div class="subhead">Favorites · {favoritePresets.length}</div>
+            <div class="gallery">
+              {#each favoritePresets as p (p.id)}
+                <button class="pcard" class:on={theme.preset === p.id} style={previewStyle(p.colors)}
+                  onclick={() => pickPreset(p.id)}>
+                  {@render mock()}
+                  <span class="pname">{p.name}</span>
+                  <span class="pblurb">{p.blurb || 'favorite'}</span>
+                  <span class="pfav on" role="button" tabindex="0" title="Remove favorite"
+                    onclick={(e) => onHeart(e, p.id)}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onHeart(e, p.id); }}>
+                    <Heart size={13} fill="currentColor" />
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
 
           {#if theme.custom.length}
             <div class="subhead">Your themes</div>
@@ -292,7 +419,13 @@
                   onclick={() => pickPreset(c.id)}>
                   {@render mock()}
                   <span class="pname">{c.name}</span>
-                  <span class="pblurb">{c.marketId ? 'from the market' : `based on ${PRESETS.find((p) => p.id === c.base)?.name ?? '?'}`}</span>
+                  <span class="pblurb">{c.marketId ? 'from the market' : `based on ${ALL_PRESETS.find((p) => p.id === c.base)?.name ?? PRESETS.find((p) => p.id === c.base)?.name ?? '?'}`}</span>
+                  <span class="pfav" class:on={favSet.has(c.id)} role="button" tabindex="0"
+                    title={favSet.has(c.id) ? 'Remove favorite' : 'Favorite'}
+                    onclick={(e) => onHeart(e, c.id)}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onHeart(e, c.id); }}>
+                    <Heart size={13} fill={favSet.has(c.id) ? 'currentColor' : 'none'} />
+                  </span>
                   <span class="pdel" role="button" tabindex="0" title="Delete this theme"
                     onclick={(e) => { e.stopPropagation(); deleteCustom(c.id); }}
                     onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); deleteCustom(c.id); } }}>
@@ -302,7 +435,59 @@
               {/each}
             </div>
           {/if}
-          <p class="hint">Picking a theme clears color tweaks — save them as your own theme first (Colors tab) if you want to keep them.</p>
+
+          <div class="subhead">Browse · {filteredBrowse.length} themes</div>
+          <div class="tfilters">
+            <input class="tsearch" type="search" placeholder="Search themes…" value={themeQuery} oninput={onThemeSearch} />
+            <div class="chiprow">
+              {#each [['all', 'All'], ['dark', 'Dark'], ['light', 'Light'], ['favorites', '♥ Favorites']] as [id, label]}
+                <button type="button" class="chip" class:on={toneFilter === id} onclick={() => setToneFilter(id)}>{label}</button>
+              {/each}
+            </div>
+            <div class="chiprow wrap">
+              <button type="button" class="chip" class:on={colorFilter === 'all'} onclick={() => setColorFilter('all')}>
+                All colors · {groupCounts.all ?? 0}
+              </button>
+              {#each COLOR_GROUPS as [id, label]}
+                {#if (groupCounts[id] ?? 0) > 0}
+                  <button type="button" class="chip" class:on={colorFilter === id} onclick={() => setColorFilter(id)}>
+                    {label} · {groupCounts[id]}
+                  </button>
+                {/if}
+              {/each}
+            </div>
+          </div>
+
+          {#if !visibleBrowse.length}
+            <div class="none">
+              {toneFilter === 'favorites'
+                ? 'No favorites yet — tap the heart on any theme.'
+                : 'No themes match — try another color or clear the search.'}
+            </div>
+          {:else}
+            <div class="gallery">
+              {#each visibleBrowse as p (p.id)}
+                <button class="pcard" class:on={theme.preset === p.id} style={previewStyle(p.colors)}
+                  onclick={() => pickPreset(p.id)}>
+                  {@render mock()}
+                  <span class="pname">{p.name}{#if p.effects}<em class="fxdot" title="ships with effects"></em>{/if}</span>
+                  <span class="pblurb">{p.blurb || `${p.group || ''} · ${p.dark ? 'dark' : 'light'}`}</span>
+                  <span class="pfav" class:on={favSet.has(p.id)} role="button" tabindex="0"
+                    title={favSet.has(p.id) ? 'Remove favorite' : 'Favorite'}
+                    onclick={(e) => onHeart(e, p.id)}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onHeart(e, p.id); }}>
+                    <Heart size={13} fill={favSet.has(p.id) ? 'currentColor' : 'none'} />
+                  </span>
+                </button>
+              {/each}
+            </div>
+            {#if themeLimit < filteredBrowse.length}
+              <button type="button" class="morebtn" onclick={() => (themeLimit += PAGE_SIZE)}>
+                Show more · {filteredBrowse.length - themeLimit} left
+              </button>
+            {/if}
+          {/if}
+          <p class="hint">Heart themes to pin them under Favorites. Picking a theme clears color tweaks — save them as your own theme first (Colors tab) if you want to keep them.</p>
 
         {:else if tab === 'market'}
           <div class="pubbox">
@@ -373,138 +558,177 @@
           {/each}
 
         {:else if tab === 'effects'}
-          <div class="subhead">Glass</div>
-          <div class="optrow">
-            {#each GLASS_MODES as [id, label, blurb] (id)}
-              <button class="opt wide" class:on={fx.glass === id} onclick={() => setFx('glass', id)}>
-                <span class="diagram glassd g-{id}"><span class="gback"></span><span class="gpane"></span></span>
-                <span>{label}</span><small>{blurb}</small>
-              </button>
-            {/each}
+          <div class="fxblock">
+            <div class="subhead">Glass</div>
+            <div class="seg" role="group" aria-label="Glass">
+              {#each GLASS_MODES as [id, label, blurb] (id)}
+                <button type="button" class="segbtn" class:on={fx.glass === id} onclick={() => setFx('glass', id)} title={blurb}>
+                  <span class="seglabel">{label}</span>
+                  <span class="segblurb">{blurb}</span>
+                </button>
+              {/each}
+            </div>
+            {#if fx.glass !== 'off'}
+              <div class="sliders">
+                <label>Blur <span class="val mono">{fx.glassBlur}px</span>
+                  <input type="range" min="4" max="32" step="1" value={fx.glassBlur}
+                    oninput={(e) => setFx('glassBlur', +e.target.value)} />
+                </label>
+                <label>Tint <span class="val mono">{Math.round(fx.glassOpacity * 100)}%</span>
+                  <input type="range" min="0.3" max="0.92" step="0.01" value={fx.glassOpacity}
+                    oninput={(e) => setFx('glassOpacity', +e.target.value)} />
+                </label>
+              </div>
+              <p class="hint">Glass shows best over a Gradient or Animated background.</p>
+            {/if}
           </div>
-          {#if fx.glass !== 'off'}
+
+          <div class="fxblock">
+            <div class="subhead">Background</div>
+            <div class="seg" role="group" aria-label="Background">
+              {#each BG_MODES as [id, label, blurb] (id)}
+                <button type="button" class="segbtn" class:on={fx.bg === id} onclick={() => setFx('bg', id)} title={blurb}>
+                  <span class="seglabel">{label}</span>
+                  <span class="segblurb">{blurb}</span>
+                </button>
+              {/each}
+            </div>
+            {#if fx.bg !== 'solid'}
+              <div class="sliders">
+                <label class="colorlab">From
+                  <input class="swatch" type="color" value={fx.bgA || resolved.bg}
+                    oninput={(e) => setFx('bgA', e.target.value)} />
+                </label>
+                <label class="colorlab">To
+                  <input class="swatch" type="color" value={fx.bgB || resolved['accent-dim']}
+                    oninput={(e) => setFx('bgB', e.target.value)} />
+                </label>
+                <label>Angle <span class="val mono">{fx.bgAngle}°</span>
+                  <input type="range" min="0" max="360" step="5" value={fx.bgAngle}
+                    oninput={(e) => setFx('bgAngle', +e.target.value)} />
+                </label>
+              </div>
+            {/if}
+          </div>
+
+          <div class="fxblock">
+            <div class="subhead">Motion</div>
+            <div class="seg" role="group" aria-label="Motion">
+              {#each ANIM_MODES as [id, label, blurb] (id)}
+                <button type="button" class="segbtn" class:on={fx.anim === id} onclick={() => setFx('anim', id)} title={blurb}>
+                  <span class="seglabel">{label}</span>
+                  <span class="segblurb">{blurb}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="fxblock">
+            <div class="subhead">Accent glow</div>
+            <div class="seg" role="group" aria-label="Accent glow">
+              <button type="button" class="segbtn" class:on={!fx.glow} onclick={() => setFx('glow', false)}>
+                <span class="seglabel">Off</span>
+                <span class="segblurb">flat controls</span>
+              </button>
+              <button type="button" class="segbtn" class:on={fx.glow} onclick={() => setFx('glow', true)}>
+                <span class="seglabel">On</span>
+                <span class="segblurb">neon edges</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="fxblock">
+            <div class="subhead">UI scale</div>
             <div class="sliders">
-              <label>Blur <span class="val mono">{fx.glassBlur}px</span>
-                <input type="range" min="4" max="32" step="1" value={fx.glassBlur}
-                  oninput={(e) => setFx('glassBlur', +e.target.value)} />
-              </label>
-              <label>Tint <span class="val mono">{Math.round(fx.glassOpacity * 100)}%</span>
-                <input type="range" min="0.3" max="0.92" step="0.01" value={fx.glassOpacity}
-                  oninput={(e) => setFx('glassOpacity', +e.target.value)} />
+              <label>Everything <span class="val mono">{Math.round(fx.uiScale * 100)}%</span>
+                <input type="range" min="0.85" max="1.25" step="0.05" value={fx.uiScale}
+                  oninput={(e) => setFx('uiScale', +e.target.value)} />
               </label>
             </div>
-            <p class="hint">Glass shows best over a Gradient or Animated background (below).</p>
-          {/if}
-
-          <div class="subhead">Background</div>
-          <div class="optrow">
-            {#each BG_MODES as [id, label, blurb] (id)}
-              <button class="opt wide" class:on={fx.bg === id} onclick={() => setFx('bg', id)}>
-                <span class="diagram bgd b-{id}"></span>
-                <span>{label}</span><small>{blurb}</small>
-              </button>
-            {/each}
           </div>
-          {#if fx.bg !== 'solid'}
-            <div class="sliders">
-              <label class="colorlab">From
-                <input class="swatch" type="color" value={fx.bgA || resolved.bg}
-                  oninput={(e) => setFx('bgA', e.target.value)} />
-              </label>
-              <label class="colorlab">To
-                <input class="swatch" type="color" value={fx.bgB || resolved['accent-dim']}
-                  oninput={(e) => setFx('bgB', e.target.value)} />
-              </label>
-              <label>Angle <span class="val mono">{fx.bgAngle}°</span>
-                <input type="range" min="0" max="360" step="5" value={fx.bgAngle}
-                  oninput={(e) => setFx('bgAngle', +e.target.value)} />
-              </label>
+
+          <div class="fxblock">
+            <div class="subhead">Typeface</div>
+            <div class="seg" role="group" aria-label="Typeface">
+              {#each FONT_OPTIONS as [id, label, stack] (id)}
+                <button type="button" class="segbtn" class:on={fx.font === id} onclick={() => setFx('font', id)}>
+                  <span class="seglabel" style={`font-family:${stack}`}>{label}</span>
+                </button>
+              {/each}
             </div>
-          {/if}
-
-          <div class="subhead">Motion</div>
-          <div class="optrow">
-            {#each ANIM_MODES as [id, label, blurb] (id)}
-              <button class="opt wide" class:on={fx.anim === id} onclick={() => setFx('anim', id)}>
-                <span class="diagram animd a-{id}"><span class="aball"></span></span>
-                <span>{label}</span><small>{blurb}</small>
-              </button>
-            {/each}
-          </div>
-
-          <div class="subhead">Accent glow</div>
-          <div class="optrow">
-            <button class="opt wide" class:on={!fx.glow} onclick={() => setFx('glow', false)}>
-              <span class="diagram"><span class="gbtn"></span></span><span>Off</span><small>flat controls</small>
-            </button>
-            <button class="opt wide" class:on={fx.glow} onclick={() => setFx('glow', true)}>
-              <span class="diagram"><span class="gbtn lit"></span></span><span>On</span><small>neon edges</small>
-            </button>
-          </div>
-
-          <div class="subhead">UI scale</div>
-          <div class="sliders">
-            <label>Everything <span class="val mono">{Math.round(fx.uiScale * 100)}%</span>
-              <input type="range" min="0.85" max="1.25" step="0.05" value={fx.uiScale}
-                oninput={(e) => setFx('uiScale', +e.target.value)} />
-            </label>
-          </div>
-
-          <div class="subhead">Typeface</div>
-          <div class="optrow">
-            {#each FONT_OPTIONS as [id, label, stack] (id)}
-              <button class="opt wide" class:on={fx.font === id} onclick={() => setFx('font', id)}>
-                <span class="diagram fontd" style={`font-family:${stack}`}>Aa</span>
-                <span>{label}</span>
-              </button>
-            {/each}
           </div>
 
         {:else if tab === 'layout'}
-          <div class="subhead">Chat width</div>
-          <div class="optrow">
-            {#each LAYOUT_OPTIONS.chatWidth as [id, label] (id)}
-              <button class="opt" class:on={theme.layout.chatWidth === id} onclick={() => setLayout('chatWidth', id)}>
-                <span class="diagram"><span class="dcol w-{id}"></span></span>{label}
-              </button>
-            {/each}
+          <div class="fxblock">
+            <div class="subhead">Chat width</div>
+            <div class="seg" role="group" aria-label="Chat width">
+              {#each LAYOUT_OPTIONS.chatWidth as [id, label] (id)}
+                <button type="button" class="segbtn" class:on={theme.layout.chatWidth === id}
+                  onclick={() => setLayout('chatWidth', id)}>
+                  <span class="seglabel">{label}</span>
+                </button>
+              {/each}
+            </div>
           </div>
-          <div class="subhead">Sidebar</div>
-          <div class="optrow">
-            {#each LAYOUT_OPTIONS.sidebar as [id, label] (id)}
-              <button class="opt" class:on={theme.layout.sidebar === id} onclick={() => setLayout('sidebar', id)}>
-                <span class="diagram side-{id}"><span class="dside"></span><span class="dbody"></span></span>{label}
-              </button>
-            {/each}
+
+          <div class="fxblock">
+            <div class="subhead">Sidebar</div>
+            <div class="seg" role="group" aria-label="Sidebar">
+              {#each LAYOUT_OPTIONS.sidebar as [id, label] (id)}
+                <button type="button" class="segbtn" class:on={theme.layout.sidebar === id}
+                  onclick={() => setLayout('sidebar', id)}>
+                  <span class="seglabel">{label}</span>
+                </button>
+              {/each}
+            </div>
           </div>
-          <div class="subhead">Corners</div>
-          <div class="optrow">
-            {#each LAYOUT_OPTIONS.radius as [id, label] (id)}
-              <button class="opt" class:on={theme.layout.radius === id} onclick={() => setLayout('radius', id)}>
-                <span class="diagram"><span class="dbox r-{id}"></span></span>{label}
-              </button>
-            {/each}
+
+          <div class="fxblock">
+            <div class="subhead">Corners</div>
+            <div class="seg" role="group" aria-label="Corners">
+              {#each LAYOUT_OPTIONS.radius as [id, label] (id)}
+                <button type="button" class="segbtn" class:on={theme.layout.radius === id}
+                  onclick={() => setLayout('radius', id)}>
+                  <span class="seglabel">{label}</span>
+                </button>
+              {/each}
+            </div>
           </div>
-          <div class="subhead">Your messages</div>
-          <div class="optrow">
-            {#each LAYOUT_OPTIONS.bubbles as [id, label] (id)}
-              <button class="opt" class:on={theme.layout.bubbles === id} onclick={() => setLayout('bubbles', id)}>
-                <span class="diagram"><span class="dbub b-{id}"></span></span>{label}
-              </button>
-            {/each}
+
+          <div class="fxblock">
+            <div class="subhead">Your messages</div>
+            <div class="seg" role="group" aria-label="Your messages">
+              {#each LAYOUT_OPTIONS.bubbles as [id, label] (id)}
+                <button type="button" class="segbtn" class:on={theme.layout.bubbles === id}
+                  onclick={() => setLayout('bubbles', id)}>
+                  <span class="seglabel">{label}</span>
+                </button>
+              {/each}
+            </div>
           </div>
-          <div class="subhead">Type</div>
-          <div class="selrow">
-            <label>Font size
-              <select bind:value={prefs.fontSize} onchange={() => { savePrefs(); applyPrefs(); }}>
-                <option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option>
-              </select>
-            </label>
-            <label>Message spacing
-              <select bind:value={prefs.density} onchange={() => { savePrefs(); applyPrefs(); }}>
-                <option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="spacious">Spacious</option>
-              </select>
-            </label>
+
+          <div class="fxblock">
+            <div class="subhead">Font size</div>
+            <div class="seg" role="group" aria-label="Font size">
+              {#each [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']] as [id, label]}
+                <button type="button" class="segbtn" class:on={prefs.fontSize === id}
+                  onclick={() => { prefs.fontSize = id; savePrefs(); applyPrefs(); }}>
+                  <span class="seglabel">{label}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="fxblock">
+            <div class="subhead">Message spacing</div>
+            <div class="seg" role="group" aria-label="Message spacing">
+              {#each [['compact', 'Compact'], ['comfortable', 'Comfortable'], ['spacious', 'Spacious']] as [id, label]}
+                <button type="button" class="segbtn" class:on={prefs.density === id}
+                  onclick={() => { prefs.density = id; savePrefs(); applyPrefs(); }}>
+                  <span class="seglabel">{label}</span>
+                </button>
+              {/each}
+            </div>
           </div>
 
         {:else}
@@ -536,7 +760,7 @@
   .overlay { position: fixed; inset: 0; background: rgba(8, 7, 6, 0.55); z-index: 95; }
   .studio {
     position: fixed; z-index: 96; inset: 0; margin: auto;
-    width: min(980px, 95vw); height: min(700px, 93vh);
+    width: min(980px, 95vw); height: min(700px, 93vh); height: min(700px, 93dvh);
     display: flex; flex-direction: column;
     background: var(--bg-sidebar); border: 1px solid var(--border);
     border-radius: calc(16px * var(--rf)); box-shadow: var(--shadow-lg);
@@ -584,33 +808,65 @@
   }
   .subhead:first-child, .gallery:first-child { margin-top: 0; }
 
+  .tfilters { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+  .tsearch {
+    width: 100%; font-size: 12.5px; padding: 8px 12px;
+    border-radius: calc(10px * var(--rf)); border: 1px solid var(--border-soft);
+    background: var(--bg-input); color: var(--text);
+  }
+  .tsearch::placeholder { color: var(--text-faint); }
+  .chiprow { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+  .chiprow.wrap { flex-wrap: wrap; overflow: visible; }
+  .chip {
+    all: unset; cursor: pointer; flex-shrink: 0;
+    font-size: 11.5px; padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--border-soft); background: var(--bg-raised);
+    color: var(--text-dim); transition: border-color 100ms ease, color 100ms ease, background 100ms ease;
+  }
+  .chip:hover { color: var(--text); border-color: var(--border); }
+  .chip.on { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+  .morebtn {
+    all: unset; cursor: pointer; display: block; width: 100%; margin-top: 12px;
+    text-align: center; font-size: 12.5px; padding: 10px;
+    border-radius: calc(10px * var(--rf)); border: 1px dashed var(--border);
+    color: var(--text-dim); background: var(--bg-raised);
+  }
+  .morebtn:hover { color: var(--text); border-color: var(--accent); }
+
   /* ---- theme gallery ---- */
-  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); gap: 10px; }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
   .pcard {
     all: unset; cursor: pointer; position: relative;
-    display: flex; flex-direction: column; gap: 2px;
-    padding: 9px; border-radius: calc(12px * var(--rf));
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 10px; border-radius: calc(10px * var(--rf));
     border: 1px solid var(--border-soft); background: var(--bg-card);
     transition: border-color 120ms ease, transform 120ms ease;
   }
   .pcard:hover { border-color: var(--border); transform: translateY(-1px); }
   .pcard.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .pmock {
-    display: flex; height: 74px; border-radius: 8px; overflow: hidden;
+    display: flex; height: 88px; border-radius: 6px; overflow: hidden;
     border: 1px solid var(--p-border); background: var(--p-bg);
-    margin-bottom: 6px;
+    margin-bottom: 7px;
   }
-  .pside { width: 26%; background: var(--p-side); border-right: 1px solid var(--p-border); }
-  .pmain { flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
-  .pbub { display: block; height: 11px; border-radius: 5px; }
+  .pside { width: 24%; background: var(--p-side); border-right: 1px solid var(--p-border); }
+  .pmain { flex: 1; padding: 9px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+  .pbub { display: block; height: 12px; border-radius: 4px; }
   .pbub.u { width: 55%; align-self: flex-end; background: var(--p-card); border: 1px solid var(--p-border); }
   .pbub.a { width: 78%; background: color-mix(in srgb, var(--p-text) 14%, transparent); }
   .prow { display: flex; align-items: center; gap: 5px; width: 100%; margin-top: auto; }
-  .pdot { width: 12px; height: 12px; border-radius: 50%; background: var(--p-accent); flex-shrink: 0; }
-  .pline { flex: 1; height: 7px; border-radius: 4px; background: var(--p-raised); }
-  .pname { font-size: 12.5px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; }
-  .fxdot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-  .pblurb { font-size: 10.5px; color: var(--text-faint); line-height: 1.35; }
+  .pdot { width: 11px; height: 11px; border-radius: 50%; background: var(--p-accent); flex-shrink: 0; }
+  .pline { flex: 1; height: 7px; border-radius: 3px; background: var(--p-raised); }
+  .pname {
+    font-size: 12.5px; font-weight: 600; color: var(--text);
+    display: flex; align-items: center; gap: 6px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .fxdot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); flex-shrink: 0; }
+  .pblurb {
+    font-size: 10.5px; color: var(--text-faint); line-height: 1.35;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .pdel {
     position: absolute; top: 7px; right: 7px;
     display: grid; place-items: center; width: 20px; height: 20px;
@@ -619,6 +875,27 @@
   }
   .pcard:hover .pdel { opacity: 0.9; }
   .pdel:hover { color: var(--red); background: var(--red-soft); }
+  .pfav {
+    position: absolute; top: 7px; left: 7px;
+    display: grid; place-items: center; width: 22px; height: 22px;
+    border-radius: 6px; color: var(--text-faint);
+    background: color-mix(in srgb, var(--bg-raised) 85%, transparent);
+    opacity: 0.55; transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+  }
+  .pcard:hover .pfav { opacity: 1; }
+  .pfav:hover { color: var(--red); }
+  .pfav.on {
+    opacity: 1; color: #e85d6a;
+    background: color-mix(in srgb, #e85d6a 16%, var(--bg-raised));
+  }
+  .pcard:has(.pdel) .pfav { /* heart left, delete right */ }
+  .pcard.applied { max-width: 200px; }
+  .nowtag {
+    font-style: normal; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--on-accent); background: var(--accent);
+    padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  }
 
   /* ---- market ---- */
   .pubbox {
@@ -683,29 +960,29 @@
   .tokreset { padding: 4px; display: grid; place-items: center; color: var(--text-faint); }
   .tokreset:hover { color: var(--text); }
 
-  /* ---- layout + effects option cards ---- */
+  /* ---- layout option cards (compact, not soft blobs) ---- */
   .optrow { display: flex; gap: 8px; flex-wrap: wrap; }
   .opt {
     display: flex; flex-direction: column; align-items: center; gap: 6px;
     padding: 10px 14px 8px; font-size: 12px; color: var(--text-dim);
     background: var(--bg-card); border: 1px solid var(--border-soft);
-    min-width: 86px;
+    border-radius: calc(8px * var(--rf)); min-width: 86px;
   }
   .opt.on { border-color: var(--accent); color: var(--text); box-shadow: 0 0 0 1px var(--accent); }
   .opt.wide { min-width: 118px; }
   .opt small { font-size: 10px; color: var(--text-faint); line-height: 1.3; }
   .diagram {
-    width: 54px; height: 34px; border-radius: 6px;
+    width: 54px; height: 34px; border-radius: 4px;
     background: var(--bg-input); border: 1px solid var(--border-soft);
     display: flex; align-items: center; justify-content: center;
     padding: 5px; gap: 3px; position: relative; overflow: hidden;
   }
-  .dcol { height: 100%; background: var(--accent-dim); border-radius: 3px; }
+  .dcol { height: 100%; background: var(--accent-dim); border-radius: 2px; }
   .w-narrow { width: 34%; } .w-normal { width: 52%; } .w-wide { width: 74%; } .w-full { width: 96%; }
   .side-left, .side-right { justify-content: stretch; }
   .side-right { flex-direction: row-reverse; }
-  .dside { width: 26%; height: 100%; background: var(--accent-dim); border-radius: 3px; }
-  .dbody { flex: 1; height: 100%; background: var(--bg-hover); border-radius: 3px; }
+  .dside { width: 26%; height: 100%; background: var(--accent-dim); border-radius: 2px; }
+  .dbody { flex: 1; height: 100%; background: var(--bg-hover); border-radius: 2px; }
   .dbox { width: 60%; height: 80%; background: var(--bg-hover); border: 1.5px solid var(--accent-dim); }
   .r-sharp { border-radius: 1px; } .r-soft { border-radius: 6px; } .r-round { border-radius: 12px; }
   .dbub { width: 70%; height: 55%; }
@@ -715,35 +992,32 @@
   .selrow label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-dim); }
   .selrow select { font-size: 13px; padding: 6px 10px; }
 
-  /* effects diagrams */
-  .glassd .gback {
-    position: absolute; inset: 4px 22px 4px 5px;
-    background: linear-gradient(135deg, var(--accent-dim), var(--bg-hover)); border-radius: 4px;
+  /* Effects: crisp segmented rows — no soft glass-blob previews */
+  .fxblock { margin-bottom: 4px; }
+  .fxblock .subhead { margin-top: 14px; }
+  .fxblock:first-child .subhead { margin-top: 0; }
+  .seg {
+    display: flex; flex-wrap: wrap; gap: 0;
+    border: 1px solid var(--border-soft); border-radius: calc(8px * var(--rf));
+    overflow: hidden; background: var(--bg-card);
   }
-  .glassd .gpane { position: absolute; inset: 6px 5px 6px 18px; border-radius: 4px; border: 1px solid var(--border); }
-  .g-off .gpane { background: var(--bg-card); }
-  .g-frosted .gpane { background: color-mix(in srgb, var(--bg-card) 55%, transparent); backdrop-filter: blur(3px); }
-  .g-liquid .gpane {
-    background: color-mix(in srgb, var(--bg-card) 38%, transparent); backdrop-filter: blur(6px) saturate(1.5);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  .segbtn {
+    all: unset; cursor: pointer; flex: 1 1 0; min-width: 96px;
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 10px 12px; text-align: left;
+    border-right: 1px solid var(--border-soft);
+    color: var(--text-dim); transition: background 100ms ease, color 100ms ease;
   }
-  .bgd { padding: 0; }
-  .b-solid { background: var(--bg-hover); }
-  .b-gradient { background: linear-gradient(135deg, var(--accent-dim), var(--bg-hover)); }
-  .b-animated {
-    background: linear-gradient(135deg, var(--accent-dim), var(--bg-hover), var(--accent-dim));
-    background-size: 300% 300%; animation: dstudioDrift 3s ease-in-out infinite alternate;
+  .segbtn:last-child { border-right: none; }
+  .segbtn:hover { background: var(--bg-hover); color: var(--text); }
+  .segbtn.on {
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg-card));
+    color: var(--text);
+    box-shadow: inset 0 -2px 0 var(--accent);
   }
-  @keyframes dstudioDrift { from { background-position: 0% 0%; } to { background-position: 100% 100%; } }
-  .animd .aball { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
-  .a-off .aball { opacity: 0.4; }
-  .a-subtle .aball { animation: dstudioPulse 2s ease infinite; }
-  .a-full .aball { animation: dstudioBounce 1.1s cubic-bezier(0.5, 0, 0.5, 1) infinite alternate; }
-  @keyframes dstudioPulse { 50% { opacity: 0.35; } }
-  @keyframes dstudioBounce { from { transform: translateX(-14px); } to { transform: translateX(14px); } }
-  .gbtn { width: 26px; height: 12px; border-radius: 4px; background: var(--accent-deep); }
-  .gbtn.lit { box-shadow: 0 0 10px var(--accent), 0 0 3px var(--accent); background: var(--accent); }
-  .fontd { font-size: 16px; color: var(--text); font-weight: 600; }
+  .seglabel { font-size: 12.5px; font-weight: 600; line-height: 1.25; }
+  .segblurb { font-size: 10.5px; color: var(--text-faint); line-height: 1.3; }
+  .segbtn.on .segblurb { color: var(--text-dim); }
 
   .sliders { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 10px; align-items: flex-end; }
   .sliders label {
@@ -767,4 +1041,23 @@
   }
   .foot button { display: flex; align-items: center; gap: 7px; font-size: 13px; }
   .grow { flex: 1; }
+
+  @media (max-width: 768px) {
+    .studio {
+      width: 100%; height: 100%; height: 100dvh; max-height: none;
+      border-radius: 0; border: none; margin: 0; inset: 0;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .cols { flex-direction: column; }
+    .rail {
+      width: 100%; flex-direction: row; flex-wrap: nowrap;
+      overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border-soft);
+      padding: 8px; gap: 4px; -webkit-overflow-scrolling: touch;
+    }
+    .railbtn { flex-shrink: 0; white-space: nowrap; padding: 10px 12px; min-height: 40px; }
+    .content { padding: 12px 14px 20px; }
+    .gallery { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+    .foot { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+  }
 </style>

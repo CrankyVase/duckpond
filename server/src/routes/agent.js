@@ -5,6 +5,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmS
 import { dirname, extname, join, resolve } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
+import { checkUserContent } from '../contentFilter.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { streamChat } from '../llama.js';
 import { fetchPage, searchWeb } from '../websearch.js';
@@ -15,9 +16,14 @@ import {
 } from '../sandbox.js';
 
 export const DEFAULT_AGENT_MODEL = process.env.AGENT_MODEL ?? 'qwen3-coder-next-q4-k-m';
-const MAX_STEPS = 30;
+// Bigger projects (games, multi-file app) routinely need more than 30 tool steps.
+// Still a safety rail so a runaway loop can't spin forever.
+const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 80);
 const MAX_WORKSPACES = 8;
 const APPROVAL_TIMEOUT_MS = 15 * 60 * 1000;
+// After a server restart every "running" row is orphaned (AbortControllers die
+// with the process). Reclaim them so the next chat doesn't hit 409 forever.
+const STALE_RUN_SEC = Number(process.env.AGENT_STALE_RUN_SEC ?? 45 * 60);
 
 // commands that pull code from the network need a human yes first
 const NEEDS_APPROVAL = [
@@ -168,7 +174,7 @@ export const AGENT_TOOLS = [
     description: 'Run a one-shot shell command inside the sandboxed Linux container (cwd /workspace). Node 24, Python 3.13, git available. Package installs require user approval and may be denied. Do NOT start long-running servers or bind ports — write static files for UIs; the user previews in-canvas.',
     parameters: { type: 'object', properties: {
       command: { type: 'string', description: 'bash command that should exit (not a server left running)' },
-      timeout_sec: { type: 'number', description: 'kill after N seconds (default 60, max 300)' },
+      timeout_sec: { type: 'number', description: 'kill after N seconds (default 120, max 900)' },
     }, required: ['command'] },
   } },
   GENERATE_IMAGE_TOOL,
@@ -232,6 +238,10 @@ export async function execTool(run, ws, name, args) {
     }
     case 'generate_image': {
       if (!args.prompt?.trim()) return 'ERROR: prompt is required (a complete visual description)';
+      const blocked = checkUserContent(run.user_id, args.prompt, 'image');
+      if (!blocked.ok) {
+        return `ERROR: ${blocked.reason} Tell the user briefly; do not retry the same prompt.`;
+      }
       try {
         // live progress streams to watchers as transient events (store:false —
         // preview frames are big base64 blobs that don't belong in the replay
@@ -241,7 +251,8 @@ export async function execTool(run, ws, name, args) {
           userId: run.user_id, prompt: args.prompt, size: args.size ?? '1024x1024',
           steps: stepsForQuality(getUserImagePrefs(run.user_id).quality),
           onProgress: (ev) => emit(run.id, ev.type === 'preview' ? 'image_preview' : 'image_progress',
-            ev.type === 'preview' ? { b64: ev.b64 } : { phase: ev.phase, step: ev.step, steps: ev.steps },
+            ev.type === 'preview' ? { b64: ev.b64, image: ev.image, n: ev.n }
+              : { phase: ev.phase, step: ev.step, steps: ev.steps, image: ev.image, n: ev.n },
             { store: false }),
         });
         emit(run.id, 'image_done', {}, { store: false });
@@ -260,7 +271,8 @@ export async function execTool(run, ws, name, args) {
         const ok = await requestApproval(run, cmd);
         if (!ok) return 'DENIED: the user did not approve this command. Do not retry it; adapt or explain what is missing.';
       }
-      const timeoutSec = Math.min(Math.max(Number(args.timeout_sec) || 60, 5), 300);
+      // Builds / installs routinely exceed 60s; allow up to 15 min when asked.
+      const timeoutSec = Math.min(Math.max(Number(args.timeout_sec) || 120, 5), 900);
       const r = await execCmd(ws, cmd, { timeoutSec });
       emit(run.id, 'tool_output', {
         command: cmd, exitCode: r.exitCode, timedOut: r.timedOut,
@@ -320,10 +332,50 @@ export function createWorkspaceRow(userId, name) {
   return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id);
 }
 
+/** True if this run still has a live in-process abort controller (i.e. a loop). */
+export function isRunLive(runId) {
+  return runAborts.has(Number(runId));
+}
+
+/**
+ * Reclaim agent runs that look alive in the DB but have no in-process loop.
+ * Happens after process restart, crash, or a chat handler dying before finishRun.
+ * Safe: never touches a run that still has a bound AbortController.
+ */
+export function reclaimOrphanRuns({ olderThanSec = 0, workspaceId = null, log } = {}) {
+  const rows = workspaceId != null
+    ? db.prepare(`SELECT id, status, created_at FROM agent_runs
+                  WHERE workspace_id = ? AND status IN ('running','waiting_approval')`)
+      .all(workspaceId)
+    : db.prepare(`SELECT id, status, created_at FROM agent_runs
+                  WHERE status IN ('running','waiting_approval')`).all();
+  const now = Math.floor(Date.now() / 1000);
+  let n = 0;
+  for (const row of rows) {
+    if (isRunLive(row.id)) continue;
+    if (olderThanSec > 0 && (now - (row.created_at ?? 0)) < olderThanSec) continue;
+    db.prepare(`UPDATE agent_runs SET status = 'error', finished_at = unixepoch() WHERE id = ?`)
+      .run(row.id);
+    runApprovals.get(row.id)?.finish(false, 'orphaned run reclaimed');
+    n += 1;
+    log?.info?.({ run: row.id, status: row.status }, 'reclaimed orphan agent run');
+  }
+  return n;
+}
+
 export function createRun(workspaceId, userId, modelId, task) {
-  const active = db.prepare(`SELECT 1 FROM agent_runs WHERE workspace_id = ?
+  // Free the slot if a previous crash left a "running" row with no live loop.
+  reclaimOrphanRuns({ workspaceId });
+  const active = db.prepare(`SELECT id FROM agent_runs WHERE workspace_id = ?
                              AND status IN ('running','waiting_approval')`).get(workspaceId);
-  if (active) throw Object.assign(new Error('a run is already active in this workspace'), { code: 409 });
+  if (active) {
+    // Last resort: if it's still marked active but has no abort binding, force-finish.
+    if (!isRunLive(active.id)) {
+      finishRun(active.id, 'error');
+    } else {
+      throw Object.assign(new Error('a run is already active in this workspace'), { code: 409 });
+    }
+  }
   const r = db.prepare('INSERT INTO agent_runs (workspace_id, user_id, model_id, task) VALUES (?, ?, ?, ?)')
     .run(workspaceId, userId, modelId, task.slice(0, 2000));
   return db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(r.lastInsertRowid);
@@ -332,11 +384,35 @@ export function createRun(workspaceId, userId, modelId, task) {
 export function finishRun(runId, status) {
   setRunStatus(runId, status, true);
   runApprovals.get(runId)?.finish(false, 'run ended');
+  runAborts.delete(Number(runId));
+}
+
+/** Stop every live/orphan run tied to a conversation's workspace (explicit Stop). */
+export function stopRunsForWorkspace(workspaceId, reason = 'stopped by user') {
+  if (!workspaceId) return 0;
+  const rows = db.prepare(`SELECT id FROM agent_runs WHERE workspace_id = ?
+                           AND status IN ('running','waiting_approval')`).all(workspaceId);
+  let n = 0;
+  for (const row of rows) {
+    const ctrl = runAborts.get(row.id);
+    if (ctrl) {
+      try { ctrl.abort(); } catch { /* */ }
+    }
+    finishRun(row.id, 'stopped');
+    emit(row.id, 'error', { message: reason }, { store: true });
+    n += 1;
+  }
+  return n;
 }
 
 // let /api/runs/:id/stop reach loops driven elsewhere (e.g. the chat route)
-export function bindRunAbort(runId, controller) { runAborts.set(runId, controller); }
-export function releaseRunAbort(runId) { runAborts.delete(runId); }
+export function bindRunAbort(runId, controller) { runAborts.set(Number(runId), controller); }
+export function releaseRunAbort(runId) { runAborts.delete(Number(runId)); }
+
+// Boot-time + periodic: long-stuck "running" rows without a live loop.
+export function reapStaleAgentRuns(log) {
+  return reclaimOrphanRuns({ olderThanSec: STALE_RUN_SEC, log });
+}
 
 // The tool-calling loop. Drives streamChat until the model answers without
 // tool calls (→ {status:'final', ...}), the signal aborts (→ 'aborted'), or the

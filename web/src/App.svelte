@@ -1,6 +1,7 @@
 <script>
   import Chat from './components/Chat.svelte';
   import Duck from './components/Duck.svelte';
+  import FilesPanel from './components/FilesPanel.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
   import SettingsPanel from './components/SettingsPanel.svelte';
@@ -60,6 +61,8 @@
         app.view = 'stats';
       } else if (route.kind === 'speech') {
         app.view = 'speech';
+      } else if (route.kind === 'files') {
+        app.view = 'files';
       } else if (route.kind === 'settings') {
         app.view = 'chat';
         app.settingsOpen = true;
@@ -216,15 +219,15 @@
   <Login />
 {:else}
   <div class="layout">
-    {#if app.view === 'chat'}
-      <Sidebar />
-    {/if}
+    <Sidebar />
     <main>
       <Topbar />
       {#if app.view === 'stats'}
         <StatsPanel />
       {:else if app.view === 'speech'}
         <SpeechPanel />
+      {:else if app.view === 'files'}
+        <FilesPanel />
       {:else}
         <Chat />
       {/if}
@@ -236,10 +239,19 @@
 <Toast />
 
 <style>
-  .boot { height: 100vh; display: grid; place-items: center; }
+  .boot { height: 100%; height: 100dvh; display: grid; place-items: center; }
   .pulse { animation: pulse 1.2s ease infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
-  .layout { display: flex; height: 100vh; }
+  .layout {
+    display: flex; height: 100%; height: 100dvh;
+    min-height: 0; overflow: hidden;
+  }
   :global(html[data-sidebar='right']) .layout { flex-direction: row-reverse; }
-  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  main {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0; min-height: 0; overflow: hidden;
+  }
+  @media (max-width: 768px) {
+    .layout { position: relative; }
+  }
 </style>

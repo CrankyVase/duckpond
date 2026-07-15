@@ -1,9 +1,12 @@
 <script>
   import { api } from '../lib/api.js';
   import { chatPath, userSubpath } from '../lib/router.js';
-  import { app, loadConversations, newConversation, openConversation } from '../lib/state.svelte.js';
+  import {
+    app, closeSidebarIfMobile, loadConversations, newConversation, openConversation,
+  } from '../lib/state.svelte.js';
   import Duck from './Duck.svelte';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
+  import Files from '@lucide/svelte/icons/files';
   import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
@@ -49,6 +52,18 @@
   async function openChat(id) {
     app.view = 'chat';
     await openConversation(id);
+    closeSidebarIfMobile();
+  }
+  async function goNew() {
+    app.view = 'chat';
+    await newConversation();
+    closeSidebarIfMobile();
+  }
+  function goView(v) {
+    app.view = v;
+    app.settingsOpen = false;
+    app.themeStudioOpen = false;
+    closeSidebarIfMobile();
   }
   const fmtDay = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
@@ -86,15 +101,24 @@
   }
 </script>
 
+{#if !app.sidebarCollapsed}
+  <!-- mobile scrim: tap outside to close the drawer -->
+  <button type="button" class="scrim" aria-label="Close menu"
+    onclick={() => (app.sidebarCollapsed = true)}></button>
+{/if}
 <aside class:collapsed={app.sidebarCollapsed}>
   <div class="inner">
     <div class="brand">
-      <span class="mark"><Duck px={1.7} /></span>
+      <span class="mark"><Duck px={1.7} interactive /></span>
       <span class="bname">DuckPond</span>
+      <button type="button" class="ghost close-m" onclick={() => (app.sidebarCollapsed = true)}
+        title="Close" aria-label="Close menu">
+        <X size={16} />
+      </button>
     </div>
 
     <div class="top">
-      <button class="new" onclick={newConversation} title="New chat (Ctrl+Shift+O)">
+      <button class="new" onclick={goNew} title="New chat (Ctrl+Shift+O)">
         <SquarePen size={15} />
         <span>New chat</span>
       </button>
@@ -152,12 +176,20 @@
 
     <div class="pages">
       <a class="page"
+        href={app.user?.id != null ? userSubpath(app.user.id, 'files') : '/files'}
+        onclick={(e) => { e.preventDefault(); goView('files'); }}
+        class:active={app.view === 'files'}>
+        <Files size={14} /> Files
+      </a>
+      <a class="page"
         href={app.user?.id != null ? userSubpath(app.user.id, 'stats') : '/stats'}
-        onclick={(e) => { e.preventDefault(); app.view = 'stats'; }}>
+        onclick={(e) => { e.preventDefault(); goView('stats'); }}
+        class:active={app.view === 'stats'}>
         <BarChart3 size={14} /> Stats
       </a>
       {#if app.user?.role === 'owner'}
-        <a class="page" href={controlUrl()} title="Duck Pond Control — owner only">
+        <a class="page" href={controlUrl()} title="Duck Pond Control — owner/admin only"
+          rel="noopener">
           <Gauge size={14} /> Control
         </a>
       {/if}
@@ -186,10 +218,17 @@
 </aside>
 
 <style>
+  .scrim {
+    display: none;
+    cursor: pointer;
+    border: none; padding: 0; margin: 0;
+    background: transparent;
+  }
   aside {
     width: 268px; flex-shrink: 0; height: 100%; overflow: hidden;
     background: var(--bg-sidebar); border-right: 1px solid var(--border-soft);
-    transition: width 240ms cubic-bezier(0.25, 1, 0.35, 1);
+    transition: width 240ms cubic-bezier(0.25, 1, 0.35, 1), transform 240ms cubic-bezier(0.25, 1, 0.35, 1);
+    z-index: 30;
   }
   aside.collapsed { width: 0; border-right-color: transparent; }
   :global(html[data-sidebar='right']) aside {
@@ -197,12 +236,51 @@
   }
   :global(html[data-sidebar='right']) aside.collapsed { border-left-color: transparent; }
   .inner { width: 268px; height: 100%; display: flex; flex-direction: column; }
+  .close-m { display: none; margin-left: auto; padding: 6px; }
 
   .brand {
     display: flex; align-items: center; gap: 10px;
     padding: 15px 18px 10px;
     font-weight: 600; font-size: 15px; letter-spacing: -0.01em;
     user-select: none;
+  }
+
+  /* —— mobile drawer —— */
+  @media (max-width: 768px) {
+    .scrim {
+      display: block; position: fixed; inset: 0; z-index: 35;
+      background: rgba(8, 7, 6, 0.55);
+      -webkit-tap-highlight-color: transparent;
+    }
+    aside {
+      position: fixed; top: 0; bottom: 0; left: 0;
+      width: min(300px, 88vw); height: 100%; height: 100dvh;
+      border-right: 1px solid var(--border-soft);
+      box-shadow: var(--shadow-lg);
+      transform: translateX(0);
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    aside.collapsed {
+      width: min(300px, 88vw);
+      transform: translateX(-105%);
+      border-right-color: var(--border-soft);
+      pointer-events: none;
+    }
+    :global(html[data-sidebar='right']) aside {
+      left: auto; right: 0;
+      border-right: none; border-left: 1px solid var(--border-soft);
+    }
+    :global(html[data-sidebar='right']) aside.collapsed {
+      transform: translateX(105%);
+    }
+    .inner { width: 100%; }
+    .close-m { display: grid; place-items: center; }
+    /* always show delete on touch (no hover) */
+    .del { opacity: 0.55; }
+    .item:hover .del, .item .del { opacity: 0.7; }
+    .pages { flex-wrap: wrap; }
+    .page { min-height: 40px; font-size: 13px; }
   }
   .mark {
     display: grid; place-items: center;
@@ -294,6 +372,7 @@
     background: var(--bg-raised); border: 1px solid var(--border-soft);
   }
   .page:hover { background: var(--bg-hover); color: var(--text); }
+  .page.active { background: var(--bg-raised); color: var(--text); }
   .page :global(svg) { color: var(--accent); }
 
   .who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }

@@ -11,14 +11,22 @@ export const app = $state({
   streaming: null,       // { convId, text, thinking, tokS, n, loading, error }
   context: { used: 0, budget: 32768 },
   gpu: null,             // { totalBytes, usedBytes }
-  view: 'chat',          // 'chat' | 'bench' (agentic workbench) | 'images' (image studio)
+  view: 'chat',          // 'chat' | 'stats' | 'speech' | 'files'
   modelPickerOpen: false,
   settingsOpen: false,
   themeStudioOpen: false,
-  sidebarCollapsed: false,
+  // Start collapsed on narrow screens so chat is usable; desktop keeps it open.
+  sidebarCollapsed: (typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches),
   compacting: false,
   filesVersion: 0,       // bumped when the agent writes files → chat file rail refreshes
 });
+
+/** Close the sidebar on mobile after navigating (drawer pattern). */
+export function closeSidebarIfMobile() {
+  if (typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches) {
+    app.sidebarCollapsed = true;
+  }
+}
 
 export async function checkAuth() {
   try {

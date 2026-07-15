@@ -369,4 +369,16 @@
   }
   .compaction details { margin-top: 6px; }
   .compaction summary { cursor: pointer; color: var(--text-faint); font-size: 12px; }
+
+  @media (max-width: 768px) {
+    .ububble { max-width: 92%; padding: 10px 12px; font-size: 14.5px; }
+    .arow { gap: 8px; margin: 14px 0 4px; }
+    .avatar { width: 26px; height: 26px; }
+    /* always show actions on touch (no hover) */
+    .actions { opacity: 0.9; }
+    .ic { width: 34px; height: 32px; }
+    .tbody { max-height: 220px; font-size: 12px; }
+    .wgroup { gap: 8px; }
+    .wgroup > :global(*) { max-width: 100% !important; }
+  }
 </style>

@@ -2,7 +2,7 @@
 //
 // URL shape (per-user namespace):
 //   /u/{userId}/{chat-slug}+{chatId}   e.g. /u/3/pond-ideas+42
-//   /u/{userId}/stats | /speech | /settings | /themes
+//   /u/{userId}/stats | /speech | /files | /settings | /themes
 //   /u/{userId}                        home for that user
 //   /login                             public
 //   /invite/<token>                    public
@@ -68,6 +68,7 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
     if (!rest) return { kind: 'home', userId, foreign };
     if (rest === 'stats') return { kind: 'stats', userId, foreign };
     if (rest === 'speech') return { kind: 'speech', userId, foreign };
+    if (rest === 'files' || rest === 'images') return { kind: 'files', userId, foreign };
     if (rest === 'settings') return { kind: 'settings', userId, foreign };
     if (rest === 'themes' || rest === 'theme') return { kind: 'themes', userId, foreign };
 
@@ -88,6 +89,7 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
   // Legacy (pre-user-namespace) URLs — still parse so we can redirect into /u/{me}/...
   if (p === '/stats') return { kind: 'stats', legacy: true };
   if (p === '/speech') return { kind: 'speech', legacy: true };
+  if (p === '/files' || p === '/images') return { kind: 'files', legacy: true };
   if (p === '/settings') return { kind: 'settings', legacy: true };
   if (p === '/themes' || p === '/theme') return { kind: 'themes', legacy: true };
 
@@ -119,6 +121,7 @@ export function pathForState({
   if (themeStudioOpen) return userSubpath(uid, 'themes');
   if (view === 'stats') return userSubpath(uid, 'stats');
   if (view === 'speech') return userSubpath(uid, 'speech');
+  if (view === 'files') return userSubpath(uid, 'files');
   if (conv?.id != null) return chatPath(uid, conv.title, conv.id);
   return userHome(uid);
 }

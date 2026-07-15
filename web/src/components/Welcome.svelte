@@ -28,7 +28,7 @@
 </script>
 
 <div class="welcome slide-up">
-  <div class="pond"><Duck px={5} mood="swim" /></div>
+  <div class="pond"><Duck px={5} mood="swim" interactive /></div>
   <h2>{greeting}, {app.user?.username}</h2>
   <p>Everything runs on your own hardware — nothing leaves the pond.</p>
   <div class="cards">
@@ -45,6 +45,13 @@
   .welcome {
     display: flex; flex-direction: column; align-items: center;
     margin-top: 12vh; text-align: center; padding: 0 16px;
+  }
+  @media (max-width: 768px) {
+    .welcome { margin-top: 6vh; padding: 0 12px 24px; }
+    h2 { font-size: 18px; }
+    p { font-size: 13px; margin-bottom: 20px; }
+    .cards { width: 100%; max-width: 420px; }
+    .card { width: 100%; box-sizing: border-box; }
   }
   .pond {
     display: grid; place-items: center;

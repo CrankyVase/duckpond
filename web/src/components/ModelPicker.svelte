@@ -138,9 +138,10 @@
 <style>
   .picker { position: relative; }
   .current {
-    display: flex; align-items: center; gap: 9px; max-width: 340px;
+    display: flex; align-items: center; gap: 9px; max-width: min(340px, 42vw);
     font-size: 13.5px; font-weight: 500; padding: 7px 12px;
     background: transparent; border-color: transparent;
+    min-width: 0;
   }
   .current:hover { background: var(--bg-hover); border-color: transparent; }
   .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -150,9 +151,21 @@
   .backdrop { position: fixed; inset: 0; z-index: 40; }
   .menu {
     position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
-    width: 400px; max-height: 440px; display: flex; flex-direction: column;
+    width: 400px; max-width: min(400px, calc(100vw - 16px));
+    max-height: min(440px, 70dvh); display: flex; flex-direction: column;
     background: var(--bg-card); border: 1px solid var(--border);
     border-radius: calc(14px * var(--rf)); padding: 8px; box-shadow: var(--shadow-lg);
+  }
+  @media (max-width: 768px) {
+    .current { max-width: min(200px, 48vw); padding: 7px 8px; font-size: 13px; }
+    .menu {
+      position: fixed;
+      left: 8px; right: 8px;
+      top: calc(52px + env(safe-area-inset-top, 0px));
+      width: auto; max-width: none;
+      max-height: min(70dvh, 520px);
+    }
+    .info, .star { opacity: 0.7; } /* no hover on touch */
   }
   .searchrow {
     display: flex; align-items: center; gap: 8px;

@@ -63,6 +63,12 @@ export function chunkText(text) {
 
 export async function addDocument(userId, name, buf) {
   if (buf.length > MAX_DOC_BYTES) throw new Error('file too large (25 MB max)');
+  try {
+    const { assertQuota } = await import('./storage.js');
+    assertQuota(userId, buf.length);
+  } catch (e) {
+    if (e?.code === 'QUOTA') throw e;
+  }
   const text = (await extractText(name, buf)).trim();
   if (!text) throw new Error('no readable text found in this file');
   const chunks = chunkText(text);

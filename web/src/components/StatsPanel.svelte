@@ -114,7 +114,17 @@
 </div>
 
 <style>
-  .stats { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 28px 40px; }
+  .stats {
+    flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    padding: 24px 28px 40px;
+    padding-bottom: max(40px, calc(24px + env(safe-area-inset-bottom)));
+  }
+  @media (max-width: 768px) {
+    .stats { padding: 14px 12px 32px; }
+    .totals { flex-direction: column; gap: 8px; }
+    .barrow { grid-template-columns: 1fr; gap: 4px; }
+    .cardval { font-size: 22px; }
+  }
   .mono { font-family: var(--mono); }
   .empty { color: var(--text-faint); font-size: 13px; padding: 40px 0; text-align: center; }
   .shimmer {

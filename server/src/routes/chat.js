@@ -5,9 +5,12 @@ import { countInputTokens, listModels, streamChat } from '../llama.js';
 import {
   AGENT_TOOLS, FETCH_PAGE_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL,
   agentLoop, bindRunAbort, createRun, createWorkspaceRow,
-  emit as emitRunEvent, execTool, finishRun, listTree, releaseRunAbort, subscribeRun,
+  emit as emitRunEvent, execTool, finishRun, isRunLive, listTree, releaseRunAbort,
+  stopRunsForWorkspace, subscribeRun,
 } from './agent.js';
+import { checkUserContent } from '../contentFilter.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
+import { convUploads, injectUploadsIntoMessages } from '../uploads.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
 import {
   makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
@@ -108,6 +111,71 @@ function insertMessage(convId, parentId, role, content, extra = {}) {
 function setLeaf(convId, leafId) {
   db.prepare('UPDATE conversations SET active_leaf_id = ?, updated_at = unixepoch() WHERE id = ?')
     .run(leafId, convId);
+}
+
+/** True if the live job has anything worth parking as an assistant bubble. */
+function jobHasPartial(job) {
+  if (!job) return false;
+  const s = job.state || {};
+  return !!(s.text || s.thinking || s.error || s.lastWrite || s.liveTool
+    || (s.events && s.events.length) || (s.widgets && s.widgets.length)
+    || s.image || s.diffusion || s.search);
+}
+
+/**
+ * When generation dies mid-flight (error, abort, proxy blip after server stop),
+ * always park an assistant message in the DB so:
+ *  - the user still sees the work
+ *  - saying "continue" has the partial + error on the path for the model
+ * Skips if `done` already saved a final message.
+ */
+function persistInterruptedReply(job, conv, promptLeaf, { aborted = false, log } = {}) {
+  if (!job || job.finalMsg || !promptLeaf || !conv) return null;
+  const s = job.state || {};
+  if (!jobHasPartial(job) && !aborted && !s.error) return null;
+
+  let text = String(s.text || '').trim();
+  // Surface in-progress writes so "continue" can see what was mid-flight
+  const write = s.lastWrite || (s.liveTool?.content ? s.liveTool : null);
+  if (write?.path && write?.content && !text.includes(write.path)) {
+    const lang = String(write.path).split('.').pop() || '';
+    text += `${text ? '\n\n' : ''}// ${write.path}\n\`\`\`${lang}\n${write.content}\n\`\`\``;
+  } else if (write?.path && !text.includes(write.path)) {
+    text += `${text ? '\n\n' : ''}(was writing \`${write.path}\` — check Project files)`;
+  }
+  if (s.events?.length && !text) {
+    const tools = s.events.filter((e) => e.type === 'tool_call').map((e) => e.name).filter(Boolean);
+    if (tools.length) text = `Work in progress (${[...new Set(tools)].join(', ')}). Check Project files for what was written.`;
+  }
+
+  const reason = s.error
+    ? String(s.error)
+    : aborted
+      ? 'Stopped by user.'
+      : 'Connection or generation interrupted.';
+  if (!text) text = `_(no text yet)_`;
+  if (!text.includes(reason) && !text.includes('Interrupted:') && !text.includes('Stopped')) {
+    text += `\n\n> Interrupted: ${reason}`;
+  }
+  if (!/say \*\*continue\*\*|say continue/i.test(text)) {
+    text += `\n\n_Say **continue** to pick up from here — project files already written stay put._`;
+  }
+
+  try {
+    const asst = insertMessage(conv.id, promptLeaf.id, 'assistant', text, {
+      thinking: s.thinking || null,
+      modelId: conv.model_id,
+      runId: s.run?.id ?? null,
+    });
+    setLeaf(conv.id, asst.id);
+    job.finalMsg = asst;
+    // Fans out to every attached client (primary + reattach tails)
+    broadcast(job, { type: 'done', msg: asst });
+    return asst;
+  } catch (err) {
+    log?.error?.({ err }, 'persistInterruptedReply failed');
+    return null;
+  }
 }
 
 function recordUsage(modelId, usage, timings) {
@@ -830,20 +898,25 @@ async function runInlineSearch({
         if (!imgPrefs.allowed || !args?.prompt?.trim()) {
           result = 'ERROR: image generation is not available or needs a prompt.';
         } else {
+          const blocked = checkUserContent(userId, args.prompt, 'image');
+          if (!blocked.ok) {
+            result = `ERROR: ${blocked.reason} Tell the user briefly; do not retry the same prompt.`;
+          } else {
           send({ type: 'image_job', prompt: args.prompt });
           try {
             const r = await generateViaBridge({
               userId, prompt: args.prompt, size: args.size ?? '1024x1024',
               steps: stepsForQuality(imgPrefs.quality),
               onProgress: (ev) => send(ev.type === 'preview'
-                ? { type: 'image_preview', b64: ev.b64 }
-                : { type: 'image_progress', phase: ev.phase, step: ev.step, steps: ev.steps }),
+                ? { type: 'image_preview', b64: ev.b64, image: ev.image, n: ev.n }
+                : { type: 'image_progress', phase: ev.phase, step: ev.step, steps: ev.steps, image: ev.image, n: ev.n }),
             });
             const caption = r.model_used ? `\n*generated by ${r.model_used}*` : '';
             mdImgs.push(r.images.map((im) => `![generated image](${im.url})${caption}`).join('\n\n'));
             send({ type: 'image_done' });
             result = 'Image generated and shown to the user. Mention it briefly; do not repeat the prompt.';
           } catch (err) { send({ type: 'image_done' }); result = `ERROR: image generation failed: ${err.message}`; }
+          }
         }
       } else if (WIDGET_BUILDERS[name]) {
         try {
@@ -888,6 +961,35 @@ async function runInlineSearch({
 
 export default async function chatRoutes(app) {
   app.addHook('preHandler', requireAuth);
+
+  // Stop / empty POSTs: browsers and some proxies send odd Content-Types (or
+  // application/json with a zero-length body). Fastify then 415s before our
+  // handler runs, so the run never aborts and the next chat 409s forever.
+  const emptyBody = (req, body, done) => {
+    if (body == null || body === '' || (Buffer.isBuffer(body) && body.length === 0)) {
+      return done(null, {});
+    }
+    if (Buffer.isBuffer(body)) {
+      try { return done(null, JSON.parse(body.toString('utf8') || '{}')); }
+      catch (err) { return done(err); }
+    }
+    if (typeof body === 'string') {
+      try { return done(null, JSON.parse(body || '{}')); }
+      catch (err) { return done(err); }
+    }
+    done(null, body);
+  };
+  // only register once per app instance
+  if (!app.hasContentTypeParser('application/json')) {
+    app.addContentTypeParser('application/json', { parseAs: 'string' }, emptyBody);
+  }
+  for (const ct of ['text/plain', 'application/x-www-form-urlencoded', '']) {
+    try {
+      if (!app.hasContentTypeParser(ct)) {
+        app.addContentTypeParser(ct, { parseAs: 'string' }, emptyBody);
+      }
+    } catch { /* already registered */ }
+  }
 
   app.get('/api/conversations', async (req) =>
     db.prepare(`SELECT id, title, model_id, updated_at FROM conversations
@@ -1015,10 +1117,22 @@ export default async function chatRoutes(app) {
   });
 
   // Explicit stop only. Page refresh must never cancel the model.
-  app.post('/api/conversations/:id/stop', async (req, reply) => {
+  // Accept empty / missing body (browsers & CF sometimes omit Content-Type on
+  // POST — that used to 415 and leave the run stuck "running" forever).
+  app.post('/api/conversations/:id/stop', {
+    config: { rawBody: false },
+    // skip JSON body requirement
+  }, async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
-    return { ok: stopLiveJob(conv.id, req.user.id) };
+    const live = stopLiveJob(conv.id, req.user.id);
+    // Always free the workspace run slot, even if the live job map already
+    // forgot it (e.g. after a partial crash) — otherwise "already active" 409s.
+    let runs = 0;
+    try {
+      if (conv.workspace_id) runs = stopRunsForWorkspace(conv.workspace_id);
+    } catch (err) { req.log.warn({ err }, 'stopRunsForWorkspace failed'); }
+    return { ok: live || runs > 0, live, runs };
   });
 
   // The main event: send a user message (or regenerate) and stream the reply.
@@ -1081,20 +1195,51 @@ export default async function chatRoutes(app) {
 
     let releaseGpu = null;
     let thinkTimer = null;      // thinking-watchdog handle (cleared in finally)
+    let promptLeaf = null;      // message the assistant will answer under (needed in finally)
     try {
-      let promptLeaf;   // message the assistant will answer under
       if (regenerateFrom) {
         const src = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(regenerateFrom, conv.id);
         if (!src || src.role !== 'assistant') throw new Error('bad regenerateFrom');
         promptLeaf = db.prepare('SELECT * FROM messages WHERE id = ?').get(src.parent_id);
       } else {
         if (typeof content !== 'string' || !content.trim()) throw new Error('empty message');
+        // Content filter (user Settings → Safety). Blocks before the turn is saved.
+        const filtered = checkUserContent(req.user.id, content, 'chat');
+        if (!filtered.ok) {
+          send({ type: 'error', message: filtered.reason, code: filtered.code });
+          return;
+        }
         // parentId: null means "start a new root branch" — only fall back to the
         // active leaf when the field is absent entirely
         let parent = parentId !== undefined ? parentId : (conv.active_leaf_id ?? null);
-        // stale/deleted parent (rowid reuse made this a self-parent cycle once): re-root
+        // Client sometimes holds a tmp-* leaf after a dropped stream (not in DB).
+        // Fall back to the conversation's real active leaf — NEVER null-root here,
+        // or "continue" after a blip orphans the whole thread and looks like a wipe.
         if (parent != null && !db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id)) {
-          parent = null;
+          const fresh = db.prepare('SELECT active_leaf_id FROM conversations WHERE id = ?').get(conv.id);
+          parent = fresh?.active_leaf_id ?? null;
+          if (parent != null && !db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id)) {
+            parent = null;
+          }
+        }
+        // Soft continue: if the user is picking up after an interrupt, keep them
+        // on the interrupted assistant leaf so the model sees the partial work.
+        const trimmed = content.trim();
+        const continueLike = /^(continue|keep going|resume|go on|try again|pick up)\b/i.test(trimmed)
+          || /^(continue|keep going|resume)\s*[.!]?\s*$/i.test(trimmed);
+        if (continueLike && parent != null) {
+          const leaf = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id);
+          if (leaf?.role === 'assistant' && />\s*(Interrupted|Stopped|connection)/i.test(leaf.content || '')) {
+            // parent is already the interrupted assistant — perfect
+          } else if (leaf?.role === 'user') {
+            // leaf is the original user prompt; find interrupted sibling asst if any
+            const asst = db.prepare(`
+              SELECT * FROM messages WHERE conv_id = ? AND parent_id = ? AND role = 'assistant'
+              ORDER BY id DESC LIMIT 1`).get(conv.id, leaf.id);
+            if (asst && />\s*(Interrupted|Stopped|connection)/i.test(asst.content || '')) {
+              parent = asst.id;
+            }
+          }
         }
         promptLeaf = insertMessage(conv.id, parent, 'user', content);
         send({ type: 'user_msg', msg: promptLeaf });
@@ -1141,7 +1286,7 @@ export default async function chatRoutes(app) {
       const schemaStr = String(conv._settings.json_schema ?? '').trim();
       const grammarStr = String(conv._settings.grammar ?? '').trim();
       const constrained = !!(schemaStr || grammarStr);
-      const promptMessages = constrained
+      let promptMessages = constrained
         ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
         : withToolsPolicy(
           buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
@@ -1203,6 +1348,18 @@ export default async function chatRoutes(app) {
             promptMessages[0] = { role: 'system', content: promptMessages[0].content + '\n\n' + block };
           }
         } catch { /* embed service down — the turn proceeds without excerpts */ }
+      }
+      // attached images: vision models get real pixels; everyone else gets a
+      // text description so any chat model can still talk about the picture
+      try {
+        const ups = convUploads(conv.id);
+        if (ups.length) {
+          promptMessages = injectUploadsIntoMessages(promptMessages, ups, conv.model_id);
+          req.log.info({ n: ups.length, vision: /vision|vl|llava|omni/i.test(conv.model_id || '') },
+            'image uploads injected');
+        }
+      } catch (err) {
+        req.log.warn({ err }, 'upload inject failed');
       }
       const params = { max_tokens: -1 };
       for (const k of GEN_PARAM_KEYS) params[k] = conv._settings[k];
@@ -1375,14 +1532,18 @@ export default async function chatRoutes(app) {
           if (!args?.prompt?.trim()) {
             toolResult = 'ERROR: generate_image needs a prompt argument (complete visual description). Retry with well-formed JSON.';
           } else {
+            const blocked = checkUserContent(req.user.id, args.prompt, 'image');
+            if (!blocked.ok) {
+              toolResult = `ERROR: ${blocked.reason} Tell the user briefly; do not retry the same prompt.`;
+            } else {
             send({ type: 'image_job', prompt: args.prompt });
             try {
               const r = await generateViaBridge({
                 userId: req.user.id, prompt: args.prompt, size: args.size ?? '1024x1024',
                 steps: stepsForQuality(imgPrefs.quality),
                 onProgress: (ev) => send(ev.type === 'preview'
-                  ? { type: 'image_preview', b64: ev.b64 }
-                  : { type: 'image_progress', phase: ev.phase, step: ev.step, steps: ev.steps }),
+                  ? { type: 'image_preview', b64: ev.b64, image: ev.image, n: ev.n }
+                  : { type: 'image_progress', phase: ev.phase, step: ev.step, steps: ev.steps, image: ev.image, n: ev.n }),
               });
               const caption = r.model_used ? `\n*generated by ${r.model_used}*` : '';
               const md = r.images.map((im) => `![generated image](${im.url})${caption}`).join('\n\n');
@@ -1395,6 +1556,7 @@ export default async function chatRoutes(app) {
               req.log.error({ err }, 'in-chat image generation failed');
               send({ type: 'image_done' });
               toolResult = `ERROR: image generation failed: ${err.message}. Tell the user.`;
+            }
             }
           }
           followup.push({ role: 'tool', tool_call_id: call.id, content: toolResult });
@@ -1561,15 +1723,41 @@ export default async function chatRoutes(app) {
     } catch (err) {
       req.log.error({ err }, 'chat generation failed');
       if (!abort.signal.aborted) {
+        // Park the error on the live snapshot so persistInterruptedReply includes it
+        // and reattached clients see why it stopped.
         send({ type: 'error', message: String(err.message ?? err) });
       }
     } finally {
       if (thinkTimer) clearTimeout(thinkTimer);
       clearInterval(pingPrimary);
       releaseGpu?.();
+      // Always save a partial assistant row when we never reached a clean `done`.
+      // This is what lets "continue" see the error + work instead of wiping the turn.
+      const aborted = abort.signal.aborted;
+      // If we crashed out of an agent turn without finishRun, free the slot so
+      // the next message is not 409 "a run is already active".
+      try {
+        if (conv.workspace_id) {
+          const stuck = db.prepare(`SELECT id FROM agent_runs WHERE workspace_id = ?
+            AND status IN ('running','waiting_approval')`).all(conv.workspace_id);
+          for (const row of stuck) {
+            if (!isRunLive(row.id) || aborted) {
+              try { finishRun(row.id, aborted ? 'stopped' : 'error'); } catch { /* */ }
+            }
+          }
+        }
+      } catch (err) { req.log.warn({ err }, 'workspace run cleanup failed'); }
+      if (!job.finalMsg && promptLeaf) {
+        try {
+          persistInterruptedReply(job, conv, promptLeaf, { aborted, log: req.log });
+        } catch (err) {
+          req.log.error({ err }, 'partial reply persist failed');
+        }
+      }
       job.listeners.delete(writePrimary);
-      const st = abort.signal.aborted ? 'stopped'
-        : (job.status === 'done' ? 'done' : (job.state.error ? 'error' : 'done'));
+      const st = aborted ? 'stopped'
+        : (job.finalMsg ? (job.state.error ? 'error' : 'done')
+          : (job.state.error ? 'error' : 'done'));
       finishLiveJob(job, st);
       // Tell every reattached live tail to close, then drop them
       for (const fn of [...job.listeners]) {

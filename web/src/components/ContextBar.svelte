@@ -42,7 +42,15 @@
     display: flex; align-items: center; gap: 7px;
     padding: 5px 11px; border-radius: 999px;
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    user-select: none;
+    user-select: none; flex-shrink: 0;
+  }
+  @media (max-width: 520px) {
+    .track { width: 44px; }
+    .num { font-size: 10px; }
+    .ctx { padding: 4px 8px; gap: 5px; }
+  }
+  @media (max-width: 380px) {
+    .ctx { display: none; } /* too cramped — Settings still has context */
   }
   .ico { color: var(--text-faint); display: grid; place-items: center; }
   .track {
