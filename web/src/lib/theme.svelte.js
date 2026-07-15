@@ -71,10 +71,30 @@ export function activePresetMeta(t = theme) {
     : presetById(t.preset);
 }
 
+const hexToRgba = (hex, a) => {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex) ?? '');
+  return m ? `rgba(${parseInt(m[1], 16)}, ${parseInt(m[2], 16)}, ${parseInt(m[3], 16)}, ${a})` : hex;
+};
+
 export function applyTheme(t = theme) {
   const el = document.documentElement;
   const meta = activePresetMeta(t);
-  const colors = resolveColors(t);
+  const colors = { ...resolveColors(t) };
+  const eNow = sanitizeEffects(t.effects);
+
+  // Glass makes the whole app breathe: surface tokens go translucent so the
+  // background (especially gradients) shows through every panel and card.
+  // Chrome surfaces (sidebar/topbar/dock) additionally get backdrop blur via
+  // app.css; cards stay blur-free so hundreds of bubbles stay cheap.
+  if (eNow.glass !== 'off') {
+    const chromeA = eNow.glassOpacity;
+    const cardA = Math.min(0.94, eNow.glassOpacity + 0.18);
+    colors['bg-sidebar'] = hexToRgba(colors['bg-sidebar'], chromeA);
+    colors['bg-card'] = hexToRgba(colors['bg-card'], cardA);
+    colors['bg-raised'] = hexToRgba(colors['bg-raised'], cardA);
+    colors['bg-input'] = hexToRgba(colors['bg-input'], cardA);
+    colors['bg-code'] = hexToRgba(colors['bg-code'], Math.min(0.96, cardA + 0.08));
+  }
   for (const [token, value] of Object.entries(colors)) el.style.setProperty(`--${token}`, value);
   el.style.setProperty('--shadow-lg', meta.shadow ?? DARK_SHADOW);
   el.style.colorScheme = meta.dark === false ? 'light' : 'dark';
@@ -87,7 +107,7 @@ export function applyTheme(t = theme) {
   el.dataset.bubbles = t.layout.bubbles;
 
   // ---- effects ----
-  const e = sanitizeEffects(t.effects);
+  const e = eNow;
   el.dataset.glass = e.glass;
   el.dataset.anim = e.anim;
   el.dataset.glow = e.glow ? 'on' : 'off';

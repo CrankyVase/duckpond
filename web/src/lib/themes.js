@@ -58,6 +58,53 @@ export const ALL_TOKENS = TOKEN_GROUPS.flatMap((g) => g.tokens.map(([t]) => t));
 export const DARK_SHADOW = '0 16px 48px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35)';
 export const LIGHT_SHADOW = '0 16px 48px rgba(70, 55, 30, 0.16), 0 4px 12px rgba(70, 55, 30, 0.10)';
 
+
+// ---- signature scene CSS, baked into showcase presets (picking the preset
+// adopts these into Custom CSS where the user can read/tweak/delete them) ----
+
+export const SCENE_SYNTHWAVE = `/* — dusk bloom: one soft magenta horizon light, nothing else — */
+#app::before {
+  content: ''; position: fixed; left: 0; right: 0; bottom: 0; height: 55vh;
+  z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(85% 70% at 50% 112%, rgba(255, 94, 196, 0.14), transparent 68%),
+    radial-gradient(120% 55% at 50% 118%, rgba(177, 74, 237, 0.10), transparent 72%);
+}`;
+
+export const SCENE_ABYSS = `/* — depth: cold light falling from the surface — */
+#app::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(120% 60% at 68% -18%, rgba(120, 200, 235, 0.10), transparent 60%),
+    linear-gradient(172deg, transparent 60%, rgba(1, 5, 10, 0.5));
+}`;
+
+export const SCENE_EMBER = `/* — banked coals: faint warmth from below — */
+#app::before {
+  content: ''; position: fixed; left: 0; right: 0; bottom: 0; height: 44vh;
+  z-index: -1; pointer-events: none;
+  background: radial-gradient(75% 100% at 50% 112%, rgba(224, 138, 78, 0.13), transparent 70%);
+}`;
+
+export const SCENE_NIGHTSHADE = `/* — night bloom: two still, barely-there washes — */
+#app::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(60% 45% at 20% -8%, rgba(180, 138, 224, 0.10), transparent 65%),
+    radial-gradient(55% 50% at 85% 108%, rgba(90, 60, 150, 0.10), transparent 70%);
+}`;
+
+export const SCENE_PHOSPHOR = `/* — CRT: fine scanlines, soft vignette — */
+body::after {
+  content: ''; position: fixed; inset: 0; z-index: 2147483001; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
+}
+#app::before {
+  content: ''; position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;
+  background: radial-gradient(130% 100% at 50% 45%, transparent 68%, rgba(0, 0, 0, 0.28));
+}
+.md, .ububble { text-shadow: 0 0 6px rgba(79, 220, 123, 0.18); }`;
+
 export const PRESETS = [
   {
     id: 'pond',
@@ -76,6 +123,7 @@ export const PRESETS = [
   },
   {
     id: 'mallard',
+    effects: { glass: 'frosted', glassBlur: 12, glassOpacity: 0.62, bg: 'gradient', bgA: '#08100c', bgB: '#123326', bgAngle: 168 },
     name: 'Mallard',
     dark: true,
     blurb: 'deep pond greens, jade accent',
@@ -91,6 +139,7 @@ export const PRESETS = [
   },
   {
     id: 'slate',
+    effects: { glass: 'frosted', glassBlur: 14, glassOpacity: 0.6, bg: 'gradient', bgA: '#0b0e14', bgB: '#1c2c45', bgAngle: 160 },
     name: 'Slate',
     dark: true,
     blurb: 'cool graphite, steel-blue accent',
@@ -106,6 +155,8 @@ export const PRESETS = [
   },
   {
     id: 'nightshade',
+    effects: { glow: true, bg: 'gradient', bgA: '#0e0a16', bgB: '#251540', bgAngle: 150 },
+    css: SCENE_NIGHTSHADE,
     name: 'Nightshade',
     dark: true,
     blurb: 'dark violet, soft neon accent',
@@ -121,6 +172,8 @@ export const PRESETS = [
   },
   {
     id: 'ember',
+    effects: { bg: 'gradient', bgA: '#120b07', bgB: '#241108', bgAngle: 170 },
+    css: SCENE_EMBER,
     name: 'Ember',
     dark: true,
     blurb: 'char-black, burnt-orange glow',
@@ -136,6 +189,7 @@ export const PRESETS = [
   },
   {
     id: 'duckling',
+    effects: { bg: 'gradient', bgA: '#fbf7ef', bgB: '#f0e2c4', bgAngle: 160 },
     name: 'Duckling',
     dark: false,
     blurb: 'light warm cream, golden accent',
@@ -168,6 +222,8 @@ export const PRESETS = [
   },
   {
     id: 'phosphor',
+    effects: { glow: true, bg: 'solid' },
+    css: SCENE_PHOSPHOR,
     name: 'Phosphor',
     dark: true,
     blurb: 'CRT black on green, terminal soul',
@@ -185,32 +241,34 @@ export const PRESETS = [
     id: 'synthwave',
     name: 'Synthwave',
     dark: true,
-    blurb: 'neon magenta on midnight, glow it up',
-    effects: { glow: true, anim: 'full', bg: 'animated', bgA: '#170b2b', bgB: '#0b1d33', bgAngle: 160 },
+    blurb: 'plum dusk, a quiet magenta glow at the horizon',
+    effects: { glow: true, bg: 'gradient', bgA: '#191126', bgB: '#251333', bgAngle: 168 },
+    css: SCENE_SYNTHWAVE,
     colors: {
-      'bg': '#120a20', 'bg-sidebar': '#160d27', 'bg-raised': '#221338', 'bg-card': '#24153b',
-      'bg-hover': '#301c4d', 'bg-input': '#1b1030', 'bg-code': '#0e081a', 'bg-code-inline': '#281845',
-      'border': '#3d2660', 'border-soft': '#2c1b47',
-      'text': '#f2e7ff', 'text-dim': '#b49fd4', 'text-faint': '#7d6a9e',
-      'accent': '#ff5ec4', 'accent-deep': '#d63aa2', 'accent-dim': '#8e2d6f', 'on-accent': '#1c0514',
-      'green': '#4fe3c1', 'yellow': '#ffd166', 'red': '#ff5a6a',
-      'scrollbar': '#3d2a5c',
+      'bg': '#161020', 'bg-sidebar': '#1a1326', 'bg-raised': '#251b35', 'bg-card': '#271d38',
+      'bg-hover': '#322544', 'bg-input': '#1e1630', 'bg-code': '#120d1a', 'bg-code-inline': '#2b2040',
+      'border': '#3c2d55', 'border-soft': '#2c2140',
+      'text': '#efe8f7', 'text-dim': '#ab9fc2', 'text-faint': '#756a8e',
+      'accent': '#e569b8', 'accent-deep': '#bd4a96', 'accent-dim': '#7e3a68', 'on-accent': '#1c0714',
+      'green': '#5fc9ab', 'yellow': '#e0bc6a', 'red': '#e0607a',
+      'scrollbar': '#3a2d54',
     },
   },
   {
     id: 'abyss',
     name: 'Abyss',
     dark: true,
-    blurb: 'deep-ocean blues, made for glass',
-    effects: { glass: 'liquid', glassBlur: 22, glassOpacity: 0.52, bg: 'gradient', bgA: '#02060d', bgB: '#0a2438', bgAngle: 170 },
+    blurb: 'deep water — glass panels lit from the surface',
+    effects: { glass: 'liquid', glassBlur: 20, glassOpacity: 0.55, bg: 'gradient', bgA: '#04111c', bgB: '#0b2e42', bgAngle: 174 },
+    css: SCENE_ABYSS,
     colors: {
-      'bg': '#040a12', 'bg-sidebar': '#061019', 'bg-raised': '#0d1c2a', 'bg-card': '#0e1f2f',
-      'bg-hover': '#14293c', 'bg-input': '#091724', 'bg-code': '#030910', 'bg-code-inline': '#102334',
-      'border': '#1c3850', 'border-soft': '#122839',
-      'text': '#dcebf5', 'text-dim': '#8fadc2', 'text-faint': '#5b7a8e',
-      'accent': '#3fc1de', 'accent-deep': '#2596b3', 'accent-dim': '#1a6a83', 'on-accent': '#03141c',
-      'green': '#4ec98f', 'yellow': '#d9b95c', 'red': '#d95f65',
-      'scrollbar': '#1d3a52',
+      'bg': '#071420', 'bg-sidebar': '#0a1a28', 'bg-raised': '#122636', 'bg-card': '#132839',
+      'bg-hover': '#1a3346', 'bg-input': '#0d1f2e', 'bg-code': '#050f18', 'bg-code-inline': '#152c3e',
+      'border': '#224259', 'border-soft': '#173040',
+      'text': '#ddeaf3', 'text-dim': '#93acbe', 'text-faint': '#5f7a8c',
+      'accent': '#54b8d3', 'accent-deep': '#3391ab', 'accent-dim': '#26647a', 'on-accent': '#04141c',
+      'green': '#54c495', 'yellow': '#d5b866', 'red': '#d56670',
+      'scrollbar': '#1e3c52',
     },
   },
 ];

@@ -80,7 +80,13 @@
     theme.preset = id;
     theme.colors = {}; // tweaks belong to the theme they were made on
     const p = PRESETS.find((x) => x.id === id);
-    if (p?.effects) theme.effects = sanitizeEffects({ ...theme.effects, ...p.effects });
+    if (p) {
+      // adopting a preset adopts its whole art direction: effects reset to
+      // stock + the preset's signature, scene CSS replaces custom CSS
+      theme.effects = sanitizeEffects({ ...DEFAULT_EFFECTS, ...(p.effects ?? {}) });
+      theme.customCss = p.css ?? '';
+      cssDraft = theme.customCss;
+    }
     const c = theme.custom.find((x) => x.id === id);
     if (c) {
       if (c.layout) theme.layout = { ...DEFAULT_LAYOUT, ...c.layout };

@@ -600,7 +600,7 @@
   .overlay { position: fixed; inset: 0; background: rgba(8, 7, 6, 0.55); z-index: 90; }
   .panel {
     position: fixed; top: 0; right: 0; bottom: 0; z-index: 91;
-    width: 390px; max-width: 94vw;
+    width: 520px; max-width: 96vw;
     display: flex; flex-direction: column;
     background: var(--bg-sidebar); border-left: 1px solid var(--border);
     transform: translateX(102%);

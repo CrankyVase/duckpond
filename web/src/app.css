@@ -166,6 +166,7 @@ input[type='range']::-moz-range-thumb {
   border-bottom: 1px solid var(--border-soft);
   user-select: none;
 }
+.md pre .codebar .codeactions { display: flex; align-items: center; gap: 2px; }
 .md pre .codebar .copy {
   all: unset; cursor: pointer; color: var(--text-faint);
   font-family: var(--mono); font-size: 11px; padding: 2px 7px;
@@ -173,6 +174,37 @@ input[type='range']::-moz-range-thumb {
 }
 .md pre .codebar .copy:hover { color: var(--text); background: var(--bg-hover); }
 .md pre .codebar .copy.ok { color: var(--green); }
+
+/* In-canvas HTML code-block preview (blob iframe — no localhost) */
+.html-preview-overlay {
+  position: fixed; inset: 0; z-index: 80;
+  background: rgba(10, 9, 8, 0.65);
+  display: grid; place-items: center;
+  padding: 24px;
+}
+.html-preview-card {
+  width: min(1100px, 96vw); height: min(85vh, 900px);
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: calc(14px * var(--rf)); overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow: var(--shadow-lg);
+}
+.html-preview-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+.html-preview-title {
+  flex: 1; font-family: var(--mono); font-size: 12.5px; color: var(--text);
+}
+.html-preview-btn {
+  all: unset; cursor: pointer; font-family: var(--mono); font-size: 11.5px;
+  color: var(--text-faint); padding: 4px 9px; border-radius: 6px;
+}
+.html-preview-btn:hover { color: var(--text); background: var(--bg-hover); }
+.html-preview-frame {
+  flex: 1; min-height: 0; border: none; background: #fff; width: 100%;
+}
 .md ul, .md ol { margin: 0.45em 0; padding-left: 1.5em; }
 .md li { margin: 0.18em 0; }
 .md blockquote {
