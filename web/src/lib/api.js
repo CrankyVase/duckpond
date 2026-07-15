@@ -22,6 +22,29 @@ export async function api(path, opts = {}) {
   return res.json();
 }
 
+// Read an SSE response body, invoking onEvent per JSON data line.
+async function readSse(res, onEvent, signal) {
+  if (!res.body) throw new Error('no stream body');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    if (signal?.aborted) { try { await reader.cancel(); } catch { /* ignore */ } break; }
+    const { done: d, value } = await reader.read();
+    if (d) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        try { onEvent(JSON.parse(line.slice(6))); } catch { /* skip bad frame */ }
+      }
+    }
+  }
+}
+
 // POST an SSE endpoint via fetch and invoke onEvent per JSON data line.
 // Returns an object with abort(); resolves the promise when the stream ends.
 export function sse(path, body, onEvent) {
@@ -38,23 +61,28 @@ export function sse(path, body, onEvent) {
       const j = await res.json().catch(() => ({}));
       throw new Error(j.error ?? `HTTP ${res.status}`);
     }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done: d, value } = await reader.read();
-      if (d) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        for (const line of frame.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          try { onEvent(JSON.parse(line.slice(6))); } catch { /* skip bad frame */ }
-        }
-      }
-    }
+    await readSse(res, onEvent, ctrl.signal);
   })();
   return { abort: () => ctrl.abort(), done };
+}
+
+// GET an SSE endpoint (live reattach after refresh). 204 = nothing live.
+// Returns { abort, done, active } where active is false on 204.
+export function sseGet(path, onEvent) {
+  const ctrl = new AbortController();
+  let active = true;
+  const done = (async () => {
+    const res = await fetch(path, {
+      headers: { accept: 'text/event-stream' },
+      signal: ctrl.signal,
+    });
+    if (res.status === 204) { active = false; return; }
+    if (!res.ok || !res.body) {
+      if (res.status === 401) announceUnauthorized();
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error ?? `HTTP ${res.status}`);
+    }
+    await readSse(res, onEvent, ctrl.signal);
+  })();
+  return { abort: () => ctrl.abort(), done, get active() { return active; } };
 }

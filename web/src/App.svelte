@@ -12,25 +12,173 @@
   import Topbar from './components/Topbar.svelte';
   import { applyPrefs } from './lib/prefs.svelte.js';
   import {
+    parsePath, pathForState, rememberNext, setPath, takeNext, userHome,
+  } from './lib/router.js';
+  import {
     app, checkAuth, loadConversations, loadModels, newConversation, openConversation, pollStatus,
   } from './lib/state.svelte.js';
+  import { toast } from './lib/toast.svelte.js';
 
   // /invite/<token> renders the one-time signup page instead of the app
   const inviteToken = location.pathname.match(/^\/invite\/([A-Za-z0-9_-]{10,})$/)?.[1] ?? null;
 
   $effect(() => { if (!inviteToken) checkAuth(); applyPrefs(); });
 
-  // (re)load data whenever a user becomes present — first mount AND post-login
+  // Suppress URL writes while we apply a popstate / boot route so we don't
+  // push a duplicate history entry.
+  let suppressUrl = false;
   let booted = $state(false);
+  let lastPushedKey = ''; // view|convId — title-only changes use replace
+
+  function routeOpts() {
+    return { selfUserId: app.user?.id ?? null };
+  }
+
+  async function openOwnDefault() {
+    app.view = 'chat';
+    app.settingsOpen = false;
+    app.themeStudioOpen = false;
+    if (app.conversations.length) await openConversation(app.conversations[0].id);
+    else await newConversation();
+  }
+
+  async function applyRoute(route, { push = false } = {}) {
+    suppressUrl = true;
+    try {
+      // Someone else's /u/{otherId}/… URL — never load their chats.
+      // API would 404 anyway; this makes the bounce explicit.
+      if (route.foreign) {
+        toast("That's another user's page — sticking to your pond.", 'error', 3200);
+        await openOwnDefault();
+        return;
+      }
+
+      app.settingsOpen = false;
+      app.themeStudioOpen = false;
+
+      if (route.kind === 'stats') {
+        app.view = 'stats';
+      } else if (route.kind === 'speech') {
+        app.view = 'speech';
+      } else if (route.kind === 'settings') {
+        app.view = 'chat';
+        app.settingsOpen = true;
+      } else if (route.kind === 'themes') {
+        app.view = 'chat';
+        app.themeStudioOpen = true;
+      } else if (route.kind === 'chat' && route.id) {
+        app.view = 'chat';
+        try {
+          await openConversation(route.id);
+          // Extra belt: if the server ever returned a row that isn't ours
+          // (shouldn't), bounce. conv.user_id is on the row.
+          if (app.conv?.user_id != null && app.user?.id != null
+              && Number(app.conv.user_id) !== Number(app.user.id)) {
+            toast("That's not your chat.", 'error');
+            await openOwnDefault();
+          }
+        } catch {
+          // bad/forbidden id — API returns 404 for other people's chats
+          toast('Chat not found (or not yours).', 'error', 2800);
+          await openOwnDefault();
+        }
+      } else if (route.kind === 'home' || route.kind === 'login' || route.kind === 'unknown') {
+        await openOwnDefault();
+      }
+    } finally {
+      queueMicrotask(() => {
+        suppressUrl = false;
+        syncUrl({ replace: !push });
+      });
+    }
+  }
+
+  function syncUrl({ replace = false } = {}) {
+    if (!app.user || suppressUrl) return;
+    const path = pathForState({
+      user: app.user,
+      view: app.view,
+      conv: app.conv,
+      settingsOpen: app.settingsOpen,
+      themeStudioOpen: app.themeStudioOpen,
+    });
+    const key = `${app.user.id}|${app.view}|${app.conv?.id ?? ''}|${app.settingsOpen}|${app.themeStudioOpen}`;
+    const titleOnly = key === lastPushedKey && path !== location.pathname;
+    if (path === location.pathname) {
+      lastPushedKey = key;
+      return;
+    }
+    setPath(path, { replace: replace || titleOnly });
+    lastPushedKey = key;
+  }
+
+  // (re)load data whenever a user becomes present — first mount AND post-login
   $effect(() => {
     if (!app.user || booted) return;
     booted = true;
     (async () => {
       await Promise.all([loadModels(), loadConversations()]);
       pollStatus();
-      if (app.conversations.length) await openConversation(app.conversations[0].id);
-      else await newConversation();
+
+      // Prefer remembered path (post-login), else current URL
+      const next = takeNext();
+      let route = parsePath(next || location.pathname, routeOpts());
+
+      // If they bookmarked another user's URL while logged out, after login
+      // still bounce — never open someone else's chat.
+      if (route.foreign) {
+        toast("That link belongs to another account.", 'error', 3200);
+        route = { kind: 'home', userId: app.user.id };
+      }
+
+      await applyRoute(route, { push: false });
+      // Normalize address bar to /u/{yourId}/…
+      syncUrl({ replace: true });
     })();
+  });
+
+  // Keep the URL in sync as the user switches chats / panels / titles update
+  $effect(() => {
+    if (!app.user || !booted) return;
+    void app.user.id;
+    void app.view;
+    void app.conv?.id;
+    void app.conv?.title;
+    void app.settingsOpen;
+    void app.themeStudioOpen;
+    if (suppressUrl) return;
+    syncUrl({ replace: false });
+  });
+
+  // Browser back / forward
+  $effect(() => {
+    if (!app.user) return;
+    function onPop() {
+      const route = parsePath(location.pathname, routeOpts());
+      void applyRoute(route, { push: false });
+    }
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  });
+
+  // Logged-out: never show the app behind a deep link. Park on /login and
+  // remember where they were trying to go so post-login resumes correctly.
+  $effect(() => {
+    if (!app.authChecked || app.user || inviteToken) return;
+    const here = location.pathname + location.search;
+    if (location.pathname !== '/login') {
+      rememberNext(here);
+      setPath('/login', { replace: true });
+    }
+  });
+
+  // Logged-in but sitting on bare / or legacy paths → push into /u/{id}/…
+  $effect(() => {
+    if (!app.user || !booted) return;
+    const p = location.pathname;
+    if (p === '/' || p === '/login') {
+      setPath(userHome(app.user.id), { replace: true });
+    }
   });
 
   $effect(() => {
@@ -39,9 +187,7 @@
     return () => clearInterval(t);
   });
 
-  // Session died server-side (account deleted / logged out elsewhere): the
-  // 6s status poll surfaces the 401 → reload lands on the login screen with
-  // zero stale state. Guarded on app.user so pre-login 401s never loop.
+  // Session died server-side (account deleted / logged out elsewhere)
   function kicked() {
     if (app.user) location.reload();
   }
@@ -66,6 +212,7 @@
 {:else if !app.authChecked}
   <div class="boot"><span class="pulse"><Duck px={4} /></span></div>
 {:else if !app.user}
+  <!-- Deep links never skip auth — only the login form is shown -->
   <Login />
 {:else}
   <div class="layout">

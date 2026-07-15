@@ -1,9 +1,8 @@
 // Agentic coding workbench: workspaces (podman sandboxes), host-side file APIs,
 // and the agent run loop — an LLM tool-calling loop whose every step is a typed
 // event, stored for replay and tailed live over SSE.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import http from 'node:http';
-import { dirname, join, resolve } from 'node:path';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join, resolve } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
@@ -11,7 +10,7 @@ import { streamChat } from '../llama.js';
 import { fetchPage, searchWeb } from '../websearch.js';
 import { acquireGpu } from '../gpuqueue.js';
 import {
-  destroyWorkspace, ensureRunning, execCmd, portBase, PORTS_PER_WS,
+  destroyWorkspace, ensureRunning, execCmd, portBase,
   stopWorkspace, truncateOutput, wsDir,
 } from '../sandbox.js';
 
@@ -166,9 +165,9 @@ export const AGENT_TOOLS = [
   } },
   { type: 'function', function: {
     name: 'run_command',
-    description: 'Run a shell command inside the sandboxed Linux container (cwd /workspace). Node 24, Python 3.13, git available. Package installs require user approval and may be denied.',
+    description: 'Run a one-shot shell command inside the sandboxed Linux container (cwd /workspace). Node 24, Python 3.13, git available. Package installs require user approval and may be denied. Do NOT start long-running servers or bind ports — write static files for UIs; the user previews in-canvas.',
     parameters: { type: 'object', properties: {
-      command: { type: 'string', description: 'bash command' },
+      command: { type: 'string', description: 'bash command that should exit (not a server left running)' },
       timeout_sec: { type: 'number', description: 'kill after N seconds (default 60, max 300)' },
     }, required: ['command'] },
   } },
@@ -181,12 +180,14 @@ function agentSystemPrompt(ws) {
   return [
     'You are Duck, a coding agent inside DuckPond, working in a sandboxed Linux container.',
     'The project lives at /workspace — every file path you use is relative to it.',
-    'Environment: Debian, Node 24 + npm, Python 3.13 + pip, git, bash. No GUI. Dev servers may bind ports 3000-3009.',
+    'Environment: Debian, Node 24 + npm, Python 3.13 + pip, git, bash. No GUI.',
     '',
     'Rules:',
     '- Look before you leap: list or read files before editing them.',
     '- write_file replaces the whole file — always write complete content, never fragments or placeholders.',
-    '- Verify your work by running it (tests, node/python invocation, build) whenever possible.',
+    '- NEVER start long-running web/dev servers or bind ports (no npm run dev, vite, http.server, express listen, etc.).',
+    '- For websites, write static HTML/CSS/JS. The user previews in-canvas in DuckPond and can download files — there is no hosted preview URL.',
+    '- Verify with one-shot commands that exit (tests, node/python scripts, builds), not with servers left running.',
     '- Package installs pause for user approval; if denied, work with what is available.',
     '- When the task is complete, reply with a short plain-text summary of what you did and how you verified it. Do not call tools in that final reply.',
   ].join('\n');
@@ -513,6 +514,50 @@ export default async function agentRoutes(app) {
     } catch (err) { return reply.code(400).send({ error: err.message }); }
   });
 
+  // In-canvas static preview: serve workspace files over the same origin
+  // (Cloudflare-friendly). Used by the Files rail preview iframe — never
+  // proxies to localhost, so it works through the tunnel with no dev server.
+  const STATIC_MIME = {
+    '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon',
+    '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf',
+    '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+    '.xml': 'application/xml; charset=utf-8', '.map': 'application/json; charset=utf-8',
+  };
+  app.get('/api/workspaces/:id/static/*', async (req, reply) => {
+    const ws = wsForUser(req.params.id, req.user.id);
+    if (!ws) return reply.code(404).send({ error: 'not found' });
+    // parse path from the raw URL (same pattern as the old preview proxy)
+    const marker = `/static/`;
+    const raw = req.raw.url || '';
+    const cut = raw.indexOf(marker);
+    let rel = cut >= 0 ? raw.slice(cut + marker.length).split('?')[0] : '';
+    try { rel = decodeURIComponent(rel); } catch { /* keep raw */ }
+    rel = rel.replace(/^\/+/, '');
+    if (!rel || rel.endsWith('/')) {
+      rel = rel ? `${rel.replace(/\/+$/, '')}/index.html` : 'index.html';
+    }
+    let p;
+    try { p = safePath(ws, rel); } catch (err) { return reply.code(400).send({ error: err.message }); }
+    if (!existsSync(p) || statSync(p).isDirectory()) {
+      const idx = join(p, 'index.html');
+      if (existsSync(idx) && !statSync(idx).isDirectory()) p = idx;
+      else return reply.code(404).send({ error: 'not found' });
+    }
+    const ext = extname(p).toLowerCase();
+    const type = STATIC_MIME[ext] || 'application/octet-stream';
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'content-type': type,
+      'cache-control': 'no-cache',
+      'x-content-type-options': 'nosniff',
+    });
+    createReadStream(p).pipe(reply.raw);
+  });
+
   // ----- runs -----
 
   app.get('/api/workspaces/:id/runs', async (req, reply) => {
@@ -580,32 +625,32 @@ export default async function agentRoutes(app) {
     return { ok: true };
   });
 
-  // ----- preview proxy: /api/workspaces/:id/preview/:port/<path> → 127.0.0.1:<mapped> -----
-  // Plain HTTP only (no websocket upgrade → HMR won't connect; page still loads).
-
+  // Old localhost-port preview proxy is gone. Use /static/* (in-canvas) or
+  // /download (save file). Kept as an explicit 410 so stale clients get a clear message.
   app.all('/api/workspaces/:id/preview/:port/*', async (req, reply) => {
+    return reply.code(410).send({
+      error: 'Port-based preview is disabled. Use the in-canvas HTML preview (Files rail) or download the files.',
+    });
+  });
+
+  // Force-download a workspace file (binary-safe). Auth required.
+  app.get('/api/workspaces/:id/download', async (req, reply) => {
     const ws = wsForUser(req.params.id, req.user.id);
     if (!ws) return reply.code(404).send({ error: 'not found' });
-    const port = Number(req.params.port);
-    if (!(port >= 3000 && port < 3000 + PORTS_PER_WS)) return reply.code(400).send({ error: 'port out of range' });
-    const hostPort = ws.port_base + (port - 3000);
-    const tail = req.raw.url.split(`/preview/${port}`)[1] || '/';
-
-    // never forward credentials into the sandbox — code running there is untrusted
-    const { cookie, authorization, ...fwdHeaders } = req.headers;
+    const rel = String(req.query.path ?? '').replace(/^\/+/, '');
+    if (!rel) return reply.code(400).send({ error: 'path required' });
+    let p;
+    try { p = safePath(ws, rel); } catch (err) { return reply.code(400).send({ error: err.message }); }
+    if (!existsSync(p) || statSync(p).isDirectory()) return reply.code(404).send({ error: 'not found' });
+    const base = rel.split('/').pop() || 'download';
+    const safeName = base.replace(/[^\w.\-()+ ]+/g, '_');
     reply.hijack();
-    const up = http.request(
-      { host: '127.0.0.1', port: hostPort, path: tail, method: req.method,
-        headers: { ...fwdHeaders, host: `127.0.0.1:${hostPort}` } },
-      (res) => {
-        reply.raw.writeHead(res.statusCode ?? 502, res.headers);
-        res.pipe(reply.raw);
-      },
-    );
-    up.on('error', () => {
-      if (!reply.raw.headersSent) reply.raw.writeHead(502, { 'content-type': 'application/json' });
-      if (!reply.raw.writableEnded) reply.raw.end(JSON.stringify({ error: 'preview target not responding — is the dev server running?' }));
+    reply.raw.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-disposition': `attachment; filename="${safeName}"`,
+      'cache-control': 'no-cache',
+      'x-content-type-options': 'nosniff',
     });
-    req.raw.pipe(up);
+    createReadStream(p).pipe(reply.raw);
   });
 }

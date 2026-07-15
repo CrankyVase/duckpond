@@ -1,9 +1,9 @@
 <script>
-  // Project files rail for chat agent mode: live view of the conversation's
-  // workspace, with a read-only file peek and an embedded dev-server preview.
+  // Project files rail: workspace tree, in-canvas HTML preview (static, no ports),
+  // and download for any file.
   import { api } from '../lib/api.js';
   import { app } from '../lib/state.svelte.js';
-  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Download from '@lucide/svelte/icons/download';
   import FileIcon from '@lucide/svelte/icons/file';
   import Folder from '@lucide/svelte/icons/folder';
   import FolderOpen from '@lucide/svelte/icons/folder-open';
@@ -18,11 +18,12 @@
   let wsName = $state('');
   let viewer = $state(null); // { path, content, error }
   let preview = $state(false);
-  let previewNonce = $state(0); // bump to force the iframe to reload
+  let previewPath = $state('');
+  let previewNonce = $state(0);
 
   $effect(() => {
     const wsId = app.conv?.workspace_id;
-    void app.filesVersion;                 // bumped on every diff event
+    void app.filesVersion;
     if (!wsId) { files = []; return; }
     (async () => {
       try {
@@ -38,6 +39,37 @@
 
   const depth = (p) => p.split('/').length - 1;
   const name = (p) => p.split('/').pop();
+  const isHtml = (p) => /\.(html?|svg)$/i.test(p);
+
+  const htmlFiles = $derived(files.filter((f) => !f.dir && isHtml(f.path)));
+  function pickDefaultHtml() {
+    const preferred = htmlFiles.find((f) => /(^|\/)index\.html?$/i.test(f.path))
+      ?? htmlFiles.find((f) => !f.path.includes('/'))
+      ?? htmlFiles[0];
+    return preferred?.path ?? '';
+  }
+
+  function openPreview(path) {
+    previewPath = path || pickDefaultHtml();
+    if (!previewPath) return;
+    preview = true;
+    previewNonce += 1;
+  }
+
+  function downloadUrl(path) {
+    return `/api/workspaces/${app.conv.workspace_id}/download?path=${encodeURIComponent(path)}`;
+  }
+
+  function download(path) {
+    // Same-origin cookie auth; open as a navigation so Content-Disposition applies
+    const a = document.createElement('a');
+    a.href = downloadUrl(path);
+    a.download = name(path);
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
 
   async function peek(path) {
     try {
@@ -48,7 +80,18 @@
     }
   }
 
-  function key(e) { if (e.key === 'Escape' && viewer) viewer = null; }
+  function key(e) {
+    if (e.key === 'Escape') {
+      if (preview) preview = false;
+      else if (viewer) viewer = null;
+    }
+  }
+
+  const previewSrc = $derived(
+    preview && previewPath && app.conv?.workspace_id
+      ? `/api/workspaces/${app.conv.workspace_id}/static/${previewPath.split('/').map(encodeURIComponent).join('/')}?n=${previewNonce}`
+      : ''
+  );
 </script>
 
 <svelte:window onkeydown={key} />
@@ -66,11 +109,15 @@
         <span class="title">Project files</span>
         {#if wsName}<span class="ws">{wsName}</span>{/if}
       </div>
-      <button class="hbtn" onclick={() => (preview = true)} title="Preview (live dev server)">
+      <button class="hbtn" class:dim={!htmlFiles.length}
+        onclick={() => openPreview()}
+        title={htmlFiles.length
+          ? 'Preview HTML in-canvas (static files — no ports / localhost)'
+          : 'No HTML files to preview yet'}>
         <Globe size={14} />
       </button>
       <button class="hbtn" onclick={() => (open = false)} title="Hide files">
-        <PanelRightClose size={14} />
+        <PanelRightClose size={15} />
       </button>
     </div>
     <div class="tree">
@@ -80,10 +127,19 @@
             <Folder size={12} /><span class="nm">{name(f.path)}</span>
           </div>
         {:else}
-          <button class="row" style="padding-left: {10 + depth(f.path) * 13}px"
-            onclick={() => peek(f.path)}>
-            <FileIcon size={12} /><span class="nm">{name(f.path)}</span>
-          </button>
+          <div class="rowwrap" style="padding-left: {10 + depth(f.path) * 13}px">
+            <button class="row" onclick={() => peek(f.path)}>
+              <FileIcon size={12} /><span class="nm">{name(f.path)}</span>
+            </button>
+            {#if isHtml(f.path)}
+              <button class="pv" title="Preview in-canvas" onclick={() => openPreview(f.path)}>
+                <Globe size={11} />
+              </button>
+            {/if}
+            <button class="pv" title="Download" onclick={() => download(f.path)}>
+              <Download size={11} />
+            </button>
+          </div>
         {/if}
       {:else}
         <div class="empty">Nothing here yet — the duck hasn't built anything in this chat.</div>
@@ -99,6 +155,14 @@
     <div class="card">
       <div class="chead">
         <code class="cpath">{viewer.path}</code>
+        {#if isHtml(viewer.path)}
+          <button class="hbtn" onclick={() => { openPreview(viewer.path); viewer = null; }} title="Preview">
+            <Globe size={14} />
+          </button>
+        {/if}
+        <button class="hbtn" onclick={() => download(viewer.path)} title="Download">
+          <Download size={14} />
+        </button>
         <button class="hbtn" onclick={() => (viewer = null)} title="Close"><X size={15} /></button>
       </div>
       {#if viewer.error}
@@ -116,13 +180,24 @@
     onkeydown={key}>
     <div class="card previewcard">
       <div class="chead">
-        <code class="cpath">Preview — localhost:3000</code>
+        <code class="cpath">Preview — {previewPath} (in-canvas)</code>
+        {#if htmlFiles.length > 1}
+          <select class="pick" bind:value={previewPath} onchange={() => (previewNonce += 1)} title="Pick HTML file">
+            {#each htmlFiles as f (f.path)}
+              <option value={f.path}>{f.path}</option>
+            {/each}
+          </select>
+        {/if}
+        <button class="hbtn" onclick={() => download(previewPath)} title="Download this file">
+          <Download size={14} />
+        </button>
         <button class="hbtn" onclick={() => (previewNonce += 1)} title="Reload"><RefreshCw size={14} /></button>
         <button class="hbtn" onclick={() => (preview = false)} title="Close"><X size={15} /></button>
       </div>
-      {#key previewNonce}
-        <iframe class="previewframe" title="Live dev server preview"
-          src={`/api/workspaces/${app.conv.workspace_id}/preview/3000/`}></iframe>
+      {#key previewSrc}
+        <iframe class="previewframe" title="In-canvas HTML preview"
+          sandbox="allow-scripts allow-forms allow-modals allow-popups allow-same-origin"
+          src={previewSrc}></iframe>
       {/key}
     </div>
   </div>
@@ -155,16 +230,24 @@
   .ws { font-size: 11.5px; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hbtn { all: unset; cursor: pointer; padding: 3px; border-radius: calc(6px * var(--rf)); color: var(--text-faint); display: grid; place-items: center; }
   .hbtn:hover { color: var(--text); background: var(--bg-hover); }
+  .hbtn.dim { opacity: 0.35; }
 
   .tree { overflow-y: auto; flex: 1; padding: 4px 0; }
+  .rowwrap { display: flex; align-items: center; gap: 2px; padding-right: 4px; }
   .row {
-    all: unset; box-sizing: border-box; width: 100%; cursor: pointer;
+    all: unset; box-sizing: border-box; flex: 1; min-width: 0; cursor: pointer;
     display: flex; align-items: center; gap: 6px;
-    padding-top: 3.5px; padding-bottom: 3.5px; padding-right: 8px;
+    padding-top: 3.5px; padding-bottom: 3.5px; padding-right: 4px;
     font-size: 12px; color: var(--text-dim);
   }
-  .row:hover:not(.dir) { background: var(--bg-hover); color: var(--text); }
-  .row.dir { cursor: default; color: var(--text-faint); }
+  .row:hover { background: var(--bg-hover); color: var(--text); }
+  .row.dir { cursor: default; color: var(--text-faint); width: 100%; }
+  .pv {
+    all: unset; cursor: pointer; flex-shrink: 0;
+    display: grid; place-items: center; width: 20px; height: 20px;
+    border-radius: 5px; color: var(--text-faint);
+  }
+  .pv:hover { color: var(--accent); background: var(--bg-hover); }
   .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { padding: 12px; font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
 
@@ -184,7 +267,7 @@
     display: flex; align-items: center; gap: 10px;
     padding: 10px 14px; border-bottom: 1px solid var(--border-soft);
   }
-  .cpath { flex: 1; font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  .cpath { flex: 1; font-family: var(--mono); font-size: 12.5px; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cbody {
     margin: 0; padding: 14px 16px; overflow: auto;
     font-family: var(--mono); font-size: 12px; line-height: 1.6;
@@ -194,4 +277,9 @@
 
   .previewcard { width: min(1400px, 96vw); height: 90vh; }
   .previewframe { flex: 1; min-height: 0; border: none; background: #fff; }
+  .pick {
+    max-width: 220px; font-family: var(--mono); font-size: 11.5px;
+    background: var(--bg-input); color: var(--text); border: 1px solid var(--border-soft);
+    border-radius: 6px; padding: 3px 6px;
+  }
 </style>

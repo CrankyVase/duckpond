@@ -1,8 +1,8 @@
 <script>
   import { api } from '../lib/api.js';
+  import { chatPath, userSubpath } from '../lib/router.js';
   import { app, loadConversations, newConversation, openConversation } from '../lib/state.svelte.js';
   import Duck from './Duck.svelte';
-  import AudioWaveform from '@lucide/svelte/icons/audio-waveform';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
@@ -29,7 +29,13 @@
   }
   function clearSearch() { query = ''; deep = null; }
   async function openResult(r) {
+    app.view = 'chat';
     await openConversation(r.conv_id);
+  }
+
+  async function openChat(id) {
+    app.view = 'chat';
+    await openConversation(id);
   }
   const fmtDay = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
@@ -114,15 +120,16 @@
       {#each groups as g (g.label)}
         <div class="group">{g.label}</div>
         {#each g.items as c (c.id)}
-          <div class="item" class:active={app.conv?.id === c.id}
-            onclick={() => openConversation(c.id)} role="button" tabindex="0"
-            onkeydown={(e) => e.key === 'Enter' && openConversation(c.id)}>
+          <a class="item" class:active={app.conv?.id === c.id}
+            href={app.user?.id != null ? chatPath(app.user.id, c.title, c.id) : '#'}
+            onclick={(e) => { e.preventDefault(); openChat(c.id); }}
+            role="link">
             <span class="ci"><MessageSquare size={13} /></span>
             <span class="title">{c.title}</span>
             <button class="del" onclick={(e) => remove(c.id, e)} title="Delete chat">
               <X size={13} />
             </button>
-          </div>
+          </a>
         {/each}
       {:else}
         <div class="none">{query ? 'No chats match.' : 'No chats yet.'}</div>
@@ -131,9 +138,11 @@
     </nav>
 
     <div class="pages">
-      <button class="page" onclick={() => (app.view = 'stats')}>
+      <a class="page"
+        href={app.user?.id != null ? userSubpath(app.user.id, 'stats') : '/stats'}
+        onclick={(e) => { e.preventDefault(); app.view = 'stats'; }}>
         <BarChart3 size={14} /> Stats
-      </button>
+      </a>
       <!-- Speech Lab hidden 2026-07-15: local Voxtral turned out impossible
            (vllm-omni has no CPU platform) and the hosted-API fallback was NOT
            okay with Lewis. Next TTS model: ResembleAI/chatterbox — re-enable
@@ -213,6 +222,7 @@
     display: flex; align-items: center; gap: 8px;
     padding: 7px 8px 7px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer;
     color: var(--text-dim); font-size: 13.5px;
+    text-decoration: none;
     transition: background 110ms ease, color 110ms ease;
   }
   .item:hover { background: var(--bg-hover); color: var(--text); }
@@ -261,6 +271,7 @@
     all: unset; cursor: pointer; flex: 1;
     display: flex; align-items: center; justify-content: center; gap: 7px;
     padding: 8px 10px; border-radius: calc(9px * var(--rf));
+    text-decoration: none; box-sizing: border-box;
     font-size: 12px; font-weight: 500; color: var(--text-dim);
     background: var(--bg-raised); border: 1px solid var(--border-soft);
   }

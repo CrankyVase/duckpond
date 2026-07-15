@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { rememberNext } from '../lib/router.js';
   import { app, checkAuth } from '../lib/state.svelte.js';
   import Duck from './Duck.svelte';
   import LockKeyhole from '@lucide/svelte/icons/lock-keyhole';
@@ -8,6 +9,11 @@
   let password = $state('');
   let error = $state('');
   let busy = $state(false);
+
+  // Capture deep-link destination once on mount (App also parks us on /login)
+  $effect(() => {
+    if (location.pathname !== '/login') rememberNext(location.pathname + location.search);
+  });
 
   async function submit(e) {
     e.preventDefault();
@@ -18,6 +24,7 @@
       await api(path, { method: 'POST', body: { username, password } });
       app.setupNeeded = false;
       await checkAuth();
+      // App.svelte boot effect picks up takeNext() and opens the right chat
     } catch (err) {
       error = err.retryAfterSec
         ? `Locked out — try again in ${Math.ceil(err.retryAfterSec / 60)} min (or run the admin unban CLI)`

@@ -27,6 +27,9 @@ import {
 import { corePrompt } from '../settings.js';
 import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
 import { acquireGpu } from '../gpuqueue.js';
+import {
+  attachListener, broadcast, createLiveJob, finishLiveJob, getLiveJob, stopLiveJob,
+} from '../liveJobs.js';
 
 // ---------- tree helpers ----------
 
@@ -581,7 +584,7 @@ function widgetPolicyFor(disabled) {
 }
 
 const GATE_POLICY = `## Project mode
-You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git; dev servers may bind ports 3000-3009), saves your plan as PLAN.md, and unlocks file and shell tools.
+You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git), saves your plan as PLAN.md, and unlocks file and shell tools.
 
 Call start_project ONLY when:
 - the user asks for a real project, app, game, script, or website they want to keep, run, or iterate on
@@ -591,17 +594,22 @@ Do NOT call it when:
 - the user wants a snippet, one-file example, or code just to read — answer in chat with a markdown code block
 - the user is asking a question, discussing, or still planning — keep talking; only start the project when they clearly want it built
 
-If you do call it, briefly tell the user what you're about to build first, then call the tool with a short kebab-case name and a concise plan.`;
+CRITICAL — no hosting / no ports:
+- NEVER start a long-running web server, dev server, or anything that listens on a port (no npm run dev, vite, webpack-dev-server, python -m http.server, flask/django/express listen, etc.).
+- There is no live preview host. The user previews HTML/CSS/JS in-canvas in the DuckPond Files rail (static files only) and can download any file.
+- For websites/apps, write complete static files (index.html + css/js) or a self-contained HTML document. For scripts, write the file and verify with a one-shot command (node x.js, python x.py, tests) that exits.
+
+If you do call start_project, briefly tell the user what you're about to build first, then call the tool with a short kebab-case name and a concise plan.`;
 
 const ACTIVE_POLICY = `## Project mode (active)
-This conversation has a persistent sandboxed workspace at /workspace (Debian, Node 24 + npm, Python 3.13 + pip, git; dev servers may bind ports 3000-3009). You have tools to list/read/write files and run shell commands.
+This conversation has a persistent sandboxed workspace at /workspace (Debian, Node 24 + npm, Python 3.13 + pip, git). You have tools to list/read/write files and run shell commands.
 
 Rules:
 - Use tools when the user wants project work done (build, change, fix, run). For pure questions or discussion, just answer in chat — no tools.
 - Keep PLAN.md current: check items off as you finish them; update it when the plan changes.
 - Look before you leap: list or read files before editing them.
 - write_file replaces the whole file — always write complete content, never fragments or placeholders.
-- Verify your work by actually running it (tests, node/python invocation, build) before declaring it done.
+- NEVER start long-running servers or bind ports. No dev servers. Write static HTML/CSS/JS for UIs; the user previews them in-canvas and can download files. Verify with one-shot commands that exit (node, python, test runners, build tools that finish).
 - Package installs pause for the user's approval and may be denied; if denied, adapt.
 - After tool work, finish with a short plain-text summary: what you built, how you verified it, what could come next. No tool calls in that final message.`;
 
@@ -957,12 +965,73 @@ export default async function chatRoutes(app) {
     return { ok: true, deleted: subtree.length };
   });
 
+  // Re-attach to an in-flight (or just-finished) generation after a refresh.
+  // Sends a `resume` snapshot, then tails live events. 204 when nothing is live.
+  app.get('/api/conversations/:id/live', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    const job = getLiveJob(conv.id);
+    if (!job || job.userId !== req.user.id) return reply.code(204).send();
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    let ping = null;
+    let unsub = () => {};
+    const closeLive = () => {
+      if (ping) { clearInterval(ping); ping = null; }
+      unsub();
+      unsub = () => {};
+      if (!reply.raw.writableEnded) {
+        try { reply.raw.end(); } catch { /* ignore */ }
+      }
+    };
+    const write = (obj) => {
+      if (reply.raw.writableEnded || reply.raw.destroyed) return;
+      try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
+      // done / stream_end — hang up so the client promise resolves
+      if (obj?.type === 'done' || obj?.type === 'stream_end') closeLive();
+    };
+    unsub = attachListener(job, write);
+    // finished jobs only needed the resume snapshot — close immediately
+    if (job.status !== 'running') {
+      closeLive();
+      return;
+    }
+    ping = setInterval(() => {
+      if (!reply.raw.writableEnded) {
+        try { reply.raw.write(': ping\n\n'); } catch { /* ignore */ }
+      }
+    }, 15_000);
+    reply.raw.on('close', () => {
+      if (ping) { clearInterval(ping); ping = null; }
+      unsub();
+      // do NOT abort the job — refresh/tab-close must not kill generation
+    });
+  });
+
+  // Explicit stop only. Page refresh must never cancel the model.
+  app.post('/api/conversations/:id/stop', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    return { ok: stopLiveJob(conv.id, req.user.id) };
+  });
+
   // The main event: send a user message (or regenerate) and stream the reply.
   // body: { content?, parentId?, regenerateFrom? } — exactly one of content|regenerateFrom.
   app.post('/api/conversations/:id/chat', async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
     if (!conv.model_id) return reply.code(400).send({ error: 'no model selected' });
+
+    // one live generation per conversation — the client queues extras itself
+    if (getLiveJob(conv.id)?.status === 'running') {
+      return reply.code(409).send({ error: 'a reply is already generating for this chat' });
+    }
 
     const { content, parentId, regenerateFrom } = req.body ?? {};
     // coarse location, resolved from the request's own IP (no browser prompt,
@@ -973,6 +1042,13 @@ export default async function chatRoutes(app) {
     const researchMode = RESEARCH_MODES[req.body?.researchMode] ? req.body.researchMode : 'normal';
     const modeCfg = RESEARCH_MODES[researchMode];
 
+    let job;
+    try { job = createLiveJob(conv.id, req.user.id); }
+    catch (err) {
+      return reply.code(err.code === 409 ? 409 : 500).send({ error: err.message });
+    }
+    const abort = job.abort;
+
     // take the socket away from Fastify — otherwise it "completes" the reply
     // as soon as the handler yields and our SSE stream gets torn down
     reply.hijack();
@@ -982,14 +1058,26 @@ export default async function chatRoutes(app) {
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
     });
-    const send = (obj) => {
+    // Fan out every event to all attached clients (this tab + any reattach after
+    // refresh). The primary connection is just another listener — closing it
+    // must NOT abort the job.
+    const writePrimary = (obj) => {
       if (reply.raw.writableEnded || reply.raw.destroyed) return;
       try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
     };
-    const abort = new AbortController();
-    // NB: req.raw 'close' fires once the request BODY is consumed (not on client
-    // disconnect) — the response socket is the real disconnect signal.
-    reply.raw.on('close', () => { if (!reply.raw.writableEnded) abort.abort(); });
+    job.listeners.add(writePrimary);
+    const send = (obj) => broadcast(job, obj);
+    // Cloudflare / proxies kill "idle" SSE after ~100s. Keepalive comments
+    // (ignored by the client parser) prevent the reply vanishing mid-generation.
+    const pingPrimary = setInterval(() => {
+      if (reply.raw.writableEnded || reply.raw.destroyed) return;
+      try { reply.raw.write(': ping\n\n'); } catch { /* client gone */ }
+    }, 15_000);
+    reply.raw.on('close', () => {
+      clearInterval(pingPrimary);
+      job.listeners.delete(writePrimary);
+      // intentionally no abort.abort() — generation keeps going server-side
+    });
 
     let releaseGpu = null;
     let thinkTimer = null;      // thinking-watchdog handle (cleared in finally)
@@ -1472,13 +1560,25 @@ export default async function chatRoutes(app) {
       }
     } catch (err) {
       req.log.error({ err }, 'chat generation failed');
-      if (!abort.signal.aborted && !reply.raw.writableEnded) {
+      if (!abort.signal.aborted) {
         send({ type: 'error', message: String(err.message ?? err) });
       }
     } finally {
       if (thinkTimer) clearTimeout(thinkTimer);
+      clearInterval(pingPrimary);
       releaseGpu?.();
-      if (!reply.raw.writableEnded) reply.raw.end();
+      job.listeners.delete(writePrimary);
+      const st = abort.signal.aborted ? 'stopped'
+        : (job.status === 'done' ? 'done' : (job.state.error ? 'error' : 'done'));
+      finishLiveJob(job, st);
+      // Tell every reattached live tail to close, then drop them
+      for (const fn of [...job.listeners]) {
+        try { fn({ type: 'stream_end' }); } catch { /* ignore */ }
+      }
+      job.listeners.clear();
+      if (!reply.raw.writableEnded) {
+        try { reply.raw.end(); } catch { /* already gone */ }
+      }
     }
   });
 

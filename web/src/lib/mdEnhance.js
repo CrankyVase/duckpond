@@ -1,5 +1,5 @@
 // Svelte action: decorates rendered-markdown inside a container.
-//  - <pre> code blocks get a header bar (language label + copy button)
+//  - <pre> code blocks get a header bar (language label + copy + HTML preview)
 //  - inline links that point at a web-search source become compact citation
 //    pills (shield glyph + domain, Perplexity-style), merging adjacent ones
 //    into a single "+N" pill.
@@ -17,6 +17,54 @@ function labelOf(host) {
   return (parts[Math.max(0, parts.length - 1 - drop)] || host).slice(0, 24);
 }
 
+const HTML_LANGS = new Set(['html', 'htm', 'svg', 'xml']);
+
+function openHtmlPreview(source, lang) {
+  // Fully client-side: blob URL iframe — no localhost, works through Cloudflare.
+  const mime = lang === 'svg' ? 'image/svg+xml' : 'text/html';
+  const blob = new Blob([source], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'html-preview-overlay';
+  overlay.innerHTML = `
+    <div class="html-preview-card" role="dialog" aria-label="HTML preview">
+      <div class="html-preview-head">
+        <span class="html-preview-title">Preview — in-canvas</span>
+        <button type="button" class="html-preview-btn" data-act="reload" title="Reload">reload</button>
+        <button type="button" class="html-preview-btn" data-act="newtab" title="Open in new tab">open</button>
+        <button type="button" class="html-preview-btn" data-act="close" title="Close">close</button>
+      </div>
+      <iframe class="html-preview-frame" title="HTML preview"
+        sandbox="allow-scripts allow-forms allow-modals allow-popups allow-same-origin"></iframe>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const frame = overlay.querySelector('iframe');
+  frame.src = url;
+
+  const cleanup = () => {
+    URL.revokeObjectURL(url);
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => { if (e.key === 'Escape') cleanup(); };
+  document.addEventListener('keydown', onKey);
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) cleanup();
+  });
+  overlay.querySelector('[data-act="close"]').addEventListener('click', cleanup);
+  overlay.querySelector('[data-act="reload"]').addEventListener('click', () => {
+    frame.src = 'about:blank';
+    // re-assign same blob url to force reload
+    requestAnimationFrame(() => { frame.src = url; });
+  });
+  overlay.querySelector('[data-act="newtab"]').addEventListener('click', () => {
+    window.open(url, '_blank', 'noopener');
+  });
+}
+
 export function mdEnhance(node, params = {}) {
   let sources = params?.sources ?? [];
 
@@ -30,6 +78,21 @@ export function mdEnhance(node, params = {}) {
       bar.className = 'codebar';
       const label = document.createElement('span');
       label.textContent = lang || 'text';
+
+      const actions = document.createElement('div');
+      actions.className = 'codeactions';
+
+      if (HTML_LANGS.has(lang.toLowerCase())) {
+        const prev = document.createElement('button');
+        prev.className = 'copy';
+        prev.textContent = 'preview';
+        prev.title = 'Preview in-canvas (no localhost)';
+        prev.addEventListener('click', () => {
+          openHtmlPreview(code?.textContent ?? '', lang.toLowerCase());
+        });
+        actions.append(prev);
+      }
+
       const copy = document.createElement('button');
       copy.className = 'copy';
       copy.textContent = 'copy';
@@ -41,7 +104,8 @@ export function mdEnhance(node, params = {}) {
           setTimeout(() => { copy.textContent = 'copy'; copy.classList.remove('ok'); }, 1400);
         } catch { /* clipboard denied */ }
       });
-      bar.append(label, copy);
+      actions.append(copy);
+      bar.append(label, actions);
       pre.prepend(bar);
     }
   };

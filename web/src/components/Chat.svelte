@@ -1,5 +1,5 @@
 <script>
-  import { api, sse } from '../lib/api.js';
+  import { api, sse, sseGet } from '../lib/api.js';
   import { prefs, savePrefs } from '../lib/prefs.svelte.js';
   import {
     app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, openConversation, refreshContext, visiblePath,
@@ -28,6 +28,32 @@
   let pendText = '';
   let pendThink = '';
   let toolBuf = null; // { index, name, args } — streaming tool-call arguments
+
+  // ----- message queue (send while AI is busy) -----
+  let msgQueue = $state([]); // { id, content }[]
+
+  // ----- composer arrow-key history (shell-style) -----
+  const HIST_KEY = 'dp_composer_history';
+  const HIST_MAX = 80;
+  function loadHistory() {
+    try {
+      const j = JSON.parse(localStorage.getItem(HIST_KEY) ?? '[]');
+      return Array.isArray(j) ? j.filter((s) => typeof s === 'string') : [];
+    } catch { return []; }
+  }
+  let sentHistory = $state(loadHistory());
+  let histIdx = $state(-1); // -1 = editing current draft
+  let draftBeforeHist = '';
+
+  function pushHistory(content) {
+    const t = content.trim();
+    if (!t) return;
+    const next = [...sentHistory.filter((s) => s !== t), t].slice(-HIST_MAX);
+    sentHistory = next;
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(next)); } catch { /* quota */ }
+    histIdx = -1;
+    draftBeforeHist = '';
+  }
 
   // best-effort parse of a *partial* JSON tool-call argument string, so the
   // user can watch files being written character by character
@@ -243,45 +269,268 @@
       case 'error':
         if (s) s.error = ev.message;
         break;
+      case 'resume': {
+        // Reattach after refresh: restore the live bubble from the server snapshot.
+        // If the job already finished, apply the final message and clear.
+        if (ev.status === 'done' && ev.finalMsg) {
+          if (here && !app.conv.messages.some((m) => m.id === ev.finalMsg.id)) {
+            app.conv.messages.push(ev.finalMsg);
+            app.conv.active_leaf_id = ev.finalMsg.id;
+          }
+          app.streaming = null;
+          break;
+        }
+        if (ev.status === 'stopped' || ev.status === 'error') {
+          if (here && (ev.text || ev.error)) {
+            app.conv.messages.push({
+              id: `tmp-${Date.now()}`, conv_id: convId,
+              parent_id: app.conv.active_leaf_id, role: 'assistant',
+              run_id: ev.run?.id ?? null,
+              content: (ev.text || '') + (ev.error ? `\n\n> ${ev.error}` : '\n\n> stopped'),
+              pinned: 0,
+            });
+          }
+          app.streaming = null;
+          break;
+        }
+        app.streaming = {
+          convId,
+          text: ev.text || '',
+          thinking: ev.thinking || '',
+          tokS: ev.tokS ?? null,
+          n: ev.n ?? 0,
+          loading: !!ev.loading,
+          error: ev.error ?? null,
+          run: ev.run ?? null,
+          events: ev.events ?? [],
+          liveTool: ev.liveTool ?? null,
+          pendingApproval: ev.pendingApproval ?? null,
+          image: ev.image ?? null,
+          diffusion: ev.diffusion ?? null,
+          queued: ev.queued ?? 0,
+          search: ev.search ?? null,
+          widgets: ev.widgets ?? [],
+        };
+        pendText = ''; pendThink = ''; toolBuf = null;
+        if (here) scrollToBottom(true);
+        break;
+      }
+      case 'stream_end':
+        // live job tore down (generation finished elsewhere or process recycle)
+        break;
     }
   }
 
-  async function run(body) {
-    if (!app.conv || busy) return;
-    const convId = app.conv.id;
-    app.streaming = {
+  function emptyStreaming(convId) {
+    return {
       convId, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
       run: null, events: [], liveTool: null, pendingApproval: null, image: null, diffusion: null, queued: 0,
       search: null, widgets: [],
     };
+  }
+
+  let intentionalStop = false;
+  let resumeToken = 0;
+  let resuming = false;
+  let reconnectBudget = 0;
+
+  async function run(body) {
+    if (!app.conv || app.streaming) return;
+    const convId = app.conv.id;
+    app.streaming = emptyStreaming(convId);
     pendText = ''; pendThink = ''; toolBuf = null;
+    intentionalStop = false;
+    reconnectBudget = 3;
     // search depth; location is resolved server-side from the request's IP
     const outBody = { ...body, researchMode: prefs.researchMode };
     stream = sse(`/api/conversations/${convId}/chat`, outBody, (ev) => handleEvent(ev, convId));
     try {
       await stream.done;
     } catch (err) {
-      if (app.streaming) app.streaming.error = String(err.message ?? err);
+      if (err?.name === 'AbortError') { /* stop / tab close */ }
+      else if (app.streaming) app.streaming.error = String(err.message ?? err);
     } finally {
-      if (app.streaming) {
-        // stopped or errored before 'done' — keep whatever exists, but only if
-        // the conversation it belongs to is still the one on screen; otherwise
-        // there's nowhere honest to put it (the server never persisted a
-        // partial for a plain-chat stop) and we just drop it.
-        if (app.conv?.id === convId && (app.streaming.text || app.streaming.error || app.streaming.run)) {
-          app.conv.messages.push({
-            id: `tmp-${Date.now()}`, conv_id: convId,
-            parent_id: app.conv.active_leaf_id, role: 'assistant',
-            run_id: app.streaming.run?.id ?? null,
-            content: app.streaming.text + (app.streaming.error ? `\n\n> ${app.streaming.error}` : '\n\n> stopped'),
-            pinned: 0,
-          });
+      await endStream(convId);
+    }
+  }
+
+  function snapHasContent(snap) {
+    if (!snap) return false;
+    return !!(snap.text || snap.thinking || snap.error || snap.run
+      || snap.events?.length || snap.liveTool || snap.widgets?.length
+      || snap.image || snap.diffusion);
+  }
+
+  /** Keep partial work as a real bubble so it never silently vanishes. */
+  function promoteSnapToMessage(convId, snap, suffix = '') {
+    if (!snap || app.conv?.id !== convId) return;
+    // Don't double-insert if 'done' already landed the same content
+    const last = app.conv.messages[app.conv.messages.length - 1];
+    if (last?.role === 'assistant' && snap.text && last.content === snap.text) return;
+    let content = snap.text || '';
+    if (snap.liveTool?.content) {
+      const lang = snap.liveTool.path?.split('.').pop() || '';
+      content += (content ? '\n\n' : '')
+        + `\`\`\`${lang}\n${snap.liveTool.content}\n\`\`\``;
+      if (snap.liveTool.path) content = `// ${snap.liveTool.path}\n` + content;
+    } else if (snap.liveTool?.path) {
+      content += (content ? '\n\n' : '') + `(writing ${snap.liveTool.path}…)`;
+    }
+    if (!content && snap.events?.length) {
+      content = '(reply interrupted — agent steps are saved in the run replay if present)';
+    }
+    if (!content && !snap.error) return;
+    app.conv.messages.push({
+      id: `tmp-${Date.now()}`,
+      conv_id: convId,
+      parent_id: app.conv.active_leaf_id,
+      role: 'assistant',
+      run_id: snap.run?.id ?? null,
+      content: content + (snap.error ? `\n\n> ${snap.error}` : '') + suffix,
+      thinking: snap.thinking || null,
+      widgets: snap.widgets ?? null,
+      pinned: 0,
+    });
+  }
+
+  async function endStream(convId) {
+    const stopped = intentionalStop;
+    intentionalStop = false;
+    // Snapshot the live bubble BEFORE we touch anything
+    const snap = app.streaming?.convId === convId ? { ...app.streaming } : null;
+
+    // 'done' already cleared streaming and saved the real message — just clean up
+    if (!snap) {
+      stream = null;
+      if (app.conv?.id === convId) {
+        refreshContext();
+        maybeAutoCompact();
+        if (!app.streaming) pumpQueue(convId);
+      }
+      return;
+    }
+
+    if (stopped) {
+      promoteSnapToMessage(convId, snap, '\n\n> stopped');
+      app.streaming = null;
+      stream = null;
+    } else if (reconnectBudget > 0 && app.conv?.id === convId) {
+      // Unexpected local disconnect (proxy timeout, blip). KEEP the live bubble
+      // visible while we reattach — never blank the thread.
+      reconnectBudget -= 1;
+      stream = null;
+      // Mark reconnecting so UI can still show the bubble (streaming stays set)
+      if (app.streaming?.convId === convId) app.streaming.loading = true;
+      // Soft-reattach without clearing the bubble. tryResume waits until the
+      // live tail ends (done / stream_end / network drop).
+      await tryResume(convId, { preserveSnap: snap, nested: true });
+      if (app.streaming?.convId === convId) {
+        // Live tail died again while still generating — fall through to save
+        // partial or keep trying until budget is gone
+        if (reconnectBudget > 0) {
+          reconnectBudget -= 1;
+          await tryResume(convId, { preserveSnap: app.streaming, nested: true });
         }
+      }
+      if (app.streaming?.convId === convId) {
+        // Still no clean finish — park partial so it never vanishes
+        promoteSnapToMessage(convId, app.streaming, '\n\n> connection dropped — partial reply kept');
         app.streaming = null;
+      } else {
+        // done applied, or resume said finished — make sure DB view is fresh
+        try { await openConversation(convId); } catch { /* ignore */ }
       }
       stream = null;
-      if (app.conv?.id === convId) { refreshContext(); maybeAutoCompact(); }
+    } else {
+      // Out of reconnect attempts — keep whatever we had
+      if (snapHasContent(snap)) promoteSnapToMessage(convId, snap, '\n\n> connection lost');
+      app.streaming = null;
+      stream = null;
     }
+
+    if (app.conv?.id === convId) {
+      refreshContext();
+      maybeAutoCompact();
+      if (!app.streaming) pumpQueue(convId);
+    }
+  }
+
+  // After refresh / open conversation: reattach to a still-running generation.
+  // preserveSnap: merge local text if the server snapshot is empty mid-blip.
+  // nested: called from endStream — do NOT re-enter endStream (avoids loops).
+  async function tryResume(convId, { preserveSnap = null, nested = false } = {}) {
+    if (!convId || resuming) return;
+    // Allow resume even when streaming is set (soft reconnect after blip)
+    if (app.streaming && app.streaming.convId !== convId && !preserveSnap) return;
+    resuming = true;
+    const token = ++resumeToken;
+    try {
+      let gotResume = false;
+      const handle = sseGet(`/api/conversations/${convId}/live`, (ev) => {
+        if (token !== resumeToken) return;
+        if (ev.type === 'resume') {
+          gotResume = true;
+          if (reconnectBudget <= 0) reconnectBudget = 3;
+          // If resume snapshot is empty but we still have local text, merge it
+          // so a blip mid-code doesn't wipe the bubble before the next delta.
+          if (preserveSnap && ev.status === 'running') {
+            if (!ev.text && preserveSnap.text) ev.text = preserveSnap.text;
+            if (!ev.thinking && preserveSnap.thinking) ev.thinking = preserveSnap.thinking;
+            if (!ev.liveTool && preserveSnap.liveTool) ev.liveTool = preserveSnap.liveTool;
+            if (!ev.events?.length && preserveSnap.events?.length) ev.events = preserveSnap.events;
+            if (!ev.widgets?.length && preserveSnap.widgets?.length) ev.widgets = preserveSnap.widgets;
+            if (!ev.run && preserveSnap.run) ev.run = preserveSnap.run;
+          }
+        }
+        handleEvent(ev, convId);
+      });
+      stream = handle;
+      try {
+        await handle.done;
+      } catch { /* abort / network */ }
+      if (token !== resumeToken) return;
+      if (nested) {
+        // endStream owns cleanup
+        if (!gotResume) stream = null;
+        return;
+      }
+      // Boot / popstate path: if we attached and the job later finished, done
+      // already cleared streaming. If the live socket died mid-run, endStream.
+      if (gotResume || app.streaming?.convId === convId) {
+        if (app.streaming?.convId === convId) await endStream(convId);
+      } else {
+        stream = null;
+      }
+    } catch {
+      if (token === resumeToken) stream = null;
+    } finally {
+      if (token === resumeToken) resuming = false;
+    }
+  }
+
+  // Reattach when the active conversation is shown and nothing is streaming yet.
+  // One attempt per conversation open — endStream can call tryResume again on blips.
+  let lastResumeConv = null;
+  $effect(() => {
+    const id = app.conv?.id;
+    if (!id) return;
+    if (app.streaming?.convId === id) { lastResumeConv = id; return; }
+    if (app.streaming) return;
+    if (lastResumeConv === id) return;
+    lastResumeConv = id;
+    void tryResume(id);
+  });
+
+  function pumpQueue(convId) {
+    if (app.streaming || app.conv?.id !== convId) return;
+    if (!msgQueue.length) return;
+    const next = msgQueue[0];
+    msgQueue = msgQueue.slice(1);
+    run({ content: next.content });
+  }
+
+  function removeQueued(id) {
+    msgQueue = msgQueue.filter((q) => q.id !== id);
   }
 
   // fires after each exchange: summarize old turns before the context wall
@@ -300,9 +549,16 @@
 
   function send() {
     const content = input.trim();
-    if (!content) return;
+    if (!content || !app.conv) return;
     input = '';
     if (inputEl) inputEl.style.height = 'auto';
+    pushHistory(content);
+    if (app.streaming) {
+      // queue while the model is working — grey chips under the live bubble
+      msgQueue = [...msgQueue, { id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, content }];
+      scrollToBottom(true);
+      return;
+    }
     run({ content });
   }
 
@@ -311,11 +567,25 @@
       input = prompt;
       inputEl?.focus();
     } else {
-      run({ content: prompt });
+      pushHistory(prompt);
+      if (app.streaming) {
+        msgQueue = [...msgQueue, { id: `q-${Date.now()}`, content: prompt }];
+      } else {
+        run({ content: prompt });
+      }
     }
   }
 
-  function stop() { stream?.abort(); }
+  async function stop() {
+    // explicit stop only — aborts the server job AND the local reader
+    intentionalStop = true;
+    const convId = app.streaming?.convId ?? app.conv?.id;
+    if (convId) {
+      try { await api(`/api/conversations/${convId}/stop`, { method: 'POST' }); }
+      catch { /* already finished */ }
+    }
+    stream?.abort();
+  }
 
   // ---- attached documents (RAG) ----
   let attachedDocs = $state([]);
@@ -427,8 +697,84 @@
     toast(next === 'none' ? 'Reasoning off' : 'Reasoning on (auto)');
   }
 
+  // Seed shell-history from this conversation's user turns (plus localStorage).
+  $effect(() => {
+    const msgs = app.conv?.messages;
+    if (!msgs?.length) return;
+    const fromChat = [];
+    for (const m of msgs) {
+      if (m.role === 'user' && typeof m.content === 'string' && m.content.trim()) {
+        fromChat.push(m.content.trim());
+      }
+    }
+    if (!fromChat.length) return;
+    // merge without losing localStorage entries that aren't in this chat
+    const seen = new Set();
+    const merged = [];
+    for (const s of [...sentHistory, ...fromChat]) {
+      if (seen.has(s)) continue;
+      seen.add(s);
+      merged.push(s);
+    }
+    if (merged.length !== sentHistory.length) {
+      sentHistory = merged.slice(-HIST_MAX);
+      try { localStorage.setItem(HIST_KEY, JSON.stringify(sentHistory)); } catch { /* ignore */ }
+    }
+  });
+
+  function resizeComposer() {
+    if (!inputEl) return;
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(200, inputEl.scrollHeight) + 'px';
+  }
+
   function composerKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey && prefs.sendOnEnter) { e.preventDefault(); send(); }
+    if (e.key === 'Enter' && !e.shiftKey && prefs.sendOnEnter) { e.preventDefault(); send(); return; }
+
+    // Arrow-key history (shell-style). Fixed: after loading an entry we keep
+    // the caret at position 0 so the next ↑ still counts as "at start".
+    // Also allow while already browsing history even if caret moved.
+    if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return;
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+
+    const ta = e.currentTarget || inputEl;
+    if (!ta || !sentHistory.length) return;
+
+    const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
+    const empty = !String(input ?? '').length;
+    const browsing = histIdx >= 0;
+    // single-line empty/start, or already paging history
+    const multiline = String(input ?? '').includes('\n');
+    const allow = browsing || empty || (atStart && !multiline);
+    if (!allow) return;
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (histIdx === -1) draftBeforeHist = input;
+      if (histIdx < sentHistory.length - 1) {
+        histIdx += 1;
+        input = sentHistory[sentHistory.length - 1 - histIdx];
+        queueMicrotask(() => {
+          resizeComposer();
+          // caret at START so repeated ↑ keeps working
+          inputEl?.setSelectionRange(0, 0);
+        });
+      }
+    } else if (e.key === 'ArrowDown' && histIdx >= 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      histIdx -= 1;
+      input = histIdx === -1 ? draftBeforeHist : sentHistory[sentHistory.length - 1 - histIdx];
+      queueMicrotask(() => {
+        resizeComposer();
+        if (histIdx >= 0) inputEl?.setSelectionRange(0, 0);
+        else {
+          const n = input.length;
+          inputEl?.setSelectionRange(n, n);
+        }
+      });
+    }
   }
   function autoGrow(e) {
     e.target.style.height = 'auto';
@@ -508,6 +854,18 @@
           {/if}
         </div>
       {/if}
+      {#if msgQueue.length && (!app.streaming || streamingHere)}
+        {#each msgQueue as q (q.id)}
+          <div class="qmsg fade-in" title="Queued — sends when the current reply finishes">
+            <div class="qavatar"></div>
+            <div class="qbody">
+              <span class="qlabel">queued</span>
+              <div class="qtext">{q.content}</div>
+              <button class="qdrop" onclick={() => removeQueued(q.id)} title="Remove from queue"><X size={12} /></button>
+            </div>
+          </div>
+        {/each}
+      {/if}
       <div class="pad"></div>
     </div>
   </div>
@@ -530,7 +888,10 @@
           {/each}
         </div>
       {/if}
-      <textarea rows="1" placeholder="Message {app.conv?.model_id ?? 'DuckPond'}…"
+      <textarea rows="1"
+        placeholder={busy
+          ? `Queue a follow-up for ${app.conv?.model_id ?? 'DuckPond'}…`
+          : `Message ${app.conv?.model_id ?? 'DuckPond'}…`}
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
         disabled={!app.conv}></textarea>
       <div class="bar">
@@ -550,19 +911,22 @@
           title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
           onclick={toggleThinking}><Lightbulb size={15} /></button>
         <div class="grow"></div>
+        {#if msgQueue.length}
+          <span class="qcount" title="{msgQueue.length} message{msgQueue.length === 1 ? '' : 's'} queued">{msgQueue.length} queued</span>
+        {/if}
         {#if busy}
           <button class="send stop" onclick={stop} title="Stop generating">
             <Square size={12} fill="currentColor" />
           </button>
-        {:else}
-          <button class="send" class:ready={input.trim()} onclick={send}
-            disabled={!input.trim() || !app.conv} title="Send (Enter)">
-            <ArrowUp size={17} />
-          </button>
         {/if}
+        <button class="send" class:ready={input.trim()} onclick={send}
+          disabled={!input.trim() || !app.conv}
+          title={busy ? 'Queue message (sends when the reply finishes)' : 'Send (Enter)'}>
+          <ArrowUp size={17} />
+        </button>
       </div>
     </div>
-    <div class="finehint">Local models only — edits &amp; retries branch, nothing is lost.</div>
+    <div class="finehint">Local models only — ↑/↓ for sent history · queue while it thinks · refresh keeps it going.</div>
   </div>
  </div>
  {#if app.conv?.workspace_id}
@@ -695,4 +1059,39 @@
     color: var(--text-dim); white-space: pre-wrap; word-break: break-word;
     max-height: 340px; overflow: auto;
   }
+
+  /* queued follow-up messages (greyed under the live reply) */
+  .qmsg {
+    display: flex; gap: 10px; align-items: flex-start;
+    margin: 10px 0 4px; opacity: 0.55;
+  }
+  .qavatar {
+    width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+    background: var(--bg-hover); border: 1px dashed var(--border);
+  }
+  .qbody {
+    position: relative; flex: 1; min-width: 0;
+    background: var(--bg-raised); border: 1px dashed var(--border);
+    border-radius: calc(12px * var(--rf));
+    padding: 8px 32px 8px 12px;
+  }
+  .qlabel {
+    display: block; font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--text-faint); margin-bottom: 2px;
+  }
+  .qtext {
+    font-size: 14px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word;
+  }
+  .qdrop {
+    all: unset; cursor: pointer; position: absolute; top: 6px; right: 6px;
+    display: grid; place-items: center; width: 22px; height: 22px;
+    border-radius: 6px; color: var(--text-faint);
+  }
+  .qdrop:hover { color: var(--red); background: var(--bg-hover); }
+  .qcount {
+    font-size: 11px; color: var(--text-faint); font-family: var(--mono);
+    padding: 0 6px; white-space: nowrap;
+  }
+  .bar .send + .send { margin-left: 4px; }
+  .bar .send.stop { margin-right: 2px; }
 </style>

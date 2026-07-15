@@ -20,7 +20,11 @@
     </button>
     <ModelPicker />
   {:else}
-    <button class="ghost iconb" onclick={() => (app.view = 'chat')} title="Back to chat">
+    <button class="ghost iconb" onclick={() => {
+      app.view = 'chat';
+      app.settingsOpen = false;
+      app.themeStudioOpen = false;
+    }} title="Back to chat">
       <MessageSquare size={16} />
     </button>
     <span class="viewtitle">{app.view === 'stats' ? 'Stats' : 'Speech Lab'}</span>
