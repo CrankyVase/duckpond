@@ -4,12 +4,23 @@
   import { app, loadConversations, newConversation, openConversation } from '../lib/state.svelte.js';
   import Duck from './Duck.svelte';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
+  import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Palette from '@lucide/svelte/icons/palette';
   import Search from '@lucide/svelte/icons/search';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
+
+  // Duck Pond Control (ex-LlamaDash) — same host, port 8082 locally
+  function controlUrl() {
+    const { protocol, hostname, port } = location;
+    if (port === '3000' || port === '5199' || port === '8090') {
+      return `${protocol}//${hostname}:8082`;
+    }
+    // Same-origin tunnel edge cases — still try :8082
+    return `${protocol}//${hostname}:8082`;
+  }
 
   let query = $state('');
   // deep search: Enter runs hybrid semantic+exact search over all message
@@ -142,6 +153,9 @@
         href={app.user?.id != null ? userSubpath(app.user.id, 'stats') : '/stats'}
         onclick={(e) => { e.preventDefault(); app.view = 'stats'; }}>
         <BarChart3 size={14} /> Stats
+      </a>
+      <a class="page" href={controlUrl()} title="Duck Pond Control — hardware, models, router">
+        <Gauge size={14} /> Control
       </a>
       <!-- Speech Lab hidden 2026-07-15: local Voxtral turned out impossible
            (vllm-omni has no CPU platform) and the hosted-API fallback was NOT
