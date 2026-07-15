@@ -12,31 +12,31 @@ import { db } from '../db.js';
 // blaster bolts blink while the CSS keyframes fly the ships across the app.
 const XWING_URI = `data:image/svg+xml;utf8,${encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 12' shape-rendering='crispEdges'>
-    <rect x='1' y='1' width='6' height='1' fill='%23aeb9cc'/>
-    <rect x='2' y='2' width='4' height='1' fill='%238f9cb3'/>
-    <rect x='1' y='10' width='6' height='1' fill='%23aeb9cc'/>
-    <rect x='2' y='9' width='4' height='1' fill='%238f9cb3'/>
-    <rect x='1' y='2' width='1' height='8' fill='%23d0402f'/>
-    <rect x='3' y='5' width='9' height='2' fill='%23c7d2e4'/>
-    <rect x='12' y='5' width='2' height='2' fill='%23e6edf7'/>
-    <rect x='9' y='4' width='2' height='1' fill='%236fb7ff'/>
-    <rect x='0' y='5' width='1' height='2' fill='%23ff8c5a'>
+    <rect x='1' y='1' width='6' height='1' fill='#d3deee'/>
+    <rect x='2' y='2' width='4' height='1' fill='#b9c7dd'/>
+    <rect x='1' y='10' width='6' height='1' fill='#d3deee'/>
+    <rect x='2' y='9' width='4' height='1' fill='#b9c7dd'/>
+    <rect x='1' y='2' width='1' height='8' fill='#d0402f'/>
+    <rect x='3' y='5' width='9' height='2' fill='#dde6f4'/>
+    <rect x='12' y='5' width='2' height='2' fill='#e6edf7'/>
+    <rect x='9' y='4' width='2' height='1' fill='#6fb7ff'/>
+    <rect x='0' y='5' width='1' height='2' fill='#ff8c5a'>
       <animate attributeName='opacity' values='1;.3;1' dur='.5s' repeatCount='indefinite'/>
     </rect>
-    <rect x='14' y='5.5' width='4' height='1' fill='%23ff3b30'>
+    <rect x='14' y='5.5' width='4' height='1' fill='#ff3b30'>
       <animate attributeName='opacity' values='0;0;1;0;0;0;0;1;0;0' dur='3.4s' repeatCount='indefinite'/>
     </rect>
   </svg>`.replace(/\n\s*/g, ''))}`;
 
 const TIE_URI = `data:image/svg+xml;utf8,${encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 12' shape-rendering='crispEdges'>
-    <rect x='14' y='0' width='1' height='12' fill='%236a7688'/>
-    <rect x='1' y='0' width='1' height='12' fill='%236a7688'/>
-    <rect x='2' y='5' width='4' height='2' fill='%238f9cb3'/>
-    <rect x='10' y='5' width='4' height='2' fill='%238f9cb3'/>
-    <rect x='6' y='4' width='4' height='4' fill='%23aeb9cc'/>
-    <rect x='7' y='5' width='2' height='2' fill='%23343e4e'/>
-    <rect x='0' y='5.5' width='4' height='1' fill='%234fdc7b'>
+    <rect x='14' y='0' width='1' height='12' fill='#929fb5'/>
+    <rect x='1' y='0' width='1' height='12' fill='#929fb5'/>
+    <rect x='2' y='5' width='4' height='2' fill='#b9c7dd'/>
+    <rect x='10' y='5' width='4' height='2' fill='#b9c7dd'/>
+    <rect x='6' y='4' width='4' height='4' fill='#d3deee'/>
+    <rect x='7' y='5' width='2' height='2' fill='#222b3a'/>
+    <rect x='0' y='5.5' width='4' height='1' fill='#4fdc7b'>
       <animate attributeName='opacity' values='0;0;0;1;0;0;1;0;0;0' dur='2.9s' repeatCount='indefinite'/>
     </rect>
   </svg>`.replace(/\n\s*/g, ''))}`;
@@ -46,53 +46,66 @@ const OUTER_RIM_CSS = `/* — dogfight over the Outer Rim — two pixel starfigh
 body::before, body::after {
   content: ''; position: fixed; top: 0; left: 0; z-index: 2147483000;
   pointer-events: none; opacity: 0; background: center / contain no-repeat;
+  filter: drop-shadow(0 0 3px rgba(160, 190, 255, 0.35));
   will-change: transform;
 }
 body::before {
-  width: 46px; height: 31px;
+  width: 58px; height: 39px;
   background-image: url("${XWING_URI}");
-  animation: dpXwing 47s linear infinite;
+  animation: dpXwing 41s linear infinite;
 }
 body::after {
-  width: 40px; height: 30px;
+  width: 50px; height: 38px;
   background-image: url("${TIE_URI}");
-  animation: dpTie 47s linear infinite;
+  animation: dpTie 41s linear infinite;
 }
 @keyframes dpXwing {
   0%   { transform: translate(-10vw, 82vh) rotate(-9deg); opacity: 0; }
-  2%   { opacity: .55; }
-  40%  { transform: translate(108vw, 14vh) rotate(-9deg); opacity: .55; }
+  2%   { opacity: .8; }
+  40%  { transform: translate(108vw, 14vh) rotate(-9deg); opacity: .8; }
   41%, 100% { transform: translate(-10vw, 82vh) rotate(-9deg); opacity: 0; }
 }
 @keyframes dpTie {
   0%, 3% { transform: translate(-16vw, 88vh) rotate(-9deg); opacity: 0; }
-  5%   { opacity: .5; }
-  43%  { transform: translate(102vw, 20vh) rotate(-9deg); opacity: .5; }
+  5%   { opacity: .75; }
+  43%  { transform: translate(102vw, 20vh) rotate(-9deg); opacity: .75; }
   44%, 55% { opacity: 0; }
-  56%  { transform: translate(108vw, 30vh) rotate(6deg) scaleX(-1); opacity: .5; }
-  92%  { transform: translate(-12vw, 72vh) rotate(6deg) scaleX(-1); opacity: .5; }
+  56%  { transform: translate(108vw, 30vh) rotate(6deg) scaleX(-1); opacity: .75; }
+  92%  { transform: translate(-12vw, 72vh) rotate(6deg) scaleX(-1); opacity: .75; }
   93%, 100% { opacity: 0; }
 }
 html[data-anim='off'] body::before, html[data-anim='off'] body::after { display: none; }
-/* starfield behind everything */
+/* starfield + one faint nebula, behind everything */
 #app::before {
   content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background-image:
-    radial-gradient(1px 1px at 12% 22%, rgba(255,255,255,.7) 50%, transparent 51%),
-    radial-gradient(1px 1px at 34% 74%, rgba(255,255,255,.5) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 56% 12%, rgba(200,220,255,.8) 50%, transparent 51%),
-    radial-gradient(1px 1px at 71% 51%, rgba(255,255,255,.45) 50%, transparent 51%),
-    radial-gradient(1px 1px at 88% 83%, rgba(255,255,255,.6) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 22% 91%, rgba(200,220,255,.5) 50%, transparent 51%),
-    radial-gradient(1px 1px at 45% 38%, rgba(255,255,255,.4) 50%, transparent 51%),
-    radial-gradient(1px 1px at 93% 27%, rgba(255,255,255,.55) 50%, transparent 51%);
+    radial-gradient(50% 34% at 76% 16%, rgba(96, 120, 220, 0.16), transparent 70%),
+    radial-gradient(40% 30% at 15% 78%, rgba(140, 90, 200, 0.08), transparent 70%),
+    radial-gradient(2px 2px at 12% 22%, rgba(255,255,255,.9) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 34% 74%, rgba(255,255,255,.6) 50%, transparent 51%),
+    radial-gradient(2.5px 2.5px at 56% 12%, rgba(210,225,255,.95) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 71% 51%, rgba(255,255,255,.55) 50%, transparent 51%),
+    radial-gradient(2px 2px at 88% 83%, rgba(255,255,255,.7) 50%, transparent 51%),
+    radial-gradient(2px 2px at 22% 91%, rgba(210,225,255,.65) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 45% 38%, rgba(255,255,255,.5) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 7% 55%, rgba(255,255,255,.6) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 62% 65%, rgba(255,255,255,.5) 50%, transparent 51%),
+    radial-gradient(2px 2px at 81% 40%, rgba(210,225,255,.7) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 93% 27%, rgba(255,255,255,.65) 50%, transparent 51%),
+    radial-gradient(1px 1px at 27% 45%, rgba(255,255,255,.45) 50%, transparent 51%),
+    radial-gradient(1px 1px at 52% 82%, rgba(255,255,255,.4) 50%, transparent 51%),
+    radial-gradient(1px 1px at 68% 28%, rgba(255,255,255,.45) 50%, transparent 51%);
 }`;
 
 const ARCADE_CSS = `/* — insert coin — square everything, scanlines, chunky press-down buttons */
 :root { --rf: 0 !important; }
 body::after {
   content: ''; position: fixed; inset: 0; z-index: 2147483001; pointer-events: none;
-  background: repeating-linear-gradient(0deg, rgba(0,0,0,.15) 0 1px, transparent 1px 3px);
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.13) 0 1px, transparent 1px 3px);
+}
+#app::before {
+  content: ''; position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;
+  background: radial-gradient(135% 100% at 50% 50%, transparent 70%, rgba(0, 0, 0, 0.30));
 }
 button { box-shadow: 2px 2px 0 rgba(0,0,0,.55) !important; }
 button:active { transform: translate(2px, 2px) !important; box-shadow: none !important; }
@@ -107,10 +120,10 @@ const SEEDS = [
     theme: {
       name: 'Outer Rim', base: 'slate',
       colors: {
-        'bg': '#04060a', 'bg-sidebar': '#070a12', 'bg-raised': '#101624', 'bg-card': '#111828',
-        'bg-hover': '#1a2436', 'bg-input': '#0b111d', 'bg-code': '#030509', 'bg-code-inline': '#131c2e',
-        'border': '#263450', 'border-soft': '#1a2438',
-        'text': '#e6edf7', 'text-dim': '#9fb0c8', 'text-faint': '#66788f',
+        'bg': '#0a1220', 'bg-sidebar': '#0d1626', 'bg-raised': '#182338', 'bg-card': '#19253c',
+        'bg-hover': '#22304a', 'bg-input': '#111c2e', 'bg-code': '#081020', 'bg-code-inline': '#1c2942',
+        'border': '#2e4060', 'border-soft': '#213048',
+        'text': '#e8eef8', 'text-dim': '#a4b4cc', 'text-faint': '#6d7f99',
         'accent': '#f5d94a', 'accent-deep': '#cbb02f', 'accent-dim': '#8a7a24', 'on-accent': '#1a1400',
         'green': '#6fdc8c', 'yellow': '#ffd93b', 'red': '#ff5449',
         'scrollbar': '#24304a',
@@ -118,7 +131,7 @@ const SEEDS = [
       layout: { chatWidth: 'normal', sidebar: 'left', radius: 'soft', bubbles: 'bubbles' },
       effects: {
         glass: 'frosted', glassBlur: 16, glassOpacity: 0.55, glow: true, anim: 'full',
-        bg: 'animated', bgA: '#02030a', bgB: '#0a1530', bgAngle: 155, uiScale: 1, font: 'default',
+        bg: 'animated', bgA: '#060b18', bgB: '#152448', bgAngle: 155, uiScale: 1, font: 'default',
       },
       css: OUTER_RIM_CSS,
     },
@@ -149,10 +162,14 @@ const SEEDS = [
 
 function seed() {
   const n = db.prepare('SELECT COUNT(*) AS n FROM community_themes').get().n;
-  if (n > 0) return;
-  const ins = db.prepare(`INSERT INTO community_themes (user_id, author, name, blurb, theme_json, downloads, created_at)
-                          VALUES (NULL, ?, ?, ?, ?, ?, unixepoch() - ? * 86400)`);
-  for (const s of SEEDS) ins.run(s.author, s.name, s.blurb, JSON.stringify(s.theme), s.downloads, s.days_ago);
+  if (n === 0) {
+    const ins = db.prepare(`INSERT INTO community_themes (user_id, author, name, blurb, theme_json, downloads, created_at)
+                            VALUES (NULL, ?, ?, ?, ?, ?, unixepoch() - ? * 86400)`);
+    for (const s of SEEDS) ins.run(s.author, s.name, s.blurb, JSON.stringify(s.theme), s.downloads, s.days_ago);
+  }
+  // keep the built-in seeds current across releases (user themes untouched)
+  const upd = db.prepare('UPDATE community_themes SET blurb = ?, theme_json = ? WHERE user_id IS NULL AND name = ?');
+  for (const s of SEEDS) upd.run(s.blurb, JSON.stringify(s.theme), s.name);
 }
 seed();
 
