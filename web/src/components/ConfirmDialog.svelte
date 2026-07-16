@@ -50,16 +50,14 @@
     padding: 20px;
     padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
       max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
-    background: rgba(8, 7, 6, 0.62);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    background: rgba(8, 7, 6, 0.55);
   }
   .card {
-    width: min(400px, 100%);
+    width: min(380px, 100%);
     background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: calc(16px * var(--rf));
-    padding: 22px 22px 18px;
+    border-radius: calc(12px * var(--rf));
+    padding: 18px 18px 14px;
     box-shadow: var(--shadow-lg);
   }
   h2 {
@@ -78,14 +76,14 @@
     font-size: 13.5px; font-weight: 500;
   }
   .confirm {
-    padding: 8px 18px; border-radius: calc(10px * var(--rf));
-    font-size: 13.5px; font-weight: 600;
-    background: var(--text); color: var(--bg); border: none;
-    transition: background 140ms ease, transform 100ms ease, opacity 140ms ease;
+    padding: 7px 14px; border-radius: calc(8px * var(--rf));
+    font-size: 13px; font-weight: 500;
+    background: var(--bg-raised); color: var(--text); border: 1px solid var(--border);
+    transition: background 120ms ease, border-color 120ms ease;
   }
-  .confirm:hover { opacity: 0.92; }
+  .confirm:hover { background: var(--bg-hover); }
   .confirm.danger {
-    background: var(--red); color: #fff;
+    background: var(--red); color: #fff; border-color: transparent;
   }
-  .confirm.danger:hover { filter: brightness(1.08); opacity: 1; }
+  .confirm.danger:hover { filter: brightness(1.05); }
 </style>

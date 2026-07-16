@@ -265,7 +265,7 @@
   aside {
     width: 268px; flex-shrink: 0; height: 100%; overflow: hidden;
     background: var(--bg-sidebar); border-right: 1px solid var(--border-soft);
-    transition: width 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition: width 220ms ease;
     z-index: 30;
   }
   aside.collapsed { width: 0; border-right-color: transparent; }
@@ -294,17 +294,12 @@
     transition: background 160ms ease;
   }
   .brand-btn:hover { background: var(--bg-hover); }
-  .brand-btn:hover .mark {
-    border-color: color-mix(in srgb, var(--accent-dim) 50%, var(--border-soft));
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
-  }
   .bname { flex: 1; min-width: 0; text-align: left; }
   .mark {
     display: grid; place-items: center;
     width: 30px; height: 30px; border-radius: calc(9px * var(--rf));
     background: var(--bg-raised); border: 1px solid var(--border-soft);
     flex-shrink: 0;
-    transition: border-color 180ms ease, box-shadow 180ms ease;
   }
   .collapse-d {
     display: grid; place-items: center;
@@ -323,7 +318,7 @@
     padding: 9px 13px; font-size: 13.5px; font-weight: 500;
     background: var(--bg-raised); box-sizing: border-box;
   }
-  .new :global(svg) { color: var(--accent); flex-shrink: 0; }
+  .new :global(svg) { color: var(--text-dim); flex-shrink: 0; }
   .search {
     display: flex; align-items: center; gap: 8px;
     padding: 0 11px; border-radius: calc(10px * var(--rf));
@@ -353,16 +348,12 @@
     padding: 7px 8px 7px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer;
     color: var(--text-dim); font-size: 13.5px;
     text-decoration: none; min-width: 0;
-    transition: background 160ms cubic-bezier(0.22, 1, 0.36, 1), color 160ms ease,
-                transform 140ms ease;
+    transition: background 110ms ease, color 110ms ease;
   }
   .item:hover { background: var(--bg-hover); color: var(--text); }
-  .item.active {
-    background: var(--bg-raised); color: var(--text);
-    box-shadow: inset 2px 0 0 var(--accent);
-  }
+  .item.active { background: var(--bg-raised); color: var(--text); }
   .ci { display: grid; place-items: center; color: var(--text-faint); flex-shrink: 0; }
-  .item.active .ci { color: var(--accent); }
+  .item.active .ci { color: var(--text-dim); }
   .title {
     flex: 1 1 auto; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -401,19 +392,16 @@
     text-decoration: none; box-sizing: border-box;
     font-size: 12px; font-weight: 500; color: var(--text-dim);
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    transition: background 160ms ease, border-color 160ms ease, color 160ms ease,
-                transform 140ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
   }
-  .page:hover { background: var(--bg-hover); color: var(--text); transform: translateY(-1px); }
-  .page:active { transform: none; }
-  .page.active { color: var(--text); border-color: var(--accent-dim); }
-  .page :global(svg) { color: var(--accent); flex-shrink: 0; }
+  .page:hover { background: var(--bg-hover); color: var(--text); }
+  .page.active { color: var(--text); border-color: var(--border); background: var(--bg-card); }
+  .page :global(svg) { color: var(--text-faint); flex-shrink: 0; }
+  .page.active :global(svg) { color: var(--text-dim); }
 
   .bottom {
     padding: 11px 14px;
-    /* double rule so user zone is distinct from Files/Stats */
     border-top: 1px solid var(--border-soft);
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--border) 55%, transparent);
     display: flex; align-items: center; gap: 10px;
     flex-shrink: 0; min-width: 0;
   }

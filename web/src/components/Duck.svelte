@@ -160,7 +160,7 @@
 <style>
   .duck { display: inline-block; line-height: 0; transform-origin: 50% 80%; }
   .duck.interactive { cursor: pointer; }
-  .duck.interactive:hover { filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 45%, transparent)); }
+  .duck.interactive:hover { opacity: 0.92; }
   .bob, .duck.think, .duck.thinkhard, .duck.image, .duck.talk,
   .duck.stretch, .duck.preen, .duck.quack, .duck.wave, .duck.nom,
   .duck.happy { animation: bob 2.6s ease-in-out infinite; }

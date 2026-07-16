@@ -1191,13 +1191,10 @@
     border: 1px solid var(--border);
     border-radius: calc(18px * var(--rf));
     padding: 10px 10px 8px 16px;
-    transition: border-color 220ms cubic-bezier(0.22, 1, 0.36, 1),
-                box-shadow 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition: border-color 150ms ease;
   }
   .composer:focus-within {
-    border-color: var(--accent-dim);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
-                0 8px 28px color-mix(in srgb, var(--accent) 6%, transparent);
+    border-color: var(--border);
   }
   .composer textarea {
     resize: none; max-height: 200px;
@@ -1244,15 +1241,12 @@
     background: var(--bg-hover); border: none;
     color: var(--text-dim);
     opacity: 0.6;
-    transition: background 180ms cubic-bezier(0.22, 1, 0.36, 1),
-                opacity 180ms ease, transform 140ms ease, box-shadow 180ms ease;
+    transition: background 130ms ease, opacity 130ms ease;
   }
   .send.ready {
     background: var(--accent); color: #16110a; opacity: 1;
-    box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 35%, transparent);
   }
-  .send.ready:hover { transform: scale(1.05); }
-  .send.ready:active { transform: scale(0.96); }
+  .send.ready:hover { background: var(--accent-deep); }
   .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; }
   .imgjob {
     margin: 14px 0 8px 42px;
@@ -1263,7 +1257,6 @@
     object-fit: contain; background: #0a0a0c;
     border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
-    box-shadow: 0 8px 32px color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .imgshimmer {
     width: min(320px, 100%); height: min(320px, 70vw); max-width: 100%;
@@ -1348,19 +1341,15 @@
     padding: 8px 14px; border-radius: 999px;
     font-size: 13px; line-height: 1.35; color: var(--text-dim);
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    transition: background 180ms cubic-bezier(0.22, 1, 0.36, 1),
-                border-color 180ms ease, color 160ms ease,
-                transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
-                box-shadow 180ms ease;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
     word-break: break-word;
   }
   .fup:hover {
-    color: var(--text); border-color: var(--accent-dim);
-    background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
-    transform: translateY(-1px);
-    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--text);
+    border-color: var(--border);
+    background: var(--bg-hover);
   }
-  .fup:active { transform: scale(0.98); }
+  .fup:active { background: var(--bg-card); }
   .fup-skel {
     font-size: 12px; color: var(--text-faint); padding: 6px 2px;
   }
@@ -1396,7 +1385,7 @@
       box-sizing: border-box;
     }
     .composer:focus-within {
-      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+      border-color: var(--border);
     }
     .composer textarea {
       max-height: 120px;

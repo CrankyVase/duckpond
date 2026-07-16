@@ -215,15 +215,10 @@
   .railtxt { writing-mode: vertical-rl; font-size: 11px; letter-spacing: 0.08em; }
 
   .panel {
-    width: 232px; flex-shrink: 0; margin: 10px 10px 10px 0;
+    width: 220px; flex-shrink: 0; margin: 10px 10px 10px 0;
     border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     background: var(--bg-sidebar);
     display: flex; flex-direction: column; min-height: 0; max-height: calc(100% - 20px);
-    animation: treeIn 280ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-  @keyframes treeIn {
-    from { opacity: 0; transform: translateX(8px); }
-    to { opacity: 1; transform: none; }
   }
   @media (max-width: 768px) {
     .rail {
@@ -256,22 +251,16 @@
   .hbtn:hover { color: var(--text); background: var(--bg-hover); }
   .hbtn.dim { opacity: 0.35; }
 
-  .tree { overflow-y: auto; flex: 1; padding: 6px 0; scrollbar-color: color-mix(in srgb, var(--accent) 35%, transparent) transparent; }
+  .tree { overflow-y: auto; flex: 1; padding: 4px 0; }
   .rowwrap { display: flex; align-items: center; gap: 2px; padding-right: 4px; }
   .row {
     all: unset; box-sizing: border-box; flex: 1; min-width: 0; cursor: pointer;
     display: flex; align-items: center; gap: 6px;
-    padding-top: 4px; padding-bottom: 4px; padding-right: 4px;
+    padding-top: 3.5px; padding-bottom: 3.5px; padding-right: 4px;
     font-size: 12px; color: var(--text-dim);
-    border-radius: 6px;
-    transition: background 140ms ease, color 140ms ease;
   }
   .row:hover { background: var(--bg-hover); color: var(--text); }
-  .row.dir {
-    cursor: default; color: var(--text-faint); width: 100%;
-    font-weight: 500; letter-spacing: 0.01em;
-  }
-  .row.dir :global(svg) { color: var(--accent); opacity: 0.75; }
+  .row.dir { cursor: default; color: var(--text-faint); width: 100%; }
   .pv {
     all: unset; cursor: pointer; flex-shrink: 0;
     display: grid; place-items: center; width: 20px; height: 20px;

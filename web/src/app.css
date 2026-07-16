@@ -327,52 +327,17 @@ input[type='range']::-moz-range-thumb {
 html[data-fontsize='small'] .md, html[data-fontsize='small'] .ububble { font-size: 14px; }
 html[data-fontsize='large'] .md, html[data-fontsize='large'] .ububble { font-size: 16px; }
 
-/* ========== motion tokens (premium, quiet) ========== */
-:root {
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-soft: cubic-bezier(0.25, 1, 0.35, 1);
-  --dur-fast: 140ms;
-  --dur: 220ms;
-  --dur-slow: 360ms;
-}
-
+/* ========== motion (quiet — no neon, no bounce) ========== */
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-@keyframes slideUpSoft {
-  from { opacity: 0; transform: translateY(12px) scale(0.985); }
-  to { opacity: 1; transform: none; }
-}
-@keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.96); }
-  to { opacity: 1; transform: none; }
-}
-.fade-in { animation: fadeIn var(--dur) var(--ease-soft); }
-.slide-up { animation: slideUp var(--dur-slow) var(--ease-out); }
-.slide-up-soft { animation: slideUpSoft 320ms var(--ease-out); }
-.scale-in { animation: scaleIn 260ms var(--ease-out); }
-
-/* soft view / panel enter */
-.panel-enter {
-  animation: slideUpSoft 380ms var(--ease-out);
-}
-
-/* interactive polish defaults */
-a, .item, .page, .chip, .card, .fup {
-  transition:
-    background var(--dur-fast) ease,
-    border-color var(--dur-fast) ease,
-    color var(--dur-fast) ease,
-    transform var(--dur-fast) var(--ease-out),
-    opacity var(--dur-fast) ease,
-    box-shadow var(--dur) ease;
-}
+@keyframes slideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.fade-in { animation: fadeIn 160ms ease; }
+.slide-up { animation: slideUp 200ms ease; }
+.slide-up-soft { animation: slideUp 200ms ease; }
+.panel-enter { animation: fadeIn 140ms ease; }
 
 @media (prefers-reduced-motion: reduce) {
-  .fade-in, .slide-up, .slide-up-soft, .scale-in, .panel-enter {
+  .fade-in, .slide-up, .slide-up-soft, .panel-enter {
     animation: none !important;
-  }
-  a, .item, .page, .chip, .card, .fup {
-    transition: none !important;
   }
 }
 

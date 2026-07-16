@@ -537,13 +537,7 @@
     padding-bottom: max(48px, calc(24px + env(safe-area-inset-bottom)));
     box-sizing: border-box;
   }
-  .list .row {
-    animation: fileIn 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  }
-  @keyframes fileIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: none; }
-  }
+
   .head {
     display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
     margin-bottom: 16px;
@@ -580,11 +574,10 @@
     padding: 7px 12px; font-size: 12.5px; font-weight: 500;
     border-radius: 999px; background: var(--bg-raised); border: 1px solid var(--border-soft);
     color: var(--text-dim);
-    transition: background 160ms ease, border-color 160ms ease, color 160ms ease,
-                transform 140ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
   }
-  .tabs button:hover { transform: translateY(-1px); color: var(--text); }
-  .tabs button.on { color: var(--text); border-color: var(--accent-dim); background: var(--bg-card); }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on { color: var(--text); border-color: var(--border); background: var(--bg-card); }
   .tabs em {
     font-style: normal; font-family: var(--mono); font-size: 11px;
     color: var(--text-faint); padding: 1px 6px; border-radius: 999px; background: var(--bg-input);
@@ -690,8 +683,7 @@
     position: relative;
   }
   .preview-pane.busy .preview-frame {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: var(--border);
   }
   .preview-frame img {
     width: 100%; height: 100%;

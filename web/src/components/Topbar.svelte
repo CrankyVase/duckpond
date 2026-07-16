@@ -54,9 +54,7 @@
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border-soft);
-    background: color-mix(in srgb, var(--bg) 92%, transparent);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: var(--bg);
     flex-shrink: 0;
     min-width: 0;
     width: 100%;
