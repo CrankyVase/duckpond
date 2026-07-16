@@ -1,5 +1,6 @@
 <script>
   import Chat from './components/Chat.svelte';
+  import ConfirmDialog from './components/ConfirmDialog.svelte';
   import Duck from './components/Duck.svelte';
   import DuckGallery from './components/DuckGallery.svelte';
   import FilesPanel from './components/FilesPanel.svelte';
@@ -214,7 +215,21 @@
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newConversation(); }
     if (e.key === 'Escape' && app.settingsOpen) app.settingsOpen = false;
     if (e.key === 'Escape' && app.themeStudioOpen) app.themeStudioOpen = false;
+    // phone: Escape / back also closes the nav drawer
+    if (e.key === 'Escape' && !app.settingsOpen && !app.themeStudioOpen
+        && !app.sidebarCollapsed && window.matchMedia('(max-width: 768px)').matches) {
+      app.sidebarCollapsed = true;
+    }
   }
+
+  // lock background scroll while the mobile drawer is open
+  $effect(() => {
+    if (typeof document === 'undefined') return;
+    const mobile = window.matchMedia('(max-width: 768px)').matches;
+    const open = mobile && !app.sidebarCollapsed && !!app.user;
+    document.body.classList.toggle('dp-drawer-open', open);
+    return () => document.body.classList.remove('dp-drawer-open');
+  });
 </script>
 
 <svelte:window onkeydown={shortcuts} />
@@ -234,38 +249,72 @@
     <Sidebar />
     <main>
       <Topbar />
-      {#if ducklab}
-        <DuckGallery />
-      {:else if app.view === 'stats'}
-        <StatsPanel />
-      {:else if app.view === 'speech'}
-        <SpeechPanel />
-      {:else if app.view === 'files'}
-        <FilesPanel />
-      {:else}
-        <Chat />
-      {/if}
+      {#key app.view}
+        {#if app.view === 'stats'}
+          <div class="panel-enter view-panel"><StatsPanel /></div>
+        {:else if app.view === 'speech'}
+          <div class="panel-enter view-panel"><SpeechPanel /></div>
+        {:else if app.view === 'files'}
+          <div class="panel-enter view-panel"><FilesPanel /></div>
+        {:else}
+          <div class="view-panel"><Chat /></div>
+        {/if}
+      {/key}
     </main>
     <SettingsPanel />
     <ThemeStudio />
   </div>
 {/if}
 <Toast />
+<ConfirmDialog />
 
 <style>
   .boot { height: 100%; height: 100dvh; display: grid; place-items: center; }
   .pulse { animation: pulse 1.2s ease infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .layout {
-    display: flex; height: 100%; height: 100dvh;
-    min-height: 0; overflow: hidden;
+    display: flex;
+    height: 100%;
+    height: 100dvh;
+    width: 100%;
+    max-width: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
   }
   :global(html[data-sidebar='right']) .layout { flex-direction: row-reverse; }
   main {
-    flex: 1; display: flex; flex-direction: column;
-    min-width: 0; min-height: 0; overflow: hidden;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden;
+    position: relative;
+  }
+  .view-panel {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
   @media (max-width: 768px) {
-    .layout { position: relative; }
+    .layout {
+      position: relative;
+      /* sole full-screen shell — no double safe-area */
+      height: 100%;
+      height: 100dvh;
+      width: 100%;
+      max-width: 100vw;
+    }
+    main {
+      flex: 1 1 100%;
+      width: 100%;
+      max-width: 100%;
+    }
   }
 </style>

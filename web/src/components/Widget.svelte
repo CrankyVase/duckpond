@@ -115,6 +115,12 @@
   .wcard:hover .dl { opacity: 1; }
   .dl:hover { background: var(--bg-hover); color: var(--text); }
   .dl:disabled { opacity: 0.4; }
+  @media (max-width: 768px) {
+    .wcard { width: 100%; max-width: 100%; }
+    .dl {
+      opacity: 0.85; width: 34px; height: 34px; top: -8px; right: -6px;
+    }
+  }
   .wunknown {
     margin: 10px 0; padding: 8px 12px; font-size: 12px; color: var(--text-faint);
     border: 1px dashed var(--border); border-radius: calc(10px * var(--rf));

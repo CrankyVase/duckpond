@@ -2,6 +2,7 @@
   // Files tab: generated images + studio, chat uploads, docs, AI exports,
   // project workspaces — delete anything, respect the 15 GB per-user cap.
   import { api, sse } from '../lib/api.js';
+  import { confirmDialog } from '../lib/confirm.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
@@ -178,7 +179,14 @@
   }
 
   async function remove(kind, id) {
-    if (!confirm('Delete this permanently?')) return;
+    const ok = await confirmDialog({
+      title: 'Delete this permanently?',
+      message: 'This action cannot be undone.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       if (kind === 'image') await api(`/api/images/${id}`, { method: 'DELETE' });
       else if (kind === 'upload') await api(`/api/uploads/${id}`, { method: 'DELETE' });
@@ -529,6 +537,7 @@
     padding-bottom: max(48px, calc(24px + env(safe-area-inset-bottom)));
     box-sizing: border-box;
   }
+
   .head {
     display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
     margin-bottom: 16px;
@@ -565,8 +574,10 @@
     padding: 7px 12px; font-size: 12.5px; font-weight: 500;
     border-radius: 999px; background: var(--bg-raised); border: 1px solid var(--border-soft);
     color: var(--text-dim);
+    transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
   }
-  .tabs button.on { color: var(--text); border-color: var(--accent-dim); background: var(--bg-card); }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on { color: var(--text); border-color: var(--border); background: var(--bg-card); }
   .tabs em {
     font-style: normal; font-family: var(--mono); font-size: 11px;
     color: var(--text-faint); padding: 1px 6px; border-radius: 999px; background: var(--bg-input);
@@ -672,8 +683,7 @@
     position: relative;
   }
   .preview-pane.busy .preview-frame {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: var(--border);
   }
   .preview-frame img {
     width: 100%; height: 100%;
@@ -793,15 +803,126 @@
   }
 
   @media (max-width: 768px) {
-    .files { padding: 14px 12px 32px; }
-    .head { flex-wrap: wrap; }
+    .files {
+      padding: 12px 12px 28px;
+      padding-bottom: max(28px, calc(14px + env(safe-area-inset-bottom)));
+      max-width: 100%;
+      width: 100%;
+      box-sizing: border-box;
+      overflow-x: hidden;
+    }
+    .head {
+      flex-wrap: nowrap;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .title {
+      flex: 1 1 auto;
+      min-width: 0;
+      gap: 10px;
+    }
     .title h1 { font-size: 18px; }
-    .title p { font-size: 12px; }
-    .tabs { gap: 4px; overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
-    .tabs button { flex-shrink: 0; padding: 8px 12px; min-height: 40px; }
-    .srow label { min-width: 0; flex: 1 1 40%; }
-    .srow input[type="number"] { width: 100%; max-width: 100px; }
-    .gallery { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
-    .preview-pane { width: 100%; max-width: 320px; }
+    .title p {
+      font-size: 12px;
+      line-height: 1.4;
+      /* allow multi-line instead of blowing layout */
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .refresh {
+      flex-shrink: 0;
+      min-width: 40px;
+      min-height: 40px;
+      align-self: flex-start;
+    }
+    .quota {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      padding: 10px 12px;
+    }
+    .qlbl {
+      white-space: normal;
+      font-size: 11px;
+      text-align: right;
+    }
+    .tabs {
+      gap: 6px;
+      overflow-x: auto;
+      flex-wrap: nowrap;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 4px;
+      margin-bottom: 14px;
+      scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tabs button {
+      flex-shrink: 0;
+      padding: 9px 12px;
+      min-height: 40px;
+      font-size: 12.5px;
+    }
+    .studio { padding: 12px; margin-bottom: 14px; }
+    .studio-grid { grid-template-columns: 1fr; gap: 12px; }
+    .studio-form textarea {
+      width: 100%;
+      box-sizing: border-box;
+      font-size: 16px;
+      min-height: 96px;
+    }
+    .srow {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+    }
+    .srow label,
+    .srow label.grow {
+      width: 100%;
+      min-width: 0;
+      flex: none;
+    }
+    .srow select,
+    .srow input[type="number"],
+    .srow input[type="text"] {
+      width: 100%;
+      max-width: 100%;
+      min-height: 44px;
+      font-size: 15px;
+      box-sizing: border-box;
+    }
+    /* long model ids: keep readable */
+    .srow select {
+      text-overflow: ellipsis;
+    }
+    .gallery {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .preview-pane {
+      width: 100%;
+      max-width: 100%;
+      justify-self: stretch;
+    }
+    .preview-frame {
+      width: 100%;
+      max-width: 100%;
+      height: min(280px, 70vw);
+    }
+    .row {
+      gap: 10px;
+      padding: 10px 0;
+    }
+    .name {
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+
+  @media (max-width: 380px) {
+    .gallery { grid-template-columns: 1fr; }
   }
 </style>

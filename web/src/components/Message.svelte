@@ -71,6 +71,12 @@
   });
   const sibIdx = $derived(siblings.findIndex((s) => s === msg.id));
   const hasBranches = $derived(siblings.length > 1);
+  const hasText = $derived(!!(msg.content ?? '').trim());
+  const hasThink = $derived(!!(msg.thinking ?? '').trim());
+  // No tokens yet — show a calm typing indicator instead of an empty bubble
+  const waiting = $derived(
+    streaming && !hasText && !hasThink && !search?.active
+  );
 
   // keep the live thinking view pinned to its newest line
   $effect(() => {
@@ -137,7 +143,7 @@
     {/if}
   </div>
 {:else}
-  <div class="arow fade-in" class:pinned={msg.pinned}>
+  <div class="arow fade-in" class:pinned={msg.pinned} class:live={streaming}>
     <div class="avatar"><Duck px={0.8} mood={streaming ? mood : 'idle'} /></div>
     <div class="abody">
       {#if search}
@@ -149,7 +155,7 @@
             <span class="tspin"><LoaderCircle size={13} /></span>
             <span class="shimmer">Thinking…</span>
           </div>
-          <div class="tbody live" bind:this={thinkEl}>{msg.thinking}</div>
+          <div class="tbody live" bind:this={thinkEl}>{msg.thinking}<span class="cursor think" aria-hidden="true"></span></div>
         {:else}
           <button class="tbar" class:open={showThinking} onclick={() => (showThinking = !showThinking)}>
             <Brain size={13} />
@@ -171,8 +177,12 @@
           The model spent its whole reply thinking and never answered — its thoughts are above.
           Try regenerating, or set reasoning to <b>off</b> (lightbulb below).
         </div>
+      {:else if waiting}
+        <div class="typing" aria-label="Generating reply" aria-live="polite">
+          <span></span><span></span><span></span>
+        </div>
       {:else}
-        <div class="md" use:mdEnhance={{ sources: citeSources }}>
+        <div class="md" class:streaming use:mdEnhance={{ sources: citeSources }}>
           {#each segments as seg, i (i)}
             {#if seg.kind === 'widgets'}
               <div class="wgroup">{#each seg.widgets as w (w.id)}<Widget widget={w} />{/each}</div>
@@ -180,10 +190,10 @@
               {@html renderBlock(seg.block)}
             {/if}
           {/each}
-          {#if streaming}<span class="cursor"></span>{/if}
+          {#if streaming && hasText}<span class="cursor" aria-hidden="true"></span>{/if}
         </div>
         {#if streaming && msg.widgets?.length}
-          <div class="wgroup">{#each msg.widgets as w (w.id)}<Widget widget={w} />{/each}</div>
+          <div class="wgroup stream-in">{#each msg.widgets as w (w.id)}<Widget widget={w} />{/each}</div>
         {/if}
       {/if}
 
@@ -225,7 +235,8 @@
   .ububble {
     max-width: 68%;
     background: var(--bg-card);
-    border: 1px solid var(--border-soft);
+    /* warm edge — defined, not glowing */
+    border: 1px solid color-mix(in srgb, var(--accent-dim) 22%, var(--border-soft));
     border-radius: calc(16px * var(--rf)) calc(16px * var(--rf)) calc(5px * var(--rf)) calc(16px * var(--rf));
     padding: 10px 16px;
     white-space: pre-wrap;
@@ -299,12 +310,76 @@
   }
   .nocontent b { color: var(--accent); font-weight: 500; }
 
-  .cursor {
-    display: inline-block; width: 7px; height: 15px; vertical-align: -2px;
-    background: var(--accent); border-radius: 2px; margin-left: 2px;
-    animation: blink 1s steps(2) infinite;
+  /* live reply polish */
+  .arow.live .avatar {
+    border-color: color-mix(in srgb, var(--accent-dim) 30%, var(--border-soft));
+    transition: border-color 200ms ease;
   }
-  @keyframes blink { 50% { opacity: 0; } }
+
+  /* soft caret while tokens arrive */
+  .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1.05em;
+    margin-left: 2px;
+    vertical-align: -0.15em;
+    background: var(--text-dim);
+    border-radius: 1px;
+    animation: caret 1.05s ease-in-out infinite;
+  }
+  .cursor.think {
+    height: 0.95em;
+    vertical-align: -0.1em;
+    background: var(--text-faint);
+  }
+  @keyframes caret {
+    0%, 42% { opacity: 1; }
+    50%, 100% { opacity: 0.12; }
+  }
+
+  /* waiting for first token */
+  .typing {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 10px 4px 6px;
+    min-height: 28px;
+  }
+  .typing span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    animation: typeDot 1.15s ease-in-out infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.14s; }
+  .typing span:nth-child(3) { animation-delay: 0.28s; }
+  @keyframes typeDot {
+    0%, 70%, 100% {
+      transform: translateY(0);
+      opacity: 0.35;
+    }
+    35% {
+      transform: translateY(-3px);
+      opacity: 0.95;
+    }
+  }
+
+  .stream-in {
+    animation: streamIn 220ms ease;
+  }
+  @keyframes streamIn {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cursor, .typing span, .stream-in, .tspin {
+      animation: none !important;
+    }
+    .cursor { opacity: 0.7; }
+    .typing span { opacity: 0.6; }
+  }
 
   /* ---------- shared action row ---------- */
   .actions {
@@ -371,14 +446,61 @@
   .compaction summary { cursor: pointer; color: var(--text-faint); font-size: 12px; }
 
   @media (max-width: 768px) {
-    .ububble { max-width: 92%; padding: 10px 12px; font-size: 14.5px; }
-    .arow { gap: 8px; margin: 14px 0 4px; }
+    .ububble {
+      max-width: min(94%, 100%);
+      padding: 10px 12px;
+      font-size: 15px;
+    }
+    .arow {
+      gap: 8px;
+      margin: 12px 0 2px;
+      max-width: 100%;
+    }
     .avatar { width: 26px; height: 26px; }
-    /* always show actions on touch (no hover) */
-    .actions { opacity: 0.9; }
-    .ic { width: 34px; height: 32px; }
-    .tbody { max-height: 220px; font-size: 12px; }
-    .wgroup { gap: 8px; }
-    .wgroup > :global(*) { max-width: 100% !important; }
+    .abody { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+    /* always show actions on touch (no hover) — keep compact so they don't wrap messily */
+    .actions {
+      opacity: 1;
+      margin-top: 6px;
+      gap: 2px;
+      flex-wrap: wrap;
+      row-gap: 2px;
+    }
+    .ic {
+      width: 36px;
+      height: 34px;
+      border-radius: calc(8px * var(--rf));
+    }
+    .ic:active { background: var(--bg-hover); }
+    .stat { font-size: 10.5px; margin-left: 4px; }
+    .tbody { max-height: 180px; font-size: 12.5px; }
+    .wgroup {
+      gap: 8px;
+      max-width: 100%;
+    }
+    .wgroup > :global(*) {
+      max-width: 100% !important;
+      width: 100% !important;
+      min-width: 0;
+    }
+    .editbox { width: 100%; max-width: 100%; }
+    .edit-actions { flex-wrap: wrap; }
+    .edit-actions .hint { width: 100%; }
+    .abody :global(.md) { max-width: 100%; }
+    .abody :global(.md pre) {
+      font-size: 12px;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+    .abody :global(.md table) {
+      display: block;
+      overflow-x: auto;
+      max-width: 100%;
+    }
+    .abody :global(.citepill) { padding: 3px 8px; font-size: 12px; }
+  }
+  @media (max-width: 420px) {
+    .avatar { display: none; }
+    .arow { gap: 0; }
   }
 </style>

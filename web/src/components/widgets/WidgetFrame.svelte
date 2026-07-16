@@ -21,7 +21,7 @@
 
 <style>
   .wframe {
-    margin: 10px 0; max-width: 460px;
+    margin: 10px 0; max-width: min(460px, 100%);
     border: 1px solid var(--border-soft); border-radius: 14px;
     background: var(--bg-card); overflow: hidden;
   }

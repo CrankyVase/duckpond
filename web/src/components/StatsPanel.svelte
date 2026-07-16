@@ -119,12 +119,6 @@
     padding: 24px 28px 40px;
     padding-bottom: max(40px, calc(24px + env(safe-area-inset-bottom)));
   }
-  @media (max-width: 768px) {
-    .stats { padding: 14px 12px 32px; }
-    .totals { flex-direction: column; gap: 8px; }
-    .barrow { grid-template-columns: 1fr; gap: 4px; }
-    .cardval { font-size: 22px; }
-  }
   .mono { font-family: var(--mono); }
   .empty { color: var(--text-faint); font-size: 13px; padding: 40px 0; text-align: center; }
   .shimmer {
@@ -165,4 +159,48 @@
   th { color: var(--text-faint); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--border-soft); }
   tbody tr:not(:last-child) td { border-bottom: 1px solid var(--border-soft); }
   tbody tr:hover { background: var(--bg-hover); }
+
+  /* mobile last so it wins over the base grid above */
+  @media (max-width: 768px) {
+    .stats {
+      padding: 12px 12px max(28px, calc(14px + env(safe-area-inset-bottom)));
+      width: 100%; max-width: 100%; box-sizing: border-box; overflow-x: hidden;
+    }
+    .totals {
+      display: grid !important;
+      grid-template-columns: 1fr !important;
+      gap: 8px !important;
+      margin-bottom: 18px;
+    }
+    .card { padding: 14px 16px; min-width: 0; }
+    .cardval { font-size: 24px; }
+    .barrow {
+      display: grid !important;
+      grid-template-columns: 1fr auto !important;
+      gap: 4px 8px !important;
+    }
+    .barlabel { grid-column: 1 / -1; font-size: 12px; max-width: 100%; }
+    .barsvg { min-width: 0; width: 100%; }
+    .speedrow { grid-template-columns: 1fr !important; }
+    .speedbars {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-width: 0;
+    }
+    .tablewrap {
+      width: 100%; max-width: 100%;
+      overflow-x: auto; -webkit-overflow-scrolling: touch;
+      /* subtle cue that it scrolls sideways */
+      mask-image: linear-gradient(90deg, #000 92%, transparent);
+    }
+    table { width: max-content; min-width: 100%; font-size: 11px; }
+    th, td { padding: 8px 8px; }
+    /* long model ids wrap instead of forcing a huge min table width */
+    td.mono, th:first-child {
+      max-width: 140px;
+      white-space: normal;
+      word-break: break-all;
+      font-size: 10.5px;
+    }
+  }
 </style>

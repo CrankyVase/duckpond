@@ -4,6 +4,7 @@
   import {
     app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
+  import { confirmDialog } from '../lib/confirm.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import ChatFiles from './ChatFiles.svelte';
   import Message from './Message.svelte';
@@ -28,6 +29,10 @@
   let pendText = '';
   let pendThink = '';
   let toolBuf = null; // { index, name, args } — streaming tool-call arguments
+
+  // ----- follow-up prompt chips (messageId → string[]) -----
+  let followups = $state(null); // { messageId, items: string[], loading?: boolean } | null
+  let followupsConvId = null;
 
   // ----- message queue (send while AI is busy) -----
   let msgQueue = $state([]); // { id, content }[]
@@ -116,17 +121,22 @@
   }
   function onScroll() { atBottom = nearBottom(); }
 
-  // rAF-batched flush: SSE deltas accumulate in plain vars, one state write per frame.
+  // rAF-batched flush: SSE deltas accumulate in plain vars, one paint per frame.
+  // Keeps token arrival smooth even when the model dumps large chunks.
   function scheduleFlush() {
     if (raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;
       if (!app.streaming) return;
       const stick = prefs.autoScroll && nearBottom();
+      // Drain whatever arrived this frame in one write so the DOM isn't thrashing
       if (pendText) { app.streaming.text += pendText; pendText = ''; }
       if (pendThink) { app.streaming.thinking += pendThink; pendThink = ''; }
       if (toolBuf) app.streaming.liveTool = parseLiveTool(toolBuf);
-      if (stick) scrollToBottom(true);
+      if (stick) {
+        // next frame: scroll after layout so the caret stays in view without jump
+        requestAnimationFrame(() => scrollToBottom(true));
+      }
     });
   }
 
@@ -219,9 +229,22 @@
           app.conv.messages.push(ev.msg);
           app.conv.active_leaf_id = ev.msg.id;
           if (ev.msg.run_id) app.filesVersion++;
+          // chips load after the model finishes a second cheap pass
+          followups = { messageId: ev.msg.id, items: [], loading: true };
+          followupsConvId = convId;
           scrollToBottom();
         }
         app.streaming = null;
+        break;
+      case 'followups':
+        // short clickable next-messages under the just-finished reply
+        if (here && ev.messageId && Array.isArray(ev.items) && ev.items.length) {
+          followups = { messageId: ev.messageId, items: ev.items.slice(0, 3), loading: false };
+          followupsConvId = convId;
+          scrollToBottom();
+        } else if (here && followups?.loading && followups.messageId === ev.messageId) {
+          followups = null; // model returned nothing useful
+        }
         break;
       case 'image_job':
         if (s) { s.loading = false; s.image = { prompt: ev.prompt, phase: 'starting', step: null, steps: null, preview: null }; }
@@ -626,8 +649,28 @@
     if (!msgQueue.length) return;
     const next = msgQueue[0];
     msgQueue = msgQueue.slice(1);
+    followups = null; // a queued message is the next turn — hide chips
     run({ content: next.content });
   }
+
+  // Clear follow-up chips when leaving a chat or starting a new one
+  $effect(() => {
+    const id = app.conv?.id;
+    if (id !== followupsConvId) {
+      followups = null;
+      followupsConvId = id ?? null;
+    }
+  });
+
+  // Drop the "loading" skeleton if the stream ended without a followups event
+  $effect(() => {
+    if (!followups?.loading) return;
+    if (app.streaming) return;
+    const t = setTimeout(() => {
+      if (followups?.loading) followups = null;
+    }, 12_000);
+    return () => clearTimeout(t);
+  });
 
   function removeQueued(id) {
     msgQueue = msgQueue.filter((q) => q.id !== id);
@@ -652,6 +695,7 @@
     if (!content || !app.conv) return;
     input = '';
     if (inputEl) inputEl.style.height = 'auto';
+    followups = null;
     pushHistory(content);
     if (app.streaming) {
       // queue while the model is working — grey chips under the live bubble
@@ -668,6 +712,7 @@
       input = prompt;
       inputEl?.focus();
     } else {
+      followups = null;
       pushHistory(prompt);
       if (app.streaming) {
         msgQueue = [...msgQueue, { id: `q-${Date.now()}`, content: prompt }];
@@ -675,6 +720,15 @@
         run({ content: prompt });
       }
     }
+  }
+
+  /** One-tap follow-up chip under the last assistant reply. */
+  function useFollowup(text) {
+    const t = String(text ?? '').trim();
+    if (!t || !app.conv || app.streaming) return;
+    followups = null;
+    pushHistory(t);
+    run({ content: t, parentId: realParentId() });
   }
 
   async function stop() {
@@ -798,7 +852,14 @@
       return;
     }
     const kids = kidsMap.get(msg.id)?.length ?? 0;
-    if (!confirm(kids ? 'Delete this message and everything after it?' : 'Delete this message?')) return;
+    const ok = await confirmDialog({
+      title: kids ? 'Delete this message and everything after it?' : 'Delete this message?',
+      message: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      danger: true,
+    });
+    if (!ok) return;
     await api(`/api/messages/${msg.id}`, { method: 'DELETE' });
     await openConversation(app.conv.id); // refetch: leaf may have retracted
   }
@@ -1000,6 +1061,20 @@
           </div>
         {/each}
       {/if}
+      {#if followups && !streamingHere && !msgQueue.length
+          && path.length && path[path.length - 1]?.id === followups.messageId}
+        <div class="followups fade-in" aria-label="Suggested follow-ups">
+          {#if followups.loading}
+            <span class="fup-skel shimmer">Suggesting follow-ups…</span>
+          {:else}
+            {#each followups.items as item (item)}
+              <button type="button" class="fup" onclick={() => useFollowup(item)} title="Send this follow-up">
+                {item}
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/if}
       <div class="pad"></div>
     </div>
   </div>
@@ -1031,8 +1106,8 @@
       {/if}
       <textarea rows="1"
         placeholder={busy
-          ? `Queue a follow-up for ${app.conv?.model_id ?? 'DuckPond'}…`
-          : `Message ${app.conv?.model_id ?? 'DuckPond'}…`}
+          ? 'Queue a follow-up…'
+          : 'Message DuckPond…'}
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
         disabled={!app.conv}></textarea>
       <div class="bar">
@@ -1067,7 +1142,6 @@
         </button>
       </div>
     </div>
-    <div class="finehint">Local models only — ↑/↓ for sent history · queue while it thinks · refresh keeps it going.</div>
   </div>
  </div>
  {#if app.conv?.workspace_id}
@@ -1122,9 +1196,15 @@
     border: 1px solid var(--border);
     border-radius: calc(18px * var(--rf));
     padding: 10px 10px 8px 16px;
-    transition: border-color 180ms ease, box-shadow 180ms ease;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
   }
-  .composer:focus-within { border-color: var(--accent-dim); }
+  /* Quiet highlight — warm edge, no glow bloom */
+  .composer:focus-within {
+    border-color: color-mix(in srgb, var(--accent-dim) 50%, var(--border));
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent-dim) 28%, transparent),
+      0 6px 20px rgba(0, 0, 0, 0.28);
+  }
   .composer textarea {
     resize: none; max-height: 200px;
     background: none; border: none; box-shadow: none; padding: 2px 0 6px;
@@ -1169,14 +1249,15 @@
     display: grid; place-items: center; flex-shrink: 0;
     background: var(--bg-hover); border: none;
     color: var(--text-dim);
-    opacity: 0.6; transition: background 150ms ease, opacity 150ms ease;
+    opacity: 0.6;
+    transition: background 130ms ease, opacity 130ms ease, box-shadow 130ms ease;
   }
-  .send.ready { background: var(--accent); color: #16110a; opacity: 1; }
-  .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; }
-  .finehint {
-    text-align: center; font-size: 11px; color: var(--text-faint);
-    padding-top: 7px; user-select: none;
+  .send.ready {
+    background: var(--accent); color: #16110a; opacity: 1;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   }
+  .send.ready:hover { background: var(--accent-deep); }
+  .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; box-shadow: none; }
   .imgjob {
     margin: 14px 0 8px 42px;
     display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
@@ -1186,7 +1267,6 @@
     object-fit: contain; background: #0a0a0c;
     border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
-    box-shadow: 0 8px 32px color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .imgshimmer {
     width: min(320px, 100%); height: min(320px, 70vw); max-width: 100%;
@@ -1259,17 +1339,111 @@
     padding: 0 6px; white-space: nowrap;
   }
 
+  /* clickable next-message chips under the last assistant reply */
+  .followups {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 6px 0 4px 42px;
+    max-width: calc(100% - 42px);
+  }
+  .fup {
+    all: unset; cursor: pointer; box-sizing: border-box;
+    max-width: 100%;
+    padding: 8px 14px; border-radius: 999px;
+    font-size: 13px; line-height: 1.35; color: var(--text-dim);
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    word-break: break-word;
+  }
+  .fup:hover {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent-dim) 40%, var(--border));
+    background: var(--bg-hover);
+  }
+  .fup:active { background: var(--bg-card); }
+  .fup-skel {
+    font-size: 12px; color: var(--text-faint); padding: 6px 2px;
+  }
+
   @media (max-width: 768px) {
-    .thread { padding: 12px 12px 0; }
-    .dock { padding: 4px 10px max(10px, env(safe-area-inset-bottom)); }
-    .agentwork, .imgjob, .diffjob, .status { margin-left: 0; padding-left: 0; }
-    .status { padding-left: 0; }
-    .finehint { display: none; }
-    .composer { border-radius: calc(14px * var(--rf)); padding: 8px 8px 6px 12px; }
-    .composer textarea { max-height: 140px; font-size: 16px; }
-    .tool { width: 36px; height: 34px; }
-    .send { width: 38px; height: 38px; }
-    .dname { max-width: 140px; }
+    .chat, .main {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+    }
+    .thread {
+      padding: 10px 12px 0;
+      max-width: 100%;
+      width: 100%;
+    }
+    .dock {
+      max-width: 100%;
+      width: 100%;
+      padding: 4px 10px max(8px, env(safe-area-inset-bottom));
+      box-sizing: border-box;
+    }
+    .agentwork, .imgjob, .diffjob, .status {
+      margin-left: 0;
+      margin-right: 0;
+      padding-left: 0;
+      max-width: 100%;
+    }
+    .status { font-size: 11.5px; flex-wrap: wrap; }
+    .composer {
+      border-radius: calc(16px * var(--rf));
+      padding: 10px 10px 8px 12px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .composer:focus-within {
+      border-color: color-mix(in srgb, var(--accent-dim) 45%, var(--border));
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--accent-dim) 22%, transparent),
+        0 4px 16px rgba(0, 0, 0, 0.28);
+    }
+    .composer textarea {
+      max-height: 120px;
+      font-size: 16px;
+      line-height: 1.45;
+      width: 100%;
+    }
+    .bar {
+      gap: 4px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      padding-bottom: 1px;
+      width: 100%;
+    }
+    .bar::-webkit-scrollbar { display: none; }
+    .tool { width: 40px; height: 40px; flex-shrink: 0; }
+    .tool:has(.rlbl) { min-height: 40px; }
+    .send { width: 42px; height: 42px; flex-shrink: 0; }
+    .dname { max-width: 120px; }
+    .tobottom { width: 40px; height: 40px; top: -50px; }
+    .followups {
+      margin: 8px 0 2px 0;
+      max-width: 100%;
+      gap: 8px;
+    }
+    .fup {
+      flex: 1 1 auto;
+      min-width: min(100%, 160px);
+      padding: 11px 14px;
+      font-size: 13.5px;
+      border-radius: calc(12px * var(--rf));
+      text-align: left;
+    }
+    .pad { height: 12px; }
+    .qmsg { margin-left: 0; }
+    .imgpreview, .imgshimmer { width: 100%; max-width: 100%; }
+    .diffjob { max-width: 100%; }
+    .diffcanvas { max-height: 240px; font-size: 12px; }
+  }
+  @media (max-width: 420px) {
+    .thread { padding: 8px 10px 0; }
+    .dock { padding: 4px 8px max(6px, env(safe-area-inset-bottom)); }
+    .fup { min-width: 100%; }
   }
   .bar .send + .send { margin-left: 4px; }
   .bar .send.stop { margin-right: 2px; }

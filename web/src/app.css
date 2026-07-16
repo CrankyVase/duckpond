@@ -39,9 +39,19 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; height: 100dvh; }
+html {
+  height: 100%;
+  height: 100dvh;
+  /* fill the visual viewport when the soft keyboard opens (Chrome/Android) */
+  /* stylelint-disable-next-line property-no-unknown */
+  interpolate-size: allow-keywords;
+}
 body {
   margin: 0;
+  height: 100%;
+  height: 100dvh;
+  width: 100%;
+  max-width: 100%;
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
@@ -50,18 +60,83 @@ body {
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  /* notch / home-indicator safe areas (iOS, modern Android) */
-  padding: env(safe-area-inset-top) env(safe-area-inset-right)
-           env(safe-area-inset-bottom) env(safe-area-inset-left);
+  /* Safe-area is applied on chrome (topbar/dock/sidebar), NOT here —
+     padding + 100dvh was shrinking/overflowing the whole app on phones. */
+  padding: 0;
+  overscroll-behavior: none;
+  touch-action: manipulation;
 }
-#app { height: 100%; height: 100dvh; }
+#app {
+  height: 100%;
+  height: 100dvh;
+  width: 100%;
+  max-width: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
 
-/* prevent iOS zoom-on-focus: inputs need ≥16px */
+/* drawer open on phone: no background scroll / accidental swipes */
+body.dp-drawer-open {
+  overflow: hidden;
+  touch-action: none;
+}
+
+/* ========== MOBILE FOUNDATION ==========
+   Theme Studio can set --chat-maxw to fixed px and --ui-scale via zoom.
+   Both break phones. Cap them hard here so every panel shares one layout. */
 @media (max-width: 768px) {
-  input, textarea, select { font-size: 16px !important; }
+  :root, html {
+    --chat-maxw: 100% !important;
+    --ui-scale: 1 !important;
+  }
+  html, body {
+    overflow-x: clip;
+    max-width: 100vw;
+  }
+  /* zoom + safe-area + fixed chat width = "nothing is sized right" */
+  body {
+    zoom: 1 !important;
+    font-size: 15px;
+  }
+  #app, .layout, main {
+    width: 100% !important;
+    max-width: 100vw !important;
+    min-width: 0 !important;
+    overflow-x: clip;
+  }
+
+  input, textarea, select { font-size: 16px !important; max-width: 100%; box-sizing: border-box; }
   button, a, [role='button'] { -webkit-tap-highlight-color: transparent; }
-  /* prefer taller touch targets without changing desktop */
-  .iconb, button.ghost.iconb { min-width: 40px; min-height: 40px; }
+  .iconb, button.ghost.iconb {
+    min-width: 40px; min-height: 40px;
+    padding: 8px;
+  }
+
+  /* markdown never blows past the viewport */
+  .md { overflow-wrap: anywhere; word-break: break-word; max-width: 100%; }
+  .md pre {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 32px 10px 12px;
+    border-radius: 10px;
+  }
+  .md pre code { font-size: 12.5px; }
+  .md table {
+    display: block; max-width: 100%;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  .md img { max-width: 100%; height: auto; }
+  .md h1 { font-size: 1.2em; }
+  .md h2 { font-size: 1.1em; }
+  .md h3 { font-size: 1.02em; }
+
+  /* anything with a long mono id */
+  .mono {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }
 
 ::selection { background: var(--accent-dim); color: var(--text); }
@@ -252,18 +327,30 @@ input[type='range']::-moz-range-thumb {
 html[data-fontsize='small'] .md, html[data-fontsize='small'] .ububble { font-size: 14px; }
 html[data-fontsize='large'] .md, html[data-fontsize='large'] .ububble { font-size: 16px; }
 
+/* ========== motion (quiet — no neon, no bounce) ========== */
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-.fade-in { animation: fadeIn 200ms ease; }
-.slide-up { animation: slideUp 240ms cubic-bezier(0.2, 0.8, 0.3, 1); }
+@keyframes slideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.fade-in { animation: fadeIn 160ms ease; }
+.slide-up { animation: slideUp 200ms ease; }
+.slide-up-soft { animation: slideUp 200ms ease; }
+.panel-enter { animation: fadeIn 140ms ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in, .slide-up, .slide-up-soft, .panel-enter {
+    animation: none !important;
+  }
+}
 
 /* =====================================================================
    Theme Studio effects layer. Everything below is driven by data-attrs
    set on <html> by applyTheme(); the app never references these directly.
    ===================================================================== */
 
-/* ---- UI scale ---- */
+/* ---- UI scale (desktop only — mobile forces zoom:1 in the media query above) ---- */
 body { zoom: var(--ui-scale); }
+@media (max-width: 768px) {
+  body { zoom: 1 !important; }
+}
 
 /* ---- background: gradient / animated ---- */
 html[data-bg='gradient'] body,

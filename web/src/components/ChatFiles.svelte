@@ -215,7 +215,7 @@
   .railtxt { writing-mode: vertical-rl; font-size: 11px; letter-spacing: 0.08em; }
 
   .panel {
-    width: 212px; flex-shrink: 0; margin: 10px 10px 10px 0;
+    width: 220px; flex-shrink: 0; margin: 10px 10px 10px 0;
     border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     background: var(--bg-sidebar);
     display: flex; flex-direction: column; min-height: 0; max-height: calc(100% - 20px);

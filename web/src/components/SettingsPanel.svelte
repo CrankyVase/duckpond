@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { confirmDialog } from '../lib/confirm.svelte.js';
   import { applyPrefs, prefs, resetPrefs, savePrefs } from '../lib/prefs.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
@@ -260,7 +261,14 @@
   }
 
   async function removeUser(u) {
-    if (!confirm(`Delete ${u.username} and all their chats?`)) return;
+    const ok = await confirmDialog({
+      title: `Delete ${u.username}?`,
+      message: 'This removes their account and all their chats permanently.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      danger: true,
+    });
+    if (!ok) return;
     await api(`/api/auth/users/${u.id}`, { method: 'DELETE' });
     toast(`Removed ${u.username}`, 'ok');
     loadAdmin();
@@ -661,20 +669,85 @@
     display: flex; flex-direction: column;
     background: var(--bg-sidebar); border-left: 1px solid var(--border);
     transform: translateX(102%);
-    transition: transform 260ms cubic-bezier(0.25, 1, 0.35, 1);
+    transition: transform 260ms cubic-bezier(0.25, 1, 0.35, 1), visibility 0s linear 260ms;
     box-shadow: var(--shadow-lg);
+    visibility: hidden;
+    pointer-events: none;
   }
-  .panel.open { transform: none; }
+  .panel.open {
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+    transition: transform 260ms cubic-bezier(0.25, 1, 0.35, 1), visibility 0s linear 0s;
+  }
   @media (max-width: 768px) {
     .panel {
-      width: 100%; max-width: 100vw;
+      width: 100%;
+      max-width: 100vw;
       border-left: none;
       padding-top: env(safe-area-inset-top);
-      padding-bottom: env(safe-area-inset-bottom);
+      /* foot handles bottom safe-area */
+      padding-bottom: 0;
     }
-    .body { padding: 6px 14px 24px; }
-    .row { flex-wrap: wrap; gap: 8px; }
-    .row select { max-width: 100%; width: 100%; }
+    .head {
+      padding: 12px 14px 10px;
+    }
+    .head h2 { font-size: 17px; }
+    .iconb { min-width: 40px; min-height: 40px; }
+    .body {
+      padding: 8px 14px 28px;
+      -webkit-overflow-scrolling: touch;
+    }
+    section { padding: 14px 0 16px; gap: 12px; }
+    .row {
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .rlabel { width: 100%; }
+    .row select,
+    .row input,
+    .row textarea {
+      max-width: 100%;
+      width: 100%;
+      font-size: 16px;
+      min-height: 44px;
+      box-sizing: border-box;
+    }
+    .srow input[type='range'] { width: 100%; }
+    .shead { font-size: 14px; }
+    .conn { flex-wrap: wrap; }
+    .wide { min-height: 44px; font-size: 14px; }
+    .foot {
+      gap: 8px;
+      padding: 10px 12px;
+      padding-bottom: max(10px, env(safe-area-inset-bottom));
+    }
+    .foot button {
+      min-height: 44px;
+      font-size: 13.5px;
+    }
+    .stitle {
+      flex-wrap: wrap;
+      gap: 6px;
+      row-gap: 4px;
+    }
+    .formodel {
+      max-width: 100%;
+      margin-left: 0;
+      width: 100%;
+      font-size: 11px;
+    }
+    .panel, .body, section, .row, .rlabel {
+      max-width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+    }
+    textarea {
+      max-width: 100%;
+      box-sizing: border-box;
+      resize: vertical;
+    }
   }
   .head {
     display: flex; align-items: center; justify-content: space-between;
@@ -694,7 +767,10 @@
     color: var(--text-faint);
   }
   .stitle :global(svg) { color: var(--accent); }
-  .formodel { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .formodel {
+    margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400;
+    max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .mono { font-family: var(--mono); }
   .hint { font-size: 12px; color: var(--text-faint); line-height: 1.5; }
   .hint b { color: var(--text-dim); font-weight: 500; }

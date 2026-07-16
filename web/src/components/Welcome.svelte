@@ -8,34 +8,42 @@
 
   let { onsuggest } = $props();
 
-  const cards = [
-    { icon: Brain, title: 'Explain transformers',
-      desc: 'How attention and LLMs actually work',
+  const chips = [
+    { icon: Brain, label: 'Explain transformers',
       prompt: 'Explain how transformer architectures work in simple terms.' },
-    { icon: Code, title: 'Write a script',
-      desc: 'Python GPU benchmark for ROCm',
+    { icon: Code, label: 'Write a script',
       prompt: 'Write a Python script to benchmark GPU performance with ROCm.' },
-    { icon: Boxes, title: 'Plan a voxel game',
-      desc: 'Browser Minecraft-style engine design',
+    { icon: Boxes, label: 'Plan a voxel game',
       prompt: 'Help me design a browser voxel game engine with Three.js — chunks, meshing, and picking.' },
-    { icon: FileText, title: 'Summarize text',
-      desc: 'Paste anything, get the short version',
+    { icon: FileText, label: 'Summarize text',
       prompt: 'Summarize the following text into a few bullet points:\n\n' },
   ];
 
   const hour = new Date().getHours();
-  const greeting = hour < 5 ? 'Up late' : hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const greeting =
+    hour < 5 ? 'Up late' :
+    hour < 12 ? 'Good morning' :
+    hour < 18 ? 'Good afternoon' :
+    'Good evening';
+
+  const name = $derived(app.user?.username || 'there');
 </script>
 
-<div class="welcome slide-up">
-  <div class="pond"><Duck px={2.5} mood="swim" interactive /></div>
-  <h2>{greeting}, {app.user?.username}</h2>
-  <p>Everything runs on your own hardware — nothing leaves the pond.</p>
-  <div class="cards">
-    {#each cards as c (c.title)}
-      <button class="card" onclick={() => onsuggest?.(c.prompt)}>
-        <span class="ct"><c.icon size={15} />{c.title}</span>
-        <span class="cd">{c.desc}</span>
+<div class="welcome">
+  <div class="pond">
+    <Duck px={2.5} mood="swim" interactive />
+  </div>
+  <h2>{greeting}, {name}</h2>
+  <div class="chips" role="list">
+    {#each chips as c (c.label)}
+      <button
+        type="button"
+        class="chip"
+        role="listitem"
+        onclick={() => onsuggest?.(c.prompt)}
+      >
+        <c.icon size={14} />
+        <span>{c.label}</span>
       </button>
     {/each}
   </div>
@@ -43,41 +51,61 @@
 
 <style>
   .welcome {
-    display: flex; flex-direction: column; align-items: center;
-    margin-top: 12vh; text-align: center; padding: 0 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: min(52vh, 460px);
+    text-align: center;
+    padding: 28px 16px 20px;
   }
-  @media (max-width: 768px) {
-    .welcome { margin-top: 6vh; padding: 0 12px 24px; }
-    h2 { font-size: 18px; }
-    p { font-size: 13px; margin-bottom: 20px; }
-    .cards { width: 100%; max-width: 420px; }
-    .card { width: 100%; box-sizing: border-box; }
-  }
+
   .pond {
     display: grid; place-items: center;
-    width: 96px; height: 96px; border-radius: 28px;
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    margin-bottom: 20px;
+    width: 80px; height: 80px; border-radius: 22px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-soft);
+    margin-bottom: 18px;
   }
-  h2 { margin: 0 0 6px; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
-  p { margin: 0 0 30px; color: var(--text-dim); font-size: 14px; }
-  .cards {
-    display: grid; grid-template-columns: repeat(2, minmax(200px, 250px));
-    gap: 10px;
+  h2 {
+    margin: 0 0 24px;
+    font-size: clamp(20px, 3.6vw, 24px);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--text);
   }
-  @media (max-width: 640px) { .cards { grid-template-columns: 1fr; } }
-  .card {
-    display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
-    text-align: left; padding: 14px 16px;
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    border-radius: calc(14px * var(--rf));
-    transition: border-color 150ms ease, background 150ms ease, transform 120ms ease;
+
+  .chips {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 8px;
+    max-width: 520px;
   }
-  .card:hover { border-color: var(--accent-dim); background: var(--bg-card); transform: translateY(-1px); }
-  .ct {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 13.5px; font-weight: 500;
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 8px 13px;
+    font-size: 13px; font-weight: 450; color: var(--text-dim);
+    background: var(--bg-raised);
+    border: 1px solid var(--border-soft);
+    border-radius: 999px;
+    transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
   }
-  .ct :global(svg) { color: var(--accent); }
-  .cd { font-size: 12px; color: var(--text-faint); }
+  .chip :global(svg) {
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .chip:hover {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent-dim) 40%, var(--border));
+    background: var(--bg-hover);
+  }
+  .chip:hover :global(svg) { color: var(--text-dim); }
+  .chip:active { background: var(--bg-card); }
+
+  @media (max-width: 768px) {
+    .welcome {
+      min-height: min(44vh, 360px);
+      padding: 18px 12px 14px;
+    }
+    .pond { width: 72px; height: 72px; border-radius: 18px; margin-bottom: 14px; }
+    h2 { font-size: 19px; margin-bottom: 18px; }
+    .chips { gap: 6px; max-width: 100%; }
+    .chip { padding: 8px 12px; font-size: 12.5px; }
+  }
 </style>
