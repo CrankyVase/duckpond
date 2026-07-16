@@ -957,6 +957,61 @@ async function runInlineSearch({
   return { text, reasoning: reasons.join('\n\n'), timings, usage, search: { steps, sources } };
 }
 
+// ---------- follow-up prompt chips (after a reply lands) ----------
+
+/** Ask the warm model for 3 short clickable next-messages. Non-fatal helper. */
+export async function generateFollowups({ model, userText, replyText, abortSignal }) {
+  const { content } = await streamChat({
+    model,
+    messages: [{
+      role: 'user',
+      content:
+        'You write short follow-up prompts the USER might click to continue this chat.\n'
+        + 'Output EXACTLY 3 lines. Nothing else — no numbers, no bullets, no quotes, no intro.\n'
+        + 'Each line is one complete message the user would send next (question or request).\n'
+        + 'Rules: under 70 characters each; specific to THIS exchange (not generic filler like '
+        + '"tell me more"); useful and distinct from each other; same language as the user.\n\n'
+        + `---\nUser: ${String(userText).slice(0, 900)}\n\nAssistant: ${String(replyText).slice(0, 1400)}\n---`,
+    }],
+    params: {
+      max_tokens: 220,
+      temperature: 0.55,
+      chat_template_kwargs: { enable_thinking: false },
+    },
+    abortSignal,
+  });
+  return parseFollowupLines(content);
+}
+
+function parseFollowupLines(raw) {
+  if (!raw) return [];
+  // drop thinking-style fences / leading labels if a model ignores instructions
+  let text = String(raw)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/<\/?think>/gi, ' ');
+  const lines = text.split('\n')
+    .map((l) => l.trim())
+    .map((l) => l
+      .replace(/^[-*•]+\s+/, '')
+      .replace(/^\d+[\).:\-]\s*/, '')
+      .replace(/^["'“”]+|["'“”]+$/g, '')
+      .trim())
+    .filter((l) => l.length >= 8 && l.length <= 120)
+    .filter((l) => !/^(here|follow|suggestion|option|prompt)/i.test(l))
+    .filter((l) => !/^(none|n\/a)$/i.test(l));
+  // de-dupe case-insensitively, keep order
+  const seen = new Set();
+  const out = [];
+  for (const l of lines) {
+    const k = l.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(l);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 // ---------- routes ----------
 
 export default async function chatRoutes(app) {
@@ -1294,7 +1349,7 @@ export default async function chatRoutes(app) {
       if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
       }
-      // long-term memory: what the duck remembers about this user, retrieved
+      // long-term memory: what Dumpling remembers about this user, retrieved
       // by meaning against this turn (retrieval also reinforces — see
       // memory.js). The explainer is ALWAYS injected while memory is on, even
       // with zero recalls — models that don't know they have a memory system
@@ -1708,6 +1763,23 @@ export default async function chatRoutes(app) {
             send({ type: 'title', title: clean });
           }
         } catch { /* non-fatal */ }
+      }
+
+      // clickable follow-up prompts under the reply (same warm model, cheap)
+      if (!abort.signal.aborted && text && text.trim().length >= 40 && promptLeaf?.content) {
+        try {
+          const items = await generateFollowups({
+            model: conv.model_id,
+            userText: promptLeaf.content,
+            replyText: text,
+            abortSignal: abort.signal,
+          });
+          // always emit so the client can drop its "Suggesting…" skeleton
+          send({ type: 'followups', messageId: asst.id, items });
+        } catch (err) {
+          req.log.warn({ err }, 'followup generation failed (non-fatal)');
+          try { send({ type: 'followups', messageId: asst.id, items: [] }); } catch { /* socket gone */ }
+        }
       }
 
       // learn: distill durable facts from this exchange into long-term memory

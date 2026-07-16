@@ -71,8 +71,13 @@
   .vram.hot { color: var(--red); }
   .vlabel { color: var(--text-faint); letter-spacing: 0.05em; }
   @media (max-width: 768px) {
-    header { gap: 4px; padding: 6px 8px; padding-top: max(6px, env(safe-area-inset-top)); }
-    .vram { padding: 4px 8px; font-size: 10px; }
+    header {
+      gap: 4px; padding: 6px 8px;
+      padding-top: max(6px, env(safe-area-inset-top));
+      min-height: 48px;
+    }
+    .iconb { min-width: 44px; min-height: 44px; padding: 10px; }
+    .vram { padding: 5px 9px; font-size: 10.5px; }
     .vlabel { display: none; }
     .backchat { display: none; } /* menu already reaches chat */
   }

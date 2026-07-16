@@ -29,6 +29,10 @@
   let pendThink = '';
   let toolBuf = null; // { index, name, args } — streaming tool-call arguments
 
+  // ----- follow-up prompt chips (messageId → string[]) -----
+  let followups = $state(null); // { messageId, items: string[], loading?: boolean } | null
+  let followupsConvId = null;
+
   // ----- message queue (send while AI is busy) -----
   let msgQueue = $state([]); // { id, content }[]
 
@@ -219,9 +223,22 @@
           app.conv.messages.push(ev.msg);
           app.conv.active_leaf_id = ev.msg.id;
           if (ev.msg.run_id) app.filesVersion++;
+          // chips load after the model finishes a second cheap pass
+          followups = { messageId: ev.msg.id, items: [], loading: true };
+          followupsConvId = convId;
           scrollToBottom();
         }
         app.streaming = null;
+        break;
+      case 'followups':
+        // short clickable next-messages under the just-finished reply
+        if (here && ev.messageId && Array.isArray(ev.items) && ev.items.length) {
+          followups = { messageId: ev.messageId, items: ev.items.slice(0, 3), loading: false };
+          followupsConvId = convId;
+          scrollToBottom();
+        } else if (here && followups?.loading && followups.messageId === ev.messageId) {
+          followups = null; // model returned nothing useful
+        }
         break;
       case 'image_job':
         if (s) { s.loading = false; s.image = { prompt: ev.prompt, phase: 'starting', step: null, steps: null, preview: null }; }
@@ -626,8 +643,28 @@
     if (!msgQueue.length) return;
     const next = msgQueue[0];
     msgQueue = msgQueue.slice(1);
+    followups = null; // a queued message is the next turn — hide chips
     run({ content: next.content });
   }
+
+  // Clear follow-up chips when leaving a chat or starting a new one
+  $effect(() => {
+    const id = app.conv?.id;
+    if (id !== followupsConvId) {
+      followups = null;
+      followupsConvId = id ?? null;
+    }
+  });
+
+  // Drop the "loading" skeleton if the stream ended without a followups event
+  $effect(() => {
+    if (!followups?.loading) return;
+    if (app.streaming) return;
+    const t = setTimeout(() => {
+      if (followups?.loading) followups = null;
+    }, 12_000);
+    return () => clearTimeout(t);
+  });
 
   function removeQueued(id) {
     msgQueue = msgQueue.filter((q) => q.id !== id);
@@ -652,6 +689,7 @@
     if (!content || !app.conv) return;
     input = '';
     if (inputEl) inputEl.style.height = 'auto';
+    followups = null;
     pushHistory(content);
     if (app.streaming) {
       // queue while the model is working — grey chips under the live bubble
@@ -668,6 +706,7 @@
       input = prompt;
       inputEl?.focus();
     } else {
+      followups = null;
       pushHistory(prompt);
       if (app.streaming) {
         msgQueue = [...msgQueue, { id: `q-${Date.now()}`, content: prompt }];
@@ -675,6 +714,15 @@
         run({ content: prompt });
       }
     }
+  }
+
+  /** One-tap follow-up chip under the last assistant reply. */
+  function useFollowup(text) {
+    const t = String(text ?? '').trim();
+    if (!t || !app.conv || app.streaming) return;
+    followups = null;
+    pushHistory(t);
+    run({ content: t, parentId: realParentId() });
   }
 
   async function stop() {
@@ -1000,6 +1048,20 @@
           </div>
         {/each}
       {/if}
+      {#if followups && !streamingHere && !msgQueue.length
+          && path.length && path[path.length - 1]?.id === followups.messageId}
+        <div class="followups fade-in" aria-label="Suggested follow-ups">
+          {#if followups.loading}
+            <span class="fup-skel shimmer">Suggesting follow-ups…</span>
+          {:else}
+            {#each followups.items as item (item)}
+              <button type="button" class="fup" onclick={() => useFollowup(item)} title="Send this follow-up">
+                {item}
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/if}
       <div class="pad"></div>
     </div>
   </div>
@@ -1259,17 +1321,77 @@
     padding: 0 6px; white-space: nowrap;
   }
 
+  /* clickable next-message chips under the last assistant reply */
+  .followups {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 6px 0 4px 42px;
+    max-width: calc(100% - 42px);
+  }
+  .fup {
+    all: unset; cursor: pointer; box-sizing: border-box;
+    max-width: 100%;
+    padding: 8px 14px; border-radius: 999px;
+    font-size: 13px; line-height: 1.35; color: var(--text-dim);
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 100ms ease;
+    word-break: break-word;
+  }
+  .fup:hover {
+    color: var(--text); border-color: var(--accent-dim);
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+  }
+  .fup:active { transform: scale(0.98); }
+  .fup-skel {
+    font-size: 12px; color: var(--text-faint); padding: 6px 2px;
+  }
+
   @media (max-width: 768px) {
-    .thread { padding: 12px 12px 0; }
-    .dock { padding: 4px 10px max(10px, env(safe-area-inset-bottom)); }
+    .thread { padding: 10px 12px 0; }
+    .dock {
+      padding: 2px 8px max(8px, env(safe-area-inset-bottom));
+      /* stay above the iOS home indicator when the keyboard is closed */
+    }
     .agentwork, .imgjob, .diffjob, .status { margin-left: 0; padding-left: 0; }
-    .status { padding-left: 0; }
+    .status { padding-left: 0; font-size: 11.5px; }
     .finehint { display: none; }
-    .composer { border-radius: calc(14px * var(--rf)); padding: 8px 8px 6px 12px; }
-    .composer textarea { max-height: 140px; font-size: 16px; }
-    .tool { width: 36px; height: 34px; }
-    .send { width: 38px; height: 38px; }
-    .dname { max-width: 140px; }
+    .composer { border-radius: calc(16px * var(--rf)); padding: 10px 10px 8px 14px; }
+    .composer:focus-within {
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+    }
+    .composer textarea { max-height: 120px; font-size: 16px; line-height: 1.45; }
+    .bar {
+      gap: 4px;
+      overflow-x: auto; overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      padding-bottom: 1px;
+    }
+    .bar::-webkit-scrollbar { display: none; }
+    .tool { width: 40px; height: 40px; flex-shrink: 0; }
+    .tool:has(.rlbl) { min-height: 40px; }
+    .send { width: 42px; height: 42px; flex-shrink: 0; }
+    .dname { max-width: 120px; }
+    .tobottom { width: 40px; height: 40px; top: -50px; }
+    .followups {
+      margin: 8px 0 2px 0; max-width: 100%;
+      gap: 8px;
+    }
+    .fup {
+      /* full-width-ish chips are easier to tap on phones */
+      flex: 1 1 auto;
+      min-width: min(100%, 160px);
+      padding: 11px 14px;
+      font-size: 13.5px;
+      border-radius: calc(12px * var(--rf));
+      text-align: left;
+    }
+    .pad { height: 12px; }
+    .qmsg { margin-left: 0; }
+  }
+  @media (max-width: 420px) {
+    .thread { padding: 8px 10px 0; }
+    .dock { padding: 2px 6px max(6px, env(safe-area-inset-bottom)); }
+    .fup { min-width: 100%; }
   }
   .bar .send + .send { margin-left: 4px; }
   .bar .send.stop { margin-right: 2px; }

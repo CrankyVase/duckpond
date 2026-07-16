@@ -47,6 +47,7 @@
   async function openResult(r) {
     app.view = 'chat';
     await openConversation(r.conv_id);
+    closeSidebarIfMobile();
   }
 
   async function openChat(id) {
@@ -251,18 +252,21 @@
       display: block; position: fixed; inset: 0; z-index: 35;
       background: rgba(8, 7, 6, 0.55);
       -webkit-tap-highlight-color: transparent;
+      /* only when drawer is open (parent if checks !collapsed) */
     }
     aside {
       position: fixed; top: 0; bottom: 0; left: 0;
-      width: min(300px, 88vw); height: 100%; height: 100dvh;
+      width: min(320px, 90vw); height: 100%; height: 100dvh;
       border-right: 1px solid var(--border-soft);
       box-shadow: var(--shadow-lg);
       transform: translateX(0);
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
+      /* slightly smoother open on phones */
+      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
     }
     aside.collapsed {
-      width: min(300px, 88vw);
+      width: min(320px, 90vw);
       transform: translateX(-105%);
       border-right-color: var(--border-soft);
       pointer-events: none;
@@ -275,12 +279,27 @@
       transform: translateX(105%);
     }
     .inner { width: 100%; }
-    .close-m { display: grid; place-items: center; }
+    .close-m {
+      display: grid; place-items: center;
+      min-width: 44px; min-height: 44px;
+    }
+    .brand { padding: 12px 14px 8px; }
+    .top { padding: 6px 12px 10px; }
+    .new { min-height: 44px; padding: 12px 14px; font-size: 14.5px; }
+    .search input { padding: 10px 0; font-size: 16px; }
+    .item {
+      padding: 11px 10px 11px 12px; min-height: 44px;
+      font-size: 14.5px;
+    }
     /* always show delete on touch (no hover) */
-    .del { opacity: 0.55; }
-    .item:hover .del, .item .del { opacity: 0.7; }
-    .pages { flex-wrap: wrap; }
-    .page { min-height: 40px; font-size: 13px; }
+    .del {
+      opacity: 0.65; width: 36px; height: 36px;
+    }
+    .item:hover .del, .item .del { opacity: 0.85; }
+    .pages { flex-wrap: wrap; gap: 8px; padding: 10px 12px 4px; }
+    .page { min-height: 44px; font-size: 13.5px; padding: 10px 12px; }
+    .bottom { padding: 12px 14px; gap: 10px; }
+    .out { min-width: 40px; min-height: 40px; }
   }
   .mark {
     display: grid; place-items: center;

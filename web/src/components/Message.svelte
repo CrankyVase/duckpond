@@ -371,14 +371,28 @@
   .compaction summary { cursor: pointer; color: var(--text-faint); font-size: 12px; }
 
   @media (max-width: 768px) {
-    .ububble { max-width: 92%; padding: 10px 12px; font-size: 14.5px; }
-    .arow { gap: 8px; margin: 14px 0 4px; }
-    .avatar { width: 26px; height: 26px; }
+    .ububble { max-width: 94%; padding: 10px 13px; font-size: 15px; }
+    .arow { gap: 8px; margin: 12px 0 2px; }
+    .avatar { width: 28px; height: 28px; }
     /* always show actions on touch (no hover) */
-    .actions { opacity: 0.9; }
-    .ic { width: 34px; height: 32px; }
-    .tbody { max-height: 220px; font-size: 12px; }
+    .actions {
+      opacity: 1; margin-top: 8px; gap: 4px;
+      flex-wrap: wrap; row-gap: 4px;
+    }
+    .ic { width: 40px; height: 38px; border-radius: calc(9px * var(--rf)); }
+    .ic:active { background: var(--bg-hover); }
+    .tbody { max-height: 200px; font-size: 12.5px; }
     .wgroup { gap: 8px; }
-    .wgroup > :global(*) { max-width: 100% !important; }
+    .wgroup > :global(*) { max-width: 100% !important; width: 100%; }
+    .editbox { width: 100%; }
+    .edit-actions { flex-wrap: wrap; }
+    .edit-actions .hint { width: 100%; }
+    .abody :global(.md pre) { font-size: 12px; }
+    .abody :global(.md table) { display: block; overflow-x: auto; max-width: 100%; }
+    .abody :global(.citepill) { padding: 3px 8px; font-size: 12px; }
+  }
+  @media (max-width: 420px) {
+    .avatar { display: none; } /* reclaim horizontal space on tiny phones */
+    .arow { gap: 0; }
   }
 </style>

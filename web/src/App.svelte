@@ -205,7 +205,21 @@
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newConversation(); }
     if (e.key === 'Escape' && app.settingsOpen) app.settingsOpen = false;
     if (e.key === 'Escape' && app.themeStudioOpen) app.themeStudioOpen = false;
+    // phone: Escape / back also closes the nav drawer
+    if (e.key === 'Escape' && !app.settingsOpen && !app.themeStudioOpen
+        && !app.sidebarCollapsed && window.matchMedia('(max-width: 768px)').matches) {
+      app.sidebarCollapsed = true;
+    }
   }
+
+  // lock background scroll while the mobile drawer is open
+  $effect(() => {
+    if (typeof document === 'undefined') return;
+    const mobile = window.matchMedia('(max-width: 768px)').matches;
+    const open = mobile && !app.sidebarCollapsed && !!app.user;
+    document.body.classList.toggle('dp-drawer-open', open);
+    return () => document.body.classList.remove('dp-drawer-open');
+  });
 </script>
 
 <svelte:window onkeydown={shortcuts} />
@@ -252,6 +266,12 @@
     min-width: 0; min-height: 0; overflow: hidden;
   }
   @media (max-width: 768px) {
-    .layout { position: relative; }
+    .layout {
+      position: relative;
+      /* fill the visual viewport when the soft keyboard opens (interactive-widget) */
+      height: 100%; height: 100dvh;
+      min-height: 0;
+    }
+    main { min-width: 0; }
   }
 </style>
