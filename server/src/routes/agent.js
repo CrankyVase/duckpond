@@ -184,7 +184,7 @@ export const AGENT_TOOLS = [
 
 function agentSystemPrompt(ws) {
   return [
-    'You are Duck, a coding agent inside DuckPond, working in a sandboxed Linux container.',
+    'You are Dumpling, a coding agent inside DuckPond, working in a sandboxed Linux container.',
     'The project lives at /workspace — every file path you use is relative to it.',
     'Environment: Debian, Node 24 + npm, Python 3.13 + pip, git, bash. No GUI.',
     '',

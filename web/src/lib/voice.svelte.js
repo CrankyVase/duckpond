@@ -366,7 +366,7 @@ export async function startVoice() {
     voice.sttOk = !!st.stt;
   } catch { voice.sttOk = false; }
   if (!voice.sttOk) {
-    voice.error = 'Speech-to-text is not installed on the server yet, so the duck can talk but not hear. (whisper.cpp needs a one-time build.)';
+    voice.error = 'Speech-to-text is not installed on the server yet, so Dumpling can talk but not hear. (whisper.cpp needs a one-time build.)';
     return; // orb stays up with the hint; no mic capture
   }
 
@@ -385,7 +385,7 @@ export async function startVoice() {
     voice.state = 'listening';
   } catch (err) {
     voice.error = err?.name === 'NotAllowedError'
-      ? 'Microphone access was denied — allow it in the browser to talk to the duck.'
+      ? 'Microphone access was denied — allow it in the browser to talk to Dumpling.'
       : `Couldn't open the microphone: ${err.message ?? err}`;
     teardownCapture();
   }
