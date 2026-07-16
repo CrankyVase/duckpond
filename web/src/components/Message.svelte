@@ -225,7 +225,8 @@
   .ububble {
     max-width: 68%;
     background: var(--bg-card);
-    border: 1px solid var(--border-soft);
+    /* warm edge — defined, not glowing */
+    border: 1px solid color-mix(in srgb, var(--accent-dim) 22%, var(--border-soft));
     border-radius: calc(16px * var(--rf)) calc(16px * var(--rf)) calc(5px * var(--rf)) calc(16px * var(--rf));
     padding: 10px 16px;
     white-space: pre-wrap;

@@ -1191,10 +1191,14 @@
     border: 1px solid var(--border);
     border-radius: calc(18px * var(--rf));
     padding: 10px 10px 8px 16px;
-    transition: border-color 150ms ease;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
   }
+  /* Quiet highlight — warm edge, no glow bloom */
   .composer:focus-within {
-    border-color: var(--border);
+    border-color: color-mix(in srgb, var(--accent-dim) 50%, var(--border));
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent-dim) 28%, transparent),
+      0 6px 20px rgba(0, 0, 0, 0.28);
   }
   .composer textarea {
     resize: none; max-height: 200px;
@@ -1241,13 +1245,14 @@
     background: var(--bg-hover); border: none;
     color: var(--text-dim);
     opacity: 0.6;
-    transition: background 130ms ease, opacity 130ms ease;
+    transition: background 130ms ease, opacity 130ms ease, box-shadow 130ms ease;
   }
   .send.ready {
     background: var(--accent); color: #16110a; opacity: 1;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   }
   .send.ready:hover { background: var(--accent-deep); }
-  .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; }
+  .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; box-shadow: none; }
   .imgjob {
     margin: 14px 0 8px 42px;
     display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
@@ -1346,7 +1351,7 @@
   }
   .fup:hover {
     color: var(--text);
-    border-color: var(--border);
+    border-color: color-mix(in srgb, var(--accent-dim) 40%, var(--border));
     background: var(--bg-hover);
   }
   .fup:active { background: var(--bg-card); }
@@ -1385,7 +1390,10 @@
       box-sizing: border-box;
     }
     .composer:focus-within {
-      border-color: var(--border);
+      border-color: color-mix(in srgb, var(--accent-dim) 45%, var(--border));
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--accent-dim) 22%, transparent),
+        0 4px 16px rgba(0, 0, 0, 0.28);
     }
     .composer textarea {
       max-height: 120px;

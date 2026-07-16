@@ -92,7 +92,7 @@
   }
   .chip:hover {
     color: var(--text);
-    border-color: var(--border);
+    border-color: color-mix(in srgb, var(--accent-dim) 40%, var(--border));
     background: var(--bg-hover);
   }
   .chip:hover :global(svg) { color: var(--text-dim); }
