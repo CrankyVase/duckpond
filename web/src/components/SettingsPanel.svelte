@@ -661,10 +661,17 @@
     display: flex; flex-direction: column;
     background: var(--bg-sidebar); border-left: 1px solid var(--border);
     transform: translateX(102%);
-    transition: transform 260ms cubic-bezier(0.25, 1, 0.35, 1);
+    transition: transform 260ms cubic-bezier(0.25, 1, 0.35, 1), visibility 0s linear 260ms;
     box-shadow: var(--shadow-lg);
+    visibility: hidden;
+    pointer-events: none;
   }
-  .panel.open { transform: none; }
+  .panel.open {
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+    transition: transform 260ms cubic-bezier(0.25, 1, 0.35, 1), visibility 0s linear 0s;
+  }
   @media (max-width: 768px) {
     .panel {
       width: 100%;
@@ -712,6 +719,27 @@
       min-height: 44px;
       font-size: 13.5px;
     }
+    .stitle {
+      flex-wrap: wrap;
+      gap: 6px;
+      row-gap: 4px;
+    }
+    .formodel {
+      max-width: 100%;
+      margin-left: 0;
+      width: 100%;
+      font-size: 11px;
+    }
+    .panel, .body, section, .row, .rlabel {
+      max-width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+    }
+    textarea {
+      max-width: 100%;
+      box-sizing: border-box;
+      resize: vertical;
+    }
   }
   .head {
     display: flex; align-items: center; justify-content: space-between;
@@ -731,7 +759,10 @@
     color: var(--text-faint);
   }
   .stitle :global(svg) { color: var(--accent); }
-  .formodel { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .formodel {
+    margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400;
+    max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .mono { font-family: var(--mono); }
   .hint { font-size: 12px; color: var(--text-faint); line-height: 1.5; }
   .hint b { color: var(--text-dim); font-weight: 500; }

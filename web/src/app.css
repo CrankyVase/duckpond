@@ -90,6 +90,10 @@ body.dp-drawer-open {
     --chat-maxw: 100% !important;
     --ui-scale: 1 !important;
   }
+  html, body {
+    overflow-x: clip;
+    max-width: 100vw;
+  }
   /* zoom + safe-area + fixed chat width = "nothing is sized right" */
   body {
     zoom: 1 !important;
@@ -99,9 +103,10 @@ body.dp-drawer-open {
     width: 100% !important;
     max-width: 100vw !important;
     min-width: 0 !important;
+    overflow-x: clip;
   }
 
-  input, textarea, select { font-size: 16px !important; } /* no iOS focus-zoom */
+  input, textarea, select { font-size: 16px !important; max-width: 100%; box-sizing: border-box; }
   button, a, [role='button'] { -webkit-tap-highlight-color: transparent; }
   .iconb, button.ghost.iconb {
     min-width: 40px; min-height: 40px;
@@ -109,7 +114,7 @@ body.dp-drawer-open {
   }
 
   /* markdown never blows past the viewport */
-  .md { overflow-wrap: anywhere; word-break: break-word; }
+  .md { overflow-wrap: anywhere; word-break: break-word; max-width: 100%; }
   .md pre {
     max-width: 100%;
     overflow-x: auto;
@@ -126,6 +131,12 @@ body.dp-drawer-open {
   .md h1 { font-size: 1.2em; }
   .md h2 { font-size: 1.1em; }
   .md h3 { font-size: 1.02em; }
+
+  /* anything with a long mono id */
+  .mono {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }
 
 ::selection { background: var(--accent-dim); color: var(--text); }

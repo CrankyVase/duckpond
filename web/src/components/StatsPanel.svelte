@@ -190,8 +190,17 @@
     .tablewrap {
       width: 100%; max-width: 100%;
       overflow-x: auto; -webkit-overflow-scrolling: touch;
+      /* subtle cue that it scrolls sideways */
+      mask-image: linear-gradient(90deg, #000 92%, transparent);
     }
-    table { width: max-content; min-width: 100%; font-size: 11.5px; }
-    th, td { padding: 8px 10px; }
+    table { width: max-content; min-width: 100%; font-size: 11px; }
+    th, td { padding: 8px 8px; }
+    /* long model ids wrap instead of forcing a huge min table width */
+    td.mono, th:first-child {
+      max-width: 140px;
+      white-space: normal;
+      word-break: break-all;
+      font-size: 10.5px;
+    }
   }
 </style>

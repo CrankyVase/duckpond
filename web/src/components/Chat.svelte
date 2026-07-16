@@ -1093,8 +1093,8 @@
       {/if}
       <textarea rows="1"
         placeholder={busy
-          ? `Queue a follow-up for ${app.conv?.model_id ?? 'DuckPond'}…`
-          : `Message ${app.conv?.model_id ?? 'DuckPond'}…`}
+          ? 'Queue a follow-up…'
+          : 'Message DuckPond…'}
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
         disabled={!app.conv}></textarea>
       <div class="bar">

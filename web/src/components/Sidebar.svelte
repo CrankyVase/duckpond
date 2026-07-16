@@ -391,9 +391,10 @@
       border-right: 1px solid var(--border-soft);
       box-shadow: 8px 0 40px rgba(0, 0, 0, 0.45);
       transform: translate3d(0, 0, 0);
-      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
       z-index: 45;
       overflow: hidden;
+      visibility: visible;
       /* safe area only inside .inner so the panel edge stays flush */
       padding: 0;
     }
@@ -403,6 +404,7 @@
       border-right-color: var(--border-soft);
       pointer-events: none;
       box-shadow: none;
+      visibility: hidden; /* fully out of hit-testing / paint tree when closed */
     }
     :global(html[data-sidebar='right']) aside {
       left: auto; right: 0;

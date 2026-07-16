@@ -1045,49 +1045,73 @@
   @media (max-width: 768px) {
     .studio {
       width: 100%;
+      max-width: 100vw;
       height: 100%;
       height: 100dvh;
-      max-height: none;
+      max-height: 100dvh;
       border-radius: 0;
       border: none;
       margin: 0;
       inset: 0;
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
+      overflow: hidden;
+      box-sizing: border-box;
     }
     .head {
       padding: 10px 12px;
       gap: 8px;
+      flex-shrink: 0;
+      min-width: 0;
     }
     h2 { font-size: 15px; }
     .sub { display: none; } /* reclaim header height */
-    .iconb { min-width: 40px; min-height: 40px; }
+    .iconb { min-width: 40px; min-height: 40px; flex-shrink: 0; }
 
-    .cols { flex-direction: column; min-height: 0; }
+    .cols {
+      flex-direction: column;
+      min-height: 0;
+      min-width: 0;
+      overflow: hidden;
+    }
+    /* 2×3 tab grid so every tab fits — no horizontal hang-off */
     .rail {
       width: 100%;
-      flex-direction: row;
-      flex-wrap: nowrap;
-      overflow-x: auto;
-      overflow-y: hidden;
+      max-width: 100%;
+      display: grid !important;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 4px;
+      overflow: visible;
       border-right: none;
       border-bottom: 1px solid var(--border-soft);
-      padding: 6px 8px;
-      gap: 4px;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: none;
+      padding: 8px;
+      box-sizing: border-box;
+      flex-shrink: 0;
     }
-    .rail::-webkit-scrollbar { display: none; }
     .railbtn {
-      flex: 0 0 auto;
+      flex: none;
+      width: 100%;
+      min-width: 0;
+      justify-content: center;
       white-space: nowrap;
-      padding: 9px 12px;
+      padding: 8px 4px;
       min-height: 40px;
-      font-size: 12.5px;
+      font-size: 11px;
+      gap: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .railbtn span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
     }
     .content {
-      padding: 12px 12px 20px;
+      padding: 12px 12px 16px;
       -webkit-overflow-scrolling: touch;
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: hidden;
     }
 
     /* fill the phone width — single cards span full; many use 2-col */
@@ -1154,21 +1178,34 @@
     .chip { padding: 7px 11px; font-size: 12px; min-height: 34px; }
 
     .foot {
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
       gap: 6px;
-      padding: 10px 10px;
-      padding-bottom: max(10px, env(safe-area-inset-bottom));
+      padding: 8px 10px;
+      padding-bottom: max(8px, env(safe-area-inset-bottom));
+      flex-shrink: 0;
+      min-width: 0;
     }
     .foot button {
-      font-size: 12.5px;
-      padding: 10px 12px;
+      font-size: 12px;
+      padding: 10px 10px;
       min-height: 42px;
+      flex: 1 1 auto;
+      justify-content: center;
     }
+    .foot .grow { display: none; } /* free space between buttons on phone */
     .pubfields { flex-direction: column; }
     .pubfields .grow { min-width: 0; width: 100%; }
+    .tsearch { font-size: 16px; box-sizing: border-box; }
+    .cssbox { min-height: 160px; max-width: 100%; box-sizing: border-box; }
   }
 
   @media (max-width: 380px) {
     .gallery { grid-template-columns: 1fr; }
+    .rail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .railbtn { font-size: 10.5px; padding: 8px 2px; }
+    /* "Custom CSS" is long — keep icon + short if needed */
+    .segbtn { padding: 10px 8px; }
+    .seglabel { font-size: 12px; }
+    .segblurb { font-size: 10px; }
   }
 </style>

@@ -98,6 +98,8 @@
       padding-left: max(6px, env(safe-area-inset-left));
       padding-right: max(6px, env(safe-area-inset-right));
       min-height: 48px;
+      max-width: 100vw;
+      overflow: hidden;
     }
     .iconb {
       width: 40px; height: 40px; min-width: 40px; min-height: 40px;
@@ -106,7 +108,10 @@
     /* VRAM + context eat too much horizontal space on phones */
     .desk { display: none !important; }
     .backchat { display: none; }
-    .mid { flex: 1 1 0; min-width: 0; }
-    .viewtitle { font-size: 14px; flex: 1; }
+    .mid { flex: 1 1 0; min-width: 0; overflow: hidden; }
+    .viewtitle {
+      font-size: 14px; flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis;
+    }
   }
 </style>
