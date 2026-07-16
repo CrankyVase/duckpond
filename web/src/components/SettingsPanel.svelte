@@ -667,14 +667,51 @@
   .panel.open { transform: none; }
   @media (max-width: 768px) {
     .panel {
-      width: 100%; max-width: 100vw;
+      width: 100%;
+      max-width: 100vw;
       border-left: none;
       padding-top: env(safe-area-inset-top);
-      padding-bottom: env(safe-area-inset-bottom);
+      /* foot handles bottom safe-area */
+      padding-bottom: 0;
     }
-    .body { padding: 6px 14px 24px; }
-    .row { flex-wrap: wrap; gap: 8px; }
-    .row select { max-width: 100%; width: 100%; }
+    .head {
+      padding: 12px 14px 10px;
+    }
+    .head h2 { font-size: 17px; }
+    .iconb { min-width: 40px; min-height: 40px; }
+    .body {
+      padding: 8px 14px 28px;
+      -webkit-overflow-scrolling: touch;
+    }
+    section { padding: 14px 0 16px; gap: 12px; }
+    .row {
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .rlabel { width: 100%; }
+    .row select,
+    .row input,
+    .row textarea {
+      max-width: 100%;
+      width: 100%;
+      font-size: 16px;
+      min-height: 44px;
+      box-sizing: border-box;
+    }
+    .srow input[type='range'] { width: 100%; }
+    .shead { font-size: 14px; }
+    .conn { flex-wrap: wrap; }
+    .wide { min-height: 44px; font-size: 14px; }
+    .foot {
+      gap: 8px;
+      padding: 10px 12px;
+      padding-bottom: max(10px, env(safe-area-inset-bottom));
+    }
+    .foot button {
+      min-height: 44px;
+      font-size: 13.5px;
+    }
   }
   .head {
     display: flex; align-items: center; justify-content: space-between;

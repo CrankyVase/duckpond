@@ -136,16 +136,22 @@
 </div>
 
 <style>
-  .picker { position: relative; }
+  .picker { position: relative; min-width: 0; max-width: 100%; width: 100%; }
   .current {
-    display: flex; align-items: center; gap: 9px; max-width: min(340px, 42vw);
+    display: flex; align-items: center; gap: 9px;
+    width: 100%; max-width: min(340px, 100%);
     font-size: 13.5px; font-weight: 500; padding: 7px 12px;
     background: transparent; border-color: transparent;
     min-width: 0;
+    box-sizing: border-box;
   }
   .current:hover { background: var(--bg-hover); border-color: transparent; }
-  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chev { color: var(--text-faint); display: grid; place-items: center; transition: transform 180ms ease; }
+  .name {
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    text-align: left;
+  }
+  .chev { color: var(--text-faint); display: grid; place-items: center; transition: transform 180ms ease; flex-shrink: 0; }
   .chev.flip { transform: rotate(180deg); }
   .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; transition: background 300ms ease; }
   .backdrop { position: fixed; inset: 0; z-index: 40; }
@@ -157,15 +163,25 @@
     border-radius: calc(14px * var(--rf)); padding: 8px; box-shadow: var(--shadow-lg);
   }
   @media (max-width: 768px) {
-    .current { max-width: min(200px, 48vw); padding: 7px 8px; font-size: 13px; }
+    .picker { width: 100%; max-width: 100%; }
+    .current {
+      max-width: 100%;
+      width: 100%;
+      padding: 8px 10px;
+      font-size: 13.5px;
+      min-height: 40px;
+    }
     .menu {
       position: fixed;
       left: 8px; right: 8px;
-      top: calc(52px + env(safe-area-inset-top, 0px));
+      top: max(52px, calc(8px + env(safe-area-inset-top, 0px) + 44px));
       width: auto; max-width: none;
-      max-height: min(70dvh, 520px);
+      max-height: min(65dvh, 480px);
+      box-sizing: border-box;
     }
-    .info, .star { opacity: 0.7; } /* no hover on touch */
+    .opt { min-height: 48px; padding: 10px 12px; }
+    .info, .star, .eject { opacity: 0.85; width: 32px; height: 32px; }
+    .searchrow input { font-size: 16px; padding: 10px 0; }
   }
   .searchrow {
     display: flex; align-items: center; gap: 8px;

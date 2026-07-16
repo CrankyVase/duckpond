@@ -371,28 +371,61 @@
   .compaction summary { cursor: pointer; color: var(--text-faint); font-size: 12px; }
 
   @media (max-width: 768px) {
-    .ububble { max-width: 94%; padding: 10px 13px; font-size: 15px; }
-    .arow { gap: 8px; margin: 12px 0 2px; }
-    .avatar { width: 28px; height: 28px; }
-    /* always show actions on touch (no hover) */
-    .actions {
-      opacity: 1; margin-top: 8px; gap: 4px;
-      flex-wrap: wrap; row-gap: 4px;
+    .ububble {
+      max-width: min(94%, 100%);
+      padding: 10px 12px;
+      font-size: 15px;
     }
-    .ic { width: 40px; height: 38px; border-radius: calc(9px * var(--rf)); }
+    .arow {
+      gap: 8px;
+      margin: 12px 0 2px;
+      max-width: 100%;
+    }
+    .avatar { width: 26px; height: 26px; }
+    .abody { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+    /* always show actions on touch (no hover) — keep compact so they don't wrap messily */
+    .actions {
+      opacity: 1;
+      margin-top: 6px;
+      gap: 2px;
+      flex-wrap: wrap;
+      row-gap: 2px;
+    }
+    .ic {
+      width: 36px;
+      height: 34px;
+      border-radius: calc(8px * var(--rf));
+    }
     .ic:active { background: var(--bg-hover); }
-    .tbody { max-height: 200px; font-size: 12.5px; }
-    .wgroup { gap: 8px; }
-    .wgroup > :global(*) { max-width: 100% !important; width: 100%; }
-    .editbox { width: 100%; }
+    .stat { font-size: 10.5px; margin-left: 4px; }
+    .tbody { max-height: 180px; font-size: 12.5px; }
+    .wgroup {
+      gap: 8px;
+      max-width: 100%;
+    }
+    .wgroup > :global(*) {
+      max-width: 100% !important;
+      width: 100% !important;
+      min-width: 0;
+    }
+    .editbox { width: 100%; max-width: 100%; }
     .edit-actions { flex-wrap: wrap; }
     .edit-actions .hint { width: 100%; }
-    .abody :global(.md pre) { font-size: 12px; }
-    .abody :global(.md table) { display: block; overflow-x: auto; max-width: 100%; }
+    .abody :global(.md) { max-width: 100%; }
+    .abody :global(.md pre) {
+      font-size: 12px;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+    .abody :global(.md table) {
+      display: block;
+      overflow-x: auto;
+      max-width: 100%;
+    }
     .abody :global(.citepill) { padding: 3px 8px; font-size: 12px; }
   }
   @media (max-width: 420px) {
-    .avatar { display: none; } /* reclaim horizontal space on tiny phones */
+    .avatar { display: none; }
     .arow { gap: 0; }
   }
 </style>

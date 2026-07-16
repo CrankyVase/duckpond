@@ -296,9 +296,32 @@
       opacity: 0.65; width: 36px; height: 36px;
     }
     .item:hover .del, .item .del { opacity: 0.85; }
-    .pages { flex-wrap: wrap; gap: 8px; padding: 10px 12px 4px; }
-    .page { min-height: 44px; font-size: 13.5px; padding: 10px 12px; }
-    .bottom { padding: 12px 14px; gap: 10px; }
+    .pages {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 10px 12px 6px;
+    }
+    .page {
+      min-height: 44px;
+      font-size: 13.5px;
+      padding: 10px 12px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    /* owner-only Control becomes full-width third cell */
+    .pages:has(> :nth-child(3)) {
+      grid-template-columns: 1fr 1fr;
+    }
+    .pages > :nth-child(3) {
+      grid-column: 1 / -1;
+    }
+    .bottom {
+      padding: 10px 12px;
+      padding-bottom: max(10px, env(safe-area-inset-bottom));
+      gap: 8px;
+    }
+    .who { min-width: 0; }
     .out { min-width: 40px; min-height: 40px; }
   }
   .mark {

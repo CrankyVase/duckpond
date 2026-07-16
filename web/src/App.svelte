@@ -257,21 +257,40 @@
   .pulse { animation: pulse 1.2s ease infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .layout {
-    display: flex; height: 100%; height: 100dvh;
-    min-height: 0; overflow: hidden;
+    display: flex;
+    height: 100%;
+    height: 100dvh;
+    width: 100%;
+    max-width: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
   }
   :global(html[data-sidebar='right']) .layout { flex-direction: row-reverse; }
   main {
-    flex: 1; display: flex; flex-direction: column;
-    min-width: 0; min-height: 0; overflow: hidden;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden;
+    position: relative;
   }
   @media (max-width: 768px) {
     .layout {
       position: relative;
-      /* fill the visual viewport when the soft keyboard opens (interactive-widget) */
-      height: 100%; height: 100dvh;
-      min-height: 0;
+      /* sole full-screen shell — no double safe-area */
+      height: 100%;
+      height: 100dvh;
+      width: 100%;
+      max-width: 100vw;
     }
-    main { min-width: 0; }
+    main {
+      flex: 1 1 100%;
+      width: 100%;
+      max-width: 100%;
+    }
   }
 </style>

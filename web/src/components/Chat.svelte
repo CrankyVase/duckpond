@@ -1346,25 +1346,53 @@
   }
 
   @media (max-width: 768px) {
-    .thread { padding: 10px 12px 0; }
-    .dock {
-      padding: 2px 8px max(8px, env(safe-area-inset-bottom));
-      /* stay above the iOS home indicator when the keyboard is closed */
+    .chat, .main {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
     }
-    .agentwork, .imgjob, .diffjob, .status { margin-left: 0; padding-left: 0; }
-    .status { padding-left: 0; font-size: 11.5px; }
+    .thread {
+      padding: 10px 12px 0;
+      max-width: 100%;
+      width: 100%;
+    }
+    .dock {
+      max-width: 100%;
+      width: 100%;
+      padding: 4px 10px max(8px, env(safe-area-inset-bottom));
+      box-sizing: border-box;
+    }
+    .agentwork, .imgjob, .diffjob, .status {
+      margin-left: 0;
+      margin-right: 0;
+      padding-left: 0;
+      max-width: 100%;
+    }
+    .status { font-size: 11.5px; flex-wrap: wrap; }
     .finehint { display: none; }
-    .composer { border-radius: calc(16px * var(--rf)); padding: 10px 10px 8px 14px; }
+    .composer {
+      border-radius: calc(16px * var(--rf));
+      padding: 10px 10px 8px 12px;
+      width: 100%;
+      box-sizing: border-box;
+    }
     .composer:focus-within {
       box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
     }
-    .composer textarea { max-height: 120px; font-size: 16px; line-height: 1.45; }
+    .composer textarea {
+      max-height: 120px;
+      font-size: 16px;
+      line-height: 1.45;
+      width: 100%;
+    }
     .bar {
       gap: 4px;
-      overflow-x: auto; overflow-y: hidden;
+      overflow-x: auto;
+      overflow-y: hidden;
       -webkit-overflow-scrolling: touch;
       scrollbar-width: none;
       padding-bottom: 1px;
+      width: 100%;
     }
     .bar::-webkit-scrollbar { display: none; }
     .tool { width: 40px; height: 40px; flex-shrink: 0; }
@@ -1373,11 +1401,11 @@
     .dname { max-width: 120px; }
     .tobottom { width: 40px; height: 40px; top: -50px; }
     .followups {
-      margin: 8px 0 2px 0; max-width: 100%;
+      margin: 8px 0 2px 0;
+      max-width: 100%;
       gap: 8px;
     }
     .fup {
-      /* full-width-ish chips are easier to tap on phones */
       flex: 1 1 auto;
       min-width: min(100%, 160px);
       padding: 11px 14px;
@@ -1387,10 +1415,13 @@
     }
     .pad { height: 12px; }
     .qmsg { margin-left: 0; }
+    .imgpreview, .imgshimmer { width: 100%; max-width: 100%; }
+    .diffjob { max-width: 100%; }
+    .diffcanvas { max-height: 240px; font-size: 12px; }
   }
   @media (max-width: 420px) {
     .thread { padding: 8px 10px 0; }
-    .dock { padding: 2px 6px max(6px, env(safe-area-inset-bottom)); }
+    .dock { padding: 4px 8px max(6px, env(safe-area-inset-bottom)); }
     .fup { min-width: 100%; }
   }
   .bar .send + .send { margin-left: 4px; }
