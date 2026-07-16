@@ -488,7 +488,7 @@ function waterSurface(t, top) {
                 '......b........b........b......'][a];
   return [[[line], 0, top], [[rip1], 0, top + 1], [[rip2], 0, top + 2]];
 }
-const WLINE = 23;
+const WLINE = 21;   // deep enough that he clearly sits IN the water
 
 // swimming — floats, paddle-kick ripples behind, bow wave in front
 const swimFrame = (t) => compose(
@@ -1036,9 +1036,13 @@ const gardenF3 = compose(STAND, ...canArt, ...eyesHappy,
 Object.assign(ANIM, {
   // cognition (worker A salvage)
   think:     { frames: [thinkFrame(0), thinkFrame(1), thinkFrame(2)], ms: 480, loop: true, css: 'breathe' },
+  // thinking HARD = the think pose under strain: same chin-wing + raised gaze,
+  // but a furrowed brow, a sweat bead, and a denser cloud of thought dots.
   thinkhard: { frames: [
-    compose(STAND, ...scrunchEye, ...sweatBead(false), ...bigExcl(false)),
-    compose(STAND, ...scrunchEye, ...sweatBead(true), ...bigExcl(true)),
+    compose(STAND, ...gazeUp, [chinWing, 22, 13], [['dd'], 20, 7],
+      ...thinkDots[2], [['L'], 24, 8]),
+    compose(STAND, ...gazeUp, [chinWing, 22, 13], [['dd'], 20, 7],
+      ...thinkDots[1], [['DD'], 26, 2], [['L'], 24, 9], [['b'], 24, 10]),
   ], ms: 420, loop: true, css: 'breathe' },
   search:    { frames: [
     searchFrame([ [['I'], 21, 7], [['I'], 22, 8] ]),
@@ -1073,7 +1077,7 @@ Object.assign(ANIM, {
   sleep:     { frames: [sleepF1, sleepF2, sleepF3], ms: 720, loop: true, css: 'breathe' },
   happy:     { frames: [happyF1, happyF2, happyF3], ms: 260, loop: true, css: '' },
   love:      { frames: [loveF1, loveF2], ms: 380, loop: true, css: 'bob' },
-  quack:     { frames: [quackF1, quackF2], ms: 240, loop: true, css: 'bob' },
+  quack:     { frames: [STAND, quackF1, quackF2, quackF1], ms: 200, loop: true, css: 'bob' },
   nom:       { frames: [eatF1, eatF2, eatF3, eatF2], ms: 420, loop: true, css: '' },
   giggle:    { frames: [giggleF1, giggleF2], ms: 300, loop: true, css: 'bob' },
 
