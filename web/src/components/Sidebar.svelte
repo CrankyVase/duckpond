@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { confirmDialog } from '../lib/confirm.svelte.js';
   import { chatPath, userSubpath } from '../lib/router.js';
   import {
     app, closeSidebarIfMobile, loadConversations, newConversation, openConversation,
@@ -11,6 +12,7 @@
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Palette from '@lucide/svelte/icons/palette';
+  import PanelLeft from '@lucide/svelte/icons/panel-left';
   import Search from '@lucide/svelte/icons/search';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
@@ -57,6 +59,21 @@
   }
   async function goNew() {
     app.view = 'chat';
+    app.settingsOpen = false;
+    app.themeStudioOpen = false;
+    await newConversation();
+    closeSidebarIfMobile();
+  }
+  /** Duck brand → home: empty welcome chat, no matter where you are. */
+  async function goHome() {
+    app.view = 'chat';
+    app.settingsOpen = false;
+    app.themeStudioOpen = false;
+    // Already on an empty welcome thread — stay put
+    if (app.conv && !(app.conv.messages?.length)) {
+      closeSidebarIfMobile();
+      return;
+    }
     await newConversation();
     closeSidebarIfMobile();
   }
@@ -90,7 +107,15 @@
 
   async function remove(id, e) {
     e.stopPropagation();
-    if (!confirm('Delete this conversation?')) return;
+    e.preventDefault();
+    const ok = await confirmDialog({
+      title: 'Delete this conversation?',
+      message: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      danger: true,
+    });
+    if (!ok) return;
     await api(`/api/conversations/${id}`, { method: 'DELETE' });
     if (app.conv?.id === id) app.conv = null;
     await loadConversations();
@@ -110,8 +135,15 @@
 <aside class:collapsed={app.sidebarCollapsed}>
   <div class="inner">
     <div class="brand">
-      <span class="mark"><Duck px={1.7} interactive /></span>
-      <span class="bname">DuckPond</span>
+      <button type="button" class="brand-btn" onclick={goHome}
+        title="Home — new chat" aria-label="DuckPond home">
+        <span class="mark"><Duck px={1.7} interactive /></span>
+        <span class="bname">DuckPond</span>
+      </button>
+      <button type="button" class="ghost collapse-d" onclick={() => (app.sidebarCollapsed = true)}
+        title="Hide sidebar" aria-label="Hide sidebar">
+        <PanelLeft size={16} />
+      </button>
       <button type="button" class="ghost close-m" onclick={() => (app.sidebarCollapsed = true)}
         title="Close" aria-label="Close menu">
         <X size={16} />
@@ -233,7 +265,7 @@
   aside {
     width: 268px; flex-shrink: 0; height: 100%; overflow: hidden;
     background: var(--bg-sidebar); border-right: 1px solid var(--border-soft);
-    transition: width 240ms cubic-bezier(0.25, 1, 0.35, 1);
+    transition: width 280ms cubic-bezier(0.22, 1, 0.36, 1);
     z-index: 30;
   }
   aside.collapsed { width: 0; border-right-color: transparent; }
@@ -249,18 +281,37 @@
   .close-m { display: none; margin-left: auto; padding: 6px; }
 
   .brand {
-    display: flex; align-items: center; gap: 10px;
-    padding: 15px 18px 10px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 10px 8px 12px;
     font-weight: 600; font-size: 15px; letter-spacing: -0.01em;
     user-select: none; flex-shrink: 0;
   }
-  .bname { flex: 1; min-width: 0; }
+  .brand-btn {
+    all: unset; cursor: pointer;
+    display: flex; align-items: center; gap: 10px;
+    flex: 1 1 auto; min-width: 0;
+    padding: 4px 6px; border-radius: calc(10px * var(--rf));
+    transition: background 160ms ease;
+  }
+  .brand-btn:hover { background: var(--bg-hover); }
+  .brand-btn:hover .mark {
+    border-color: color-mix(in srgb, var(--accent-dim) 50%, var(--border-soft));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .bname { flex: 1; min-width: 0; text-align: left; }
   .mark {
     display: grid; place-items: center;
     width: 30px; height: 30px; border-radius: calc(9px * var(--rf));
     background: var(--bg-raised); border: 1px solid var(--border-soft);
     flex-shrink: 0;
+    transition: border-color 180ms ease, box-shadow 180ms ease;
   }
+  .collapse-d {
+    display: grid; place-items: center;
+    padding: 6px; border-radius: 8px;
+    color: var(--text-faint); flex-shrink: 0;
+  }
+  .collapse-d:hover { color: var(--text); }
 
   .top {
     padding: 6px 12px 10px;
@@ -302,10 +353,14 @@
     padding: 7px 8px 7px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer;
     color: var(--text-dim); font-size: 13.5px;
     text-decoration: none; min-width: 0;
-    transition: background 110ms ease, color 110ms ease;
+    transition: background 160ms cubic-bezier(0.22, 1, 0.36, 1), color 160ms ease,
+                transform 140ms ease;
   }
   .item:hover { background: var(--bg-hover); color: var(--text); }
-  .item.active { background: var(--bg-raised); color: var(--text); }
+  .item.active {
+    background: var(--bg-raised); color: var(--text);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
   .ci { display: grid; place-items: center; color: var(--text-faint); flex-shrink: 0; }
   .item.active .ci { color: var(--accent); }
   .title {
@@ -335,7 +390,7 @@
   }
 
   .pages {
-    display: flex; gap: 6px; padding: 8px 12px 2px;
+    display: flex; gap: 6px; padding: 10px 12px 8px;
     border-top: 1px solid var(--border-soft);
     flex-shrink: 0;
   }
@@ -346,13 +401,19 @@
     text-decoration: none; box-sizing: border-box;
     font-size: 12px; font-weight: 500; color: var(--text-dim);
     background: var(--bg-raised); border: 1px solid var(--border-soft);
+    transition: background 160ms ease, border-color 160ms ease, color 160ms ease,
+                transform 140ms cubic-bezier(0.22, 1, 0.36, 1);
   }
-  .page:hover { background: var(--bg-hover); color: var(--text); }
+  .page:hover { background: var(--bg-hover); color: var(--text); transform: translateY(-1px); }
+  .page:active { transform: none; }
   .page.active { color: var(--text); border-color: var(--accent-dim); }
   .page :global(svg) { color: var(--accent); flex-shrink: 0; }
 
   .bottom {
-    padding: 11px 14px; border-top: 1px solid var(--border-soft);
+    padding: 11px 14px;
+    /* double rule so user zone is distinct from Files/Stats */
+    border-top: 1px solid var(--border-soft);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--border) 55%, transparent);
     display: flex; align-items: center; gap: 10px;
     flex-shrink: 0; min-width: 0;
   }
@@ -434,10 +495,11 @@
       flex-shrink: 0;
     }
     .brand {
-      padding: 10px 12px 6px;
-      gap: 8px;
+      padding: 10px 8px 6px 10px;
+      gap: 4px;
     }
     .bname { font-size: 15px; }
+    .collapse-d { display: none; }
 
     .top { padding: 4px 12px 10px; gap: 8px; }
     .new {

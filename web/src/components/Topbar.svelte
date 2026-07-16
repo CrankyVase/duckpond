@@ -13,10 +13,12 @@
 </script>
 
 <header>
-  <button class="ghost iconb" onclick={() => (app.sidebarCollapsed = !app.sidebarCollapsed)}
-    title={app.sidebarCollapsed ? 'Show menu' : 'Hide menu'} aria-label="Menu">
-    <PanelLeft size={18} />
-  </button>
+  {#if app.sidebarCollapsed}
+    <button class="ghost iconb" onclick={() => (app.sidebarCollapsed = false)}
+      title="Show menu" aria-label="Menu">
+      <PanelLeft size={18} />
+    </button>
+  {/if}
   {#if app.view === 'chat'}
     <div class="mid">
       <ModelPicker />
@@ -52,7 +54,9 @@
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border-soft);
-    background: var(--bg);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     flex-shrink: 0;
     min-width: 0;
     width: 100%;

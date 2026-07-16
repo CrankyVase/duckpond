@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { confirmDialog } from '../lib/confirm.svelte.js';
   import { applyPrefs, prefs, resetPrefs, savePrefs } from '../lib/prefs.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
@@ -260,7 +261,14 @@
   }
 
   async function removeUser(u) {
-    if (!confirm(`Delete ${u.username} and all their chats?`)) return;
+    const ok = await confirmDialog({
+      title: `Delete ${u.username}?`,
+      message: 'This removes their account and all their chats permanently.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      danger: true,
+    });
+    if (!ok) return;
     await api(`/api/auth/users/${u.id}`, { method: 'DELETE' });
     toast(`Removed ${u.username}`, 'ok');
     loadAdmin();

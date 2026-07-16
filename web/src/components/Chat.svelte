@@ -4,6 +4,7 @@
   import {
     app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
+  import { confirmDialog } from '../lib/confirm.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import ChatFiles from './ChatFiles.svelte';
   import Message from './Message.svelte';
@@ -846,7 +847,14 @@
       return;
     }
     const kids = kidsMap.get(msg.id)?.length ?? 0;
-    if (!confirm(kids ? 'Delete this message and everything after it?' : 'Delete this message?')) return;
+    const ok = await confirmDialog({
+      title: kids ? 'Delete this message and everything after it?' : 'Delete this message?',
+      message: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      danger: true,
+    });
+    if (!ok) return;
     await api(`/api/messages/${msg.id}`, { method: 'DELETE' });
     await openConversation(app.conv.id); // refetch: leaf may have retracted
   }
@@ -1129,7 +1137,6 @@
         </button>
       </div>
     </div>
-    <div class="finehint">Local models only — ↑/↓ for sent history · queue while it thinks · refresh keeps it going.</div>
   </div>
  </div>
  {#if app.conv?.workspace_id}
@@ -1184,9 +1191,14 @@
     border: 1px solid var(--border);
     border-radius: calc(18px * var(--rf));
     padding: 10px 10px 8px 16px;
-    transition: border-color 180ms ease, box-shadow 180ms ease;
+    transition: border-color 220ms cubic-bezier(0.22, 1, 0.36, 1),
+                box-shadow 280ms cubic-bezier(0.22, 1, 0.36, 1);
   }
-  .composer:focus-within { border-color: var(--accent-dim); }
+  .composer:focus-within {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
+                0 8px 28px color-mix(in srgb, var(--accent) 6%, transparent);
+  }
   .composer textarea {
     resize: none; max-height: 200px;
     background: none; border: none; box-shadow: none; padding: 2px 0 6px;
@@ -1231,14 +1243,17 @@
     display: grid; place-items: center; flex-shrink: 0;
     background: var(--bg-hover); border: none;
     color: var(--text-dim);
-    opacity: 0.6; transition: background 150ms ease, opacity 150ms ease;
+    opacity: 0.6;
+    transition: background 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                opacity 180ms ease, transform 140ms ease, box-shadow 180ms ease;
   }
-  .send.ready { background: var(--accent); color: #16110a; opacity: 1; }
+  .send.ready {
+    background: var(--accent); color: #16110a; opacity: 1;
+    box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .send.ready:hover { transform: scale(1.05); }
+  .send.ready:active { transform: scale(0.96); }
   .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; }
-  .finehint {
-    text-align: center; font-size: 11px; color: var(--text-faint);
-    padding-top: 7px; user-select: none;
-  }
   .imgjob {
     margin: 14px 0 8px 42px;
     display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
@@ -1333,12 +1348,17 @@
     padding: 8px 14px; border-radius: 999px;
     font-size: 13px; line-height: 1.35; color: var(--text-dim);
     background: var(--bg-raised); border: 1px solid var(--border-soft);
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 100ms ease;
+    transition: background 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                border-color 180ms ease, color 160ms ease,
+                transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+                box-shadow 180ms ease;
     word-break: break-word;
   }
   .fup:hover {
     color: var(--text); border-color: var(--accent-dim);
     background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .fup:active { transform: scale(0.98); }
   .fup-skel {
@@ -1369,7 +1389,6 @@
       max-width: 100%;
     }
     .status { font-size: 11.5px; flex-wrap: wrap; }
-    .finehint { display: none; }
     .composer {
       border-radius: calc(16px * var(--rf));
       padding: 10px 10px 8px 12px;

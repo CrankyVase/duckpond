@@ -1,5 +1,6 @@
 <script>
   import Chat from './components/Chat.svelte';
+  import ConfirmDialog from './components/ConfirmDialog.svelte';
   import Duck from './components/Duck.svelte';
   import FilesPanel from './components/FilesPanel.svelte';
   import Invite from './components/Invite.svelte';
@@ -236,21 +237,24 @@
     <Sidebar />
     <main>
       <Topbar />
-      {#if app.view === 'stats'}
-        <StatsPanel />
-      {:else if app.view === 'speech'}
-        <SpeechPanel />
-      {:else if app.view === 'files'}
-        <FilesPanel />
-      {:else}
-        <Chat />
-      {/if}
+      {#key app.view}
+        {#if app.view === 'stats'}
+          <div class="panel-enter view-panel"><StatsPanel /></div>
+        {:else if app.view === 'speech'}
+          <div class="panel-enter view-panel"><SpeechPanel /></div>
+        {:else if app.view === 'files'}
+          <div class="panel-enter view-panel"><FilesPanel /></div>
+        {:else}
+          <div class="view-panel"><Chat /></div>
+        {/if}
+      {/key}
     </main>
     <SettingsPanel />
     <ThemeStudio />
   </div>
 {/if}
 <Toast />
+<ConfirmDialog />
 
 <style>
   .boot { height: 100%; height: 100dvh; display: grid; place-items: center; }
@@ -277,6 +281,14 @@
     max-width: 100%;
     overflow: hidden;
     position: relative;
+  }
+  .view-panel {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
   @media (max-width: 768px) {
     .layout {
