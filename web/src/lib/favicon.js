@@ -2,6 +2,7 @@
 // laptop-hammering frames while a reply is streaming. Frames are pre-rendered
 // to data URLs once; the interval only swaps link.href.
 import { buildRects, DUCK } from './pixel.js';
+import { ANIM } from './duck.js';
 import { app } from './state.svelte.js';
 
 const SIZE = 36; // fits the widest (18px) maps at 2x, small maps centered
@@ -32,15 +33,16 @@ export function startFavicon() {
   link.type = 'image/png';
 
   const MODES = {
-    swim: [frameUrl(DUCK.swim1), frameUrl(DUCK.swim2)],
-    code: [frameUrl(DUCK.code1), frameUrl(DUCK.code2)],
+    swim: ANIM.swim.frames.map(frameUrl),
+    code: ANIM.code.frames.map(frameUrl),
   };
 
   let i = 0;
   const tick = () => {
     const mode = app.streaming ? 'code' : 'swim';
-    i = (i + 1) % 2;
-    link.href = MODES[mode][i];
+    const frames = MODES[mode];
+    i = (i + 1) % frames.length;
+    link.href = frames[i];
   };
   tick();
   // busy tab flickers faster than an idle one

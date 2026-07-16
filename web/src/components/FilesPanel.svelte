@@ -211,7 +211,7 @@
 <div class="files">
   <header class="head">
     <div class="title">
-      <Duck px={2.2} mood="idle" interactive />
+      <Duck px={1.1} mood="idle" interactive />
       <div>
         <h1>Files</h1>
         <p>Generated images, uploads, docs, and projects the AI made — 15 GB per account.</p>
@@ -365,14 +365,14 @@
               <img src={progress.preview} alt="diffusion preview" />
             {:else if generating}
               <div class="preview-ph">
-                <Duck px={3.2} mood="image" />
+                <Duck px={1.6} mood="image" />
                 <span>{PHASE[progress?.phase] ?? 'working…'}</span>
               </div>
             {:else if finishedPreviews.length}
               <img src={finishedPreviews[finishedPreviews.length - 1]} alt="last result" />
             {:else}
               <div class="preview-ph idle">
-                <Duck px={3.2} mood="idle" interactive />
+                <Duck px={1.6} mood="idle" interactive />
                 <span>Live preview</span>
               </div>
             {/if}

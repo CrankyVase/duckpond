@@ -109,7 +109,7 @@
 <aside class:collapsed={app.sidebarCollapsed}>
   <div class="inner">
     <div class="brand">
-      <span class="mark"><Duck px={1.7} interactive /></span>
+      <span class="mark"><Duck px={0.85} interactive /></span>
       <span class="bname">DuckPond</span>
       <button type="button" class="ghost close-m" onclick={() => (app.sidebarCollapsed = true)}
         title="Close" aria-label="Close menu">

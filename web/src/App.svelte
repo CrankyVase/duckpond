@@ -1,6 +1,7 @@
 <script>
   import Chat from './components/Chat.svelte';
   import Duck from './components/Duck.svelte';
+  import DuckGallery from './components/DuckGallery.svelte';
   import FilesPanel from './components/FilesPanel.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
@@ -199,6 +200,14 @@
     return () => window.removeEventListener('dp:unauthorized', kicked);
   });
 
+  // Dumpling Lab: dev harness for the mascot, opened with #ducklab
+  let ducklab = $state(typeof location !== 'undefined' && location.hash === '#ducklab');
+  $effect(() => {
+    const onHash = () => (ducklab = location.hash === '#ducklab');
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  });
+
   function shortcuts(e) {
     if (!app.user) return;
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); app.modelPickerOpen = !app.modelPickerOpen; }
@@ -210,10 +219,13 @@
 
 <svelte:window onkeydown={shortcuts} />
 
-{#if inviteToken}
+{#if ducklab && import.meta.env.DEV}
+  <!-- dev server only: the lab is reachable without auth for mascot QA -->
+  <DuckGallery />
+{:else if inviteToken}
   <Invite token={inviteToken} />
 {:else if !app.authChecked}
-  <div class="boot"><span class="pulse"><Duck px={4} /></span></div>
+  <div class="boot"><span class="pulse"><Duck px={2} /></span></div>
 {:else if !app.user}
   <!-- Deep links never skip auth — only the login form is shown -->
   <Login />
@@ -222,7 +234,9 @@
     <Sidebar />
     <main>
       <Topbar />
-      {#if app.view === 'stats'}
+      {#if ducklab}
+        <DuckGallery />
+      {:else if app.view === 'stats'}
         <StatsPanel />
       {:else if app.view === 'speech'}
         <SpeechPanel />

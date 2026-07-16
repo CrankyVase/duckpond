@@ -28,7 +28,7 @@
 </script>
 
 <div class="welcome slide-up">
-  <div class="pond"><Duck px={5} mood="swim" interactive /></div>
+  <div class="pond"><Duck px={2.5} mood="swim" interactive /></div>
   <h2>{greeting}, {app.user?.username}</h2>
   <p>Everything runs on your own hardware — nothing leaves the pond.</p>
   <div class="cards">

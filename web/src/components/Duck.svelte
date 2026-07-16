@@ -1,17 +1,10 @@
 <script>
-  // The DuckPond mascot — Clawd energy, pond edition.
-  // Moods:
-  //   idle      — gentle breathe + blink + unprompted fillers
-  //   swim      — paddling, ripples, the odd dabble
-  //   code      — hammering on a tiny laptop
-  //   think / thinkhard — thought dots / mortarboard
-  //   search    — magnifying glass
-  //   image     — tiny easel
-  //   talk      — mouth cracks open while streaming
-  //   error     — eyes shut, sweat drop
-  // Fillers (idle only): stretch, preen, quack, sleep, wave, nom, confused, happy, hop, look
-  // Interactive: click/tap for a reaction; hover for a curious look.
-  import { DUCK } from '../lib/pixel.js';
+  // Dumpling — the DuckPond mascot. A hand-drawn 32×32 pixel duck driven by a
+  // single shared brain (mascot.svelte.js): every idle duck on the page is the
+  // same character performing the same beat, leaning toward the same point of
+  // attention. App states (props) override the brain; clicking pets him.
+  import { DUCK, ANIM } from '../lib/duck.js';
+  import { mind, startMascotBrain, petDuck, pokeGaze } from '../lib/mascot.svelte.js';
   import Pixel from './Pixel.svelte';
 
   let {
@@ -21,181 +14,95 @@
     interactive = false,
   } = $props();
 
-  const FRAMES = {
-    swim: [DUCK.swim1, DUCK.swim2],
-    code: [DUCK.code1, DUCK.code2],
-    think: [DUCK.think1, DUCK.think2],
-    thinkhard: [DUCK.thinkcap1, DUCK.thinkcap2],
-    search: [DUCK.search1, DUCK.search2],
-    image: [DUCK.image1, DUCK.image2],
-    talk: [DUCK.idle, DUCK.talk2],
-    error: [DUCK.error1, DUCK.error2],
-    stretch: [DUCK.stretch1, DUCK.stretch2],
-    preen: [DUCK.preen1, DUCK.preen2],
-    quack: [DUCK.quack1, DUCK.quack2],
-    sleep: [DUCK.sleep1, DUCK.sleep2],
-    wave: [DUCK.wave1, DUCK.wave2],
-    nom: [DUCK.nom1, DUCK.nom2],
-    confused: [DUCK.confused1, DUCK.confused2],
-    happy: [DUCK.happy1, DUCK.happy2],
-    hop: [DUCK.hop1, DUCK.hop2],
-    look: [DUCK.look1, DUCK.look2],
-  };
-  const SPEED = {
-    swim: 700, code: 220, think: 650, thinkhard: 900,
-    search: 500, image: 600, talk: 420, error: 380,
-    stretch: 450, preen: 500, quack: 260, sleep: 900, wave: 340, nom: 450, confused: 600,
-    happy: 380, hop: 280, look: 700,
-  };
-  const FILLERS = ['stretch', 'preen', 'quack', 'sleep', 'wave', 'nom', 'confused', 'happy', 'hop', 'look'];
-  // click reactions — cuter & punchier than idle fillers
-  const CLICKS = ['quack', 'wave', 'happy', 'hop', 'nom', 'look'];
+  startMascotBrain();
 
+  const IDLE = ANIM.idle;
   let frame = $state(0);
-  let blinking = $state(false);
-  let diving = $state(false);
-  let filler = $state(null);
-  let hover = $state(false);
-  let spin = $state(false);
 
-  // frame ticker — runs for any animated mood, or for a filler played over idle
+  // which animation plays: app mood wins; otherwise Dumpling's current beat
+  const anim = $derived.by(() => {
+    if (mood && mood !== 'idle') return ANIM[mood] ?? IDLE;
+    const b = mind.beat;
+    if (b && ANIM[b.name]) return ANIM[b.name];
+    return IDLE;
+  });
+
+  // frame ticker at the animation's own tempo
   $effect(() => {
-    const active = mood === 'idle' ? filler : mood;
-    if (!active) return;
-    const t = setInterval(() => (frame = frame + 1), SPEED[active] ?? 500);
+    const a = anim;
+    frame = 0;
+    if (!a || a.frames.length <= 1) return;
+    const t = setInterval(() => { frame = frame + 1; }, a.ms);
     return () => clearInterval(t);
   });
 
-  // idle-only: blink now and then
-  $effect(() => {
-    if (mood !== 'idle' || filler) return;
-    let closeTimer;
-    const t = setInterval(() => {
-      blinking = true;
-      closeTimer = setTimeout(() => (blinking = false), 140);
-    }, 3200 + Math.random() * 2200);
-    return () => { clearInterval(t); clearTimeout(closeTimer); };
+  const map = $derived.by(() => {
+    const a = anim;
+    if (a.loop === false) {
+      // one-shots hold their final frame instead of wrapping
+      return a.frames[Math.min(frame, a.frames.length - 1)];
+    }
+    return a.frames[frame % a.frames.length];
   });
+  const sprite = $derived({ map, palette: DUCK.palette });
+  const motion = $derived(bob ? 'bob' : (anim.css || ''));
 
-  // idle-only: unprompted little personality beats (more often than before)
-  $effect(() => {
-    if (mood !== 'idle') { filler = null; return; }
-    let hideTimer;
-    const t = setInterval(() => {
-      // rare double-rare "heart eyes" burst
-      const pick = Math.random() < 0.12
-        ? 'happy'
-        : FILLERS[Math.floor(Math.random() * FILLERS.length)];
-      filler = pick;
-      frame = 0;
-      hideTimer = setTimeout(() => (filler = null), 1600 + Math.random() * 900);
-    }, 7000 + Math.random() * 8000);
-    return () => { clearInterval(t); clearTimeout(hideTimer); filler = null; };
+  // attention lean: Dumpling tips toward whatever he's watching (spring-eased
+  // in CSS). Sleeping ducks don't track; busy (app-mood) ducks don't either.
+  const lean = $derived.by(() => {
+    if (mood && mood !== 'idle') return 0;
+    if (mind.hidden || mind.beat?.name === 'sleep') return 0;
+    return mind.gaze.x * (0.4 + mind.curiosity * 0.6);
   });
-
-  // swimming ducks dabble now and then: tail up for a couple of seconds
-  $effect(() => {
-    if (mood !== 'swim') { diving = false; return; }
-    let upTimer;
-    const t = setInterval(() => {
-      diving = true;
-      upTimer = setTimeout(() => (diving = false), 1600 + Math.random() * 900);
-    }, 4500 + Math.random() * 4000);
-    return () => { clearInterval(t); clearTimeout(upTimer); diving = false; };
-  });
-
-  function play(name, ms = 1800) {
-    filler = name;
-    frame = 0;
-    setTimeout(() => { if (filler === name) filler = null; }, ms);
-  }
 
   function onClick(e) {
-    if (!interactive || mood !== 'idle') return;
+    if (!interactive) return;
     e?.stopPropagation?.();
-    // rare spin-hop for pure delight
-    if (Math.random() < 0.18) {
-      spin = true;
-      play('hop', 900);
-      setTimeout(() => (spin = false), 700);
-      return;
-    }
-    play(CLICKS[Math.floor(Math.random() * CLICKS.length)], 1500 + Math.random() * 500);
+    petDuck();
   }
-
   function onEnter() {
-    if (!interactive || mood !== 'idle' || filler) return;
-    hover = true;
-    play('look', 1200);
+    if (!interactive || (mood && mood !== 'idle')) return;
+    pokeGaze();
   }
-  function onLeave() { hover = false; }
-
-  const map = $derived(mood === 'idle'
-    ? (filler ? FRAMES[filler][frame % 2] : (blinking ? DUCK.blink : DUCK.idle))
-    : mood === 'swim' && diving
-      ? [DUCK.dive1, DUCK.dive2][frame % 2]
-      : (FRAMES[mood] ?? [DUCK.idle])[frame % (FRAMES[mood]?.length ?? 1)]);
-  const sprite = $derived({ map, palette: DUCK.palette });
-  const cls = $derived(mood === 'idle' && filler ? filler : mood);
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <span
-  class="duck {cls}"
-  class:bob
+  class="duck {motion}"
   class:interactive
-  class:hover
-  class:spin
+  style="--lean:{lean};"
   role={interactive ? 'button' : undefined}
   tabindex={interactive ? 0 : undefined}
-  title={interactive ? 'pet the duck' : undefined}
+  title={interactive ? 'pet Dumpling' : undefined}
   onclick={onClick}
   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); } }}
   onmouseenter={onEnter}
-  onmouseleave={onLeave}
 >
-  <Pixel {sprite} {px} label="DuckPond duck" />
+  <span class="lean"><Pixel {sprite} {px} label="Dumpling the duck" /></span>
 </span>
 
 <style>
-  .duck { display: inline-block; line-height: 0; transform-origin: 50% 80%; }
+  .duck { display: inline-block; line-height: 0; transform-origin: 50% 85%; }
   .duck.interactive { cursor: pointer; }
-  .duck.interactive:hover { filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 45%, transparent)); }
-  .bob, .duck.think, .duck.thinkhard, .duck.image, .duck.talk,
-  .duck.stretch, .duck.preen, .duck.quack, .duck.wave, .duck.nom,
-  .duck.happy { animation: bob 2.6s ease-in-out infinite; }
-  .duck.swim, .duck.search, .duck.look { animation: sway 3.4s ease-in-out infinite; }
-  .duck.error { animation: shake 0.32s ease-in-out infinite; }
-  .duck.sleep { animation: breathe 3.2s ease-in-out infinite; opacity: 0.92; }
-  .duck.hop { animation: hop 0.45s ease-in-out infinite; }
-  .duck.idle { animation: breathe 4.2s ease-in-out infinite; }
-  .duck.spin { animation: spin 0.65s cubic-bezier(0.34, 1.4, 0.64, 1); }
-  @keyframes breathe {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-2.5%); }
+  .duck.interactive:hover { filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 45%, transparent)); }
+  /* the attention-lean lives on an inner span so it composes with keyframes */
+  .lean {
+    display: inline-block; line-height: 0;
+    transform: translateX(calc(var(--lean, 0) * 6%)) rotate(calc(var(--lean, 0) * 4deg));
+    transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
   }
-  @keyframes bob {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-4%); }
-  }
-  @keyframes sway {
-    0%, 100% { transform: translateX(0); }
-    50% { transform: translateX(6%); }
-  }
-  @keyframes shake {
-    0%, 100% { transform: translateX(0); }
-    25% { transform: translateX(-4%); }
-    75% { transform: translateX(4%); }
-  }
+  .duck.breathe { animation: breathe 4.2s ease-in-out infinite; }
+  .duck.bob { animation: bob 2.6s ease-in-out infinite; }
+  .duck.sway { animation: sway 3.4s ease-in-out infinite; }
+  .duck.shake { animation: shake 0.32s ease-in-out infinite; }
+  .duck.hop { animation: hop 0.5s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2%); } }
+  @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5%); } }
+  @keyframes sway { 0%, 100% { transform: translateX(0) rotate(0); } 50% { transform: translateX(5%) rotate(2deg); } }
+  @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5%); } 75% { transform: translateX(5%); } }
   @keyframes hop {
     0%, 100% { transform: translateY(0) scale(1, 1); }
-    35% { transform: translateY(-18%) scale(0.96, 1.06); }
-    70% { transform: translateY(0) scale(1.04, 0.94); }
-  }
-  @keyframes spin {
-    0% { transform: rotate(0deg) scale(1); }
-    40% { transform: rotate(-12deg) scale(1.08); }
-    70% { transform: rotate(8deg) scale(1.04); }
-    100% { transform: rotate(0deg) scale(1); }
+    35% { transform: translateY(-22%) scale(0.95, 1.07); }
+    70% { transform: translateY(0) scale(1.05, 0.93); }
   }
 </style>

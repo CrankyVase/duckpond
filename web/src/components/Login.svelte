@@ -37,7 +37,7 @@
 
 <div class="wrap">
   <form class="card slide-up" onsubmit={submit}>
-    <div class="logo"><Duck px={4} bob interactive /></div>
+    <div class="logo"><Duck px={2} bob interactive /></div>
     <h1>DuckPond</h1>
     <p class="hint">
       {app.setupNeeded ? 'First run — create the owner account.' : 'Your models, your pond.'}

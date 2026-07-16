@@ -639,7 +639,7 @@
     {/if}
 
     <div class="about">
-      <Duck px={2.2} />
+      <Duck px={1.1} />
       <div class="aname">DuckPond</div>
       <div class="aver mono">self-hosted · v0.1.0</div>
     </div>

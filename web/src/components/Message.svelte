@@ -138,7 +138,7 @@
   </div>
 {:else}
   <div class="arow fade-in" class:pinned={msg.pinned}>
-    <div class="avatar"><Duck px={1.6} mood={streaming ? mood : 'idle'} /></div>
+    <div class="avatar"><Duck px={0.8} mood={streaming ? mood : 'idle'} /></div>
     <div class="abody">
       {#if search}
         <SearchTrace {search} />
