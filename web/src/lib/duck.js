@@ -1168,3 +1168,42 @@ const readS2 = compose(CODE_SHELL, ...eraseLaptop,
 
 ANIM.image = { frames: [paintS1, paintS2, paintS3], ms: 460, loop: true, css: '' };
 ANIM.read  = { frames: [readS1, readS1, readS2], ms: 700, loop: true, css: 'breathe' };
+
+// ==========================================================================
+// ROAMER kit — the composer-rim duck (RoamDuck.svelte). Slow, big, ambient.
+// walk: a waddling march — one foot lifts while the other plants; the glide
+// itself is a smooth CSS translate, so 4 leg frames is all a waddle needs.
+// mow:  pushing a little red rotary mower — handle, engine, turning wheel
+// hubs, grass flecks popping off the deck.
+// ==========================================================================
+const eraseFeet = [
+  [['~~~~~~~~~~~~~~'], 8, 27], [['~~~~~~~~~~~~~~'], 8, 28], [['~~~~~~~~~~~~~~'], 8, 29],
+];
+const footDown = (ox) => [[['.OO.', 'OOOO', 'oooo'], ox, 27]];
+const footUp   = (ox) => [[['OOOO', 'oooo'], ox, 26]];
+const walkA = compose(STAND, ...eraseFeet, ...footUp(9),  ...footDown(16));
+const walkB = compose(STAND, ...eraseFeet, ...footDown(9), ...footDown(16));
+const walkC = compose(STAND, ...eraseFeet, ...footDown(9), ...footUp(16));
+
+const mowHandle = [
+  [['t'], 20, 19], [['t'], 21, 20], [['t'], 22, 21], [['t'], 23, 22], [['t'], 24, 23],
+];
+const mowerBody = [
+  [['GGGG'], 25, 21],          // engine block
+  [['GggG'], 25, 22],
+  [['JJJJJJJ'], 24, 24],       // red deck
+  [['jjjjjjj'], 24, 25],
+];
+const mowWheels = (t) => [
+  [['zz', 'zz'], 24, 26], [['zz', 'zz'], 28, 26],
+  [[t ? 'g' : '.'], t ? 24 : 25, t ? 26 : 27],   // hubs swap corners = turning
+  [[t ? '.' : 'g'], t ? 29 : 28, t ? 27 : 26],
+];
+const mowClip = (t) => t
+  ? [[['V'], 27, 18], [['V'], 29, 20], [['V'], 26, 17]]
+  : [[['V'], 26, 19], [['V'], 28, 17], [['V'], 30, 20]];
+const mowA = compose(STAND, [gripWing, 18, 15], ...mowHandle, ...mowerBody, ...mowWheels(0), ...mowClip(0));
+const mowB = compose(STAND, [gripWing, 18, 15], ...mowHandle, ...mowerBody, ...mowWheels(1), ...mowClip(1));
+
+ANIM.walk = { frames: [walkA, walkB, walkC, walkB], ms: 150, loop: true, css: '' };
+ANIM.mow  = { frames: [mowA, mowB], ms: 240, loop: true, css: '' };

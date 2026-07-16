@@ -47,6 +47,15 @@
   const sprite = $derived({ map, palette: DUCK.palette });
   const motion = $derived(bob ? 'bob' : (anim.css || ''));
 
+  // soft hand-off when the scene changes (frames within a scene stay crisp)
+  let swaps = $state(0);
+  let lastAnim = null;
+  $effect(() => {
+    const a = anim;
+    if (lastAnim !== null && a !== lastAnim) swaps += 1;
+    lastAnim = a;
+  });
+
   // attention lean: Dumpling tips toward whatever he's watching (spring-eased
   // in CSS). Sleeping ducks don't track; busy (app-mood) ducks don't either.
   const lean = $derived.by(() => {
@@ -78,7 +87,7 @@
   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); } }}
   onmouseenter={onEnter}
 >
-  <span class="lean"><Pixel {sprite} {px} label="Dumpling the duck" /></span>
+  <span class="lean">{#key swaps}<span class="handoff"><Pixel {sprite} {px} label="Dumpling the duck" /></span>{/key}</span>
 </span>
 
 <style>
@@ -91,6 +100,8 @@
     transform: translateX(calc(var(--lean, 0) * 6%)) rotate(calc(var(--lean, 0) * 4deg));
     transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
   }
+  .handoff { display: inline-block; line-height: 0; animation: handoff 0.18s ease-out; }
+  @keyframes handoff { from { opacity: 0.25; } }
   .duck.breathe { animation: breathe 4.2s ease-in-out infinite; }
   .duck.bob { animation: bob 2.6s ease-in-out infinite; }
   .duck.sway { animation: sway 3.4s ease-in-out infinite; }

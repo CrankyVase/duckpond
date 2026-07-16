@@ -8,6 +8,7 @@
   import { toast } from '../lib/toast.svelte.js';
   import ChatFiles from './ChatFiles.svelte';
   import Message from './Message.svelte';
+  import RoamDuck from './RoamDuck.svelte';
   import RunFeed from './RunFeed.svelte';
   import Welcome from './Welcome.svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
@@ -1086,6 +1087,7 @@
       </button>
     {/if}
     <div class="composer" class:active={busy}>
+      <RoamDuck />
       {#if attachedDocs.length || attachedImgs.length}
         <div class="docchips">
           {#each attachedImgs as u (u.id)}
@@ -1191,6 +1193,7 @@
     box-shadow: var(--shadow-lg);
   }
   .composer {
+    position: relative;
     display: flex; flex-direction: column;
     background: var(--bg-input);
     border: 1px solid var(--border);
