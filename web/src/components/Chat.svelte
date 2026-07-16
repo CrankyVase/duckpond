@@ -121,17 +121,22 @@
   }
   function onScroll() { atBottom = nearBottom(); }
 
-  // rAF-batched flush: SSE deltas accumulate in plain vars, one state write per frame.
+  // rAF-batched flush: SSE deltas accumulate in plain vars, one paint per frame.
+  // Keeps token arrival smooth even when the model dumps large chunks.
   function scheduleFlush() {
     if (raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;
       if (!app.streaming) return;
       const stick = prefs.autoScroll && nearBottom();
+      // Drain whatever arrived this frame in one write so the DOM isn't thrashing
       if (pendText) { app.streaming.text += pendText; pendText = ''; }
       if (pendThink) { app.streaming.thinking += pendThink; pendThink = ''; }
       if (toolBuf) app.streaming.liveTool = parseLiveTool(toolBuf);
-      if (stick) scrollToBottom(true);
+      if (stick) {
+        // next frame: scroll after layout so the caret stays in view without jump
+        requestAnimationFrame(() => scrollToBottom(true));
+      }
     });
   }
 
