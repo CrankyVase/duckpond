@@ -1170,7 +1170,8 @@ ANIM.image = { frames: [paintS1, paintS2, paintS3], ms: 460, loop: true, css: ''
 ANIM.read  = { frames: [readS1, readS1, readS2], ms: 700, loop: true, css: 'breathe' };
 
 // ==========================================================================
-// ROAMER kit — the composer-rim duck (RoamDuck.svelte). Slow, big, ambient.
+// ROAMER kit — locomotion scenes (amble + push-mower) kept for future spots
+// that need a moving duck. Slow, big, ambient.
 // walk: a waddling march — one foot lifts while the other plants; the glide
 // itself is a smooth CSS translate, so 4 leg frames is all a waddle needs.
 // mow:  pushing a little red rotary mower — handle, engine, turning wheel

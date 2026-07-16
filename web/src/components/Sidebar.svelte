@@ -137,7 +137,7 @@
     <div class="brand">
       <button type="button" class="brand-btn" onclick={goHome}
         title="Home — new chat" aria-label="DuckPond home">
-        <span class="mark"><Duck px={0.85} interactive /></span>
+        <span class="mark"><Duck px={0.85} still /></span>
         <span class="bname">DuckPond</span>
       </button>
       <button type="button" class="ghost collapse-d" onclick={() => (app.sidebarCollapsed = true)}

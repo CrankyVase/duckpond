@@ -12,6 +12,7 @@
     bob = false,
     mood = 'idle',
     interactive = false,
+    still = false,
   } = $props();
 
   startMascotBrain();
@@ -19,8 +20,11 @@
   const IDLE = ANIM.idle;
   let frame = $state(0);
 
-  // which animation plays: app mood wins; otherwise Dumpling's current beat
+  // which animation plays: app mood wins; otherwise Dumpling's current beat.
+  // `still` pins him to the scene's first frame — for logo/mark spots where a
+  // moving duck would compete with the one animated duck on screen.
   const anim = $derived.by(() => {
+    if (still) { const a = ANIM[mood] ?? IDLE; return { ...a, frames: [a.frames[0]], css: '' }; }
     if (mood && mood !== 'idle') return ANIM[mood] ?? IDLE;
     const b = mind.beat;
     if (b && ANIM[b.name]) return ANIM[b.name];
@@ -59,6 +63,7 @@
   // attention lean: Dumpling tips toward whatever he's watching (spring-eased
   // in CSS). Sleeping ducks don't track; busy (app-mood) ducks don't either.
   const lean = $derived.by(() => {
+    if (still) return 0;
     if (mood && mood !== 'idle') return 0;
     if (mind.hidden || mind.beat?.name === 'sleep') return 0;
     return mind.gaze.x * (0.4 + mind.curiosity * 0.6);
