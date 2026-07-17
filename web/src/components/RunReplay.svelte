@@ -58,17 +58,31 @@
 
 <style>
   .replay {
-    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
+    border: 1px solid var(--border-soft); border-radius: calc(14px * var(--rf));
     background: var(--bg-card); overflow: hidden; margin-bottom: 10px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+    transition: border-color 160ms ease, box-shadow 200ms ease;
+  }
+  .replay:hover {
+    border-color: var(--border);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14), 0 6px 20px rgba(0, 0, 0, 0.16);
   }
   .head { display: flex; align-items: center; }
   .toggle {
     all: unset; cursor: pointer; flex: 1; min-width: 0;
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 12px; font-size: 12.5px; color: var(--text-dim);
+    display: flex; align-items: center; gap: 9px;
+    padding: 9px 13px; font-size: 12.5px; color: var(--text-dim);
+    transition: background 130ms ease;
   }
   .toggle:hover { background: var(--bg-hover); }
-  .hicon { color: var(--accent-deep); display: grid; place-items: center; }
+  .hicon {
+    display: grid; place-items: center; flex-shrink: 0;
+    width: 24px; height: 24px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+    border-radius: calc(7px * var(--rf));
+  }
   .label { font-weight: 600; color: var(--text); }
   .sum { color: var(--text-faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .st { font-family: var(--mono); font-size: 10.5px; padding: 1px 8px; border-radius: 999px; background: var(--bg-raised); }

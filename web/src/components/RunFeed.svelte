@@ -41,7 +41,8 @@
 
   // friendlier chip label for the project-mode gate call
   function toolLabel(name) {
-    return name === 'start_project' ? 'starting project' : name;
+    if (name === 'start_project') return 'starting project';
+    return String(name ?? '').replace(/_/g, ' ');
   }
 
   // keep the live-coding block pinned to its newest line
@@ -138,12 +139,15 @@
 </div>
 
 <style>
-  .runfeed { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .runfeed { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
   /* every event settles in quietly as it arrives */
-  .runfeed > * { animation: toolIn 200ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+  .runfeed > * { animation: toolIn 260ms var(--ease-out); }
   @keyframes toolIn {
-    from { opacity: 0; transform: translateY(5px); }
+    from { opacity: 0; transform: translateY(6px); }
     to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .runfeed > * { animation: none; }
   }
   .note { font-size: 13.5px; line-height: 1.6; color: var(--text); overflow-wrap: break-word; }
   .note :global(p) { margin: 0 0 6px; }
@@ -177,7 +181,7 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
-  .out { border: 1px solid var(--border-soft); border-radius: calc(8px * var(--rf)); background: var(--bg); overflow: hidden; }
+  .out { border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); background: var(--bg-code); overflow: hidden; }
   .outhead {
     all: unset; display: flex; align-items: center; gap: 8px; width: 100%;
     box-sizing: border-box; padding: 6px 10px; cursor: pointer;
@@ -248,8 +252,10 @@
   }
 
   .live {
-    border: 1px solid color-mix(in srgb, var(--accent-dim) 35%, var(--border-soft));
-    border-radius: calc(10px * var(--rf)); background: var(--bg); overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--accent-dim) 40%, var(--border-soft));
+    border-radius: calc(12px * var(--rf)); background: var(--bg-code); overflow: hidden;
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-dim) 12%, transparent),
+                0 4px 18px rgba(0, 0, 0, 0.22);
   }
   .livehead {
     display: flex; align-items: center; gap: 7px;

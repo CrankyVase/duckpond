@@ -52,8 +52,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border-soft);
+    padding: 10px 14px 6px;
     background: var(--bg);
     flex-shrink: 0;
     min-width: 0;
@@ -82,11 +81,13 @@
     min-width: 0;
   }
   .vram {
-    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
-    padding: 5px 11px; border-radius: 999px;
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+    padding: 5px 9px; border-radius: 999px;
     white-space: nowrap; user-select: none; flex-shrink: 0;
+    transition: color 140ms ease, background 140ms ease;
   }
+  .vram:hover { color: var(--text-dim); background: var(--bg-raised); }
+  .vram .vnum { color: var(--text-dim); }
   .vram.hot { color: var(--red); }
   .vlabel { color: var(--text-faint); letter-spacing: 0.05em; }
   .ctxwrap { flex-shrink: 0; }

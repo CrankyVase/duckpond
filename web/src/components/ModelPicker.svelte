@@ -80,7 +80,7 @@
   {#if app.modelPickerOpen}
     <div class="backdrop" onclick={() => (app.modelPickerOpen = false)}
       role="presentation"></div>
-    <div class="menu slide-up">
+    <div class="menu">
       <div class="searchrow">
         <Search size={14} />
         <input type="search" name="model-search" bind:this={inputEl} bind:value={search} placeholder="Search models…"
@@ -139,13 +139,15 @@
   .picker { position: relative; min-width: 0; max-width: 100%; width: 100%; }
   .current {
     display: flex; align-items: center; gap: 9px;
-    width: 100%; max-width: min(340px, 100%);
-    font-size: 13.5px; font-weight: 500; padding: 7px 12px;
+    width: auto; max-width: min(340px, 100%);
+    font-size: 13.5px; font-weight: 500; padding: 7px 13px;
     background: transparent; border-color: transparent;
+    border-radius: 999px;
     min-width: 0;
     box-sizing: border-box;
+    transition: background 140ms ease, border-color 140ms ease;
   }
-  .current:hover { background: var(--bg-hover); border-color: transparent; }
+  .current:hover { background: var(--bg-raised); border-color: var(--border-soft); }
   .name {
     flex: 1 1 auto; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -161,6 +163,15 @@
     max-height: min(440px, 70dvh); display: flex; flex-direction: column;
     background: var(--bg-card); border: 1px solid var(--border);
     border-radius: calc(14px * var(--rf)); padding: 8px; box-shadow: var(--shadow-lg);
+    transform-origin: top left;
+    animation: menuPop 220ms var(--ease-out);
+  }
+  @keyframes menuPop {
+    from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .menu { animation: none; }
   }
   @media (max-width: 768px) {
     .picker { width: 100%; max-width: 100%; }

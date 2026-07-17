@@ -27,6 +27,11 @@
   --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
   --mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
   --sans: 'Inter Variable', 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --serif: 'Fraunces Variable', Georgia, 'Times New Roman', serif;
+  /* motion system — one easing family for the whole app */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.3, 1.25, 0.4, 1);
   --rf: 1;                 /* corner-roundness factor (Theme Studio) */
   --chat-maxw: 780px;      /* chat column width (Theme Studio) */
   /* effects layer (Theme Studio → applyTheme) */
@@ -170,8 +175,12 @@ button.danger-ghost { background: transparent; border-color: transparent; color:
 button.danger-ghost:hover { background: var(--red-soft); }
 
 :focus-visible {
-  outline: none;
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 2px;
 }
+/* pointer interactions never show the ring — keyboard only */
+:focus:not(:focus-visible) { outline: none; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
 
 input, textarea, select {
   font: inherit;
@@ -330,14 +339,47 @@ html[data-fontsize='large'] .md, html[data-fontsize='large'] .ububble { font-siz
 /* ========== motion (quiet — no neon, no bounce) ========== */
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.fade-in { animation: fadeIn 160ms ease; }
-.slide-up { animation: slideUp 200ms ease; }
-.slide-up-soft { animation: slideUp 200ms ease; }
-.panel-enter { animation: fadeIn 140ms ease; }
+.fade-in { animation: fadeIn 160ms var(--ease-out); }
+.slide-up { animation: slideUp 260ms var(--ease-out); }
+.slide-up-soft { animation: slideUp 260ms var(--ease-out); }
+.panel-enter { animation: fadeIn 180ms var(--ease-out); }
+
+/* ---- default motion pass (2026-07 redesign): every surface enters softly.
+   These use unscoped component class names on purpose (Svelte keeps them).
+   data-anim='off' and prefers-reduced-motion still flatten everything. ---- */
+@keyframes dpRise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes dpPanelIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.view-panel { animation: dpPanelIn 300ms var(--ease-out); }
+.urow, .arow, .qmsg, .followups { animation: dpRise 300ms var(--ease-out); }
+/* widgets settle in as the model places them (.wcard is the universal shell) */
+.wcard { animation: dpRise 280ms var(--ease-out); }
+/* interactive cards get a soft lift + real shadow */
+.wframe, .pcard, .mcard, .card, .rcard {
+  transition: transform 140ms var(--ease-out), border-color 140ms ease,
+              box-shadow 180ms ease, background 140ms ease, color 140ms ease;
+}
+.wframe:hover, .pcard:hover, .mcard:hover, .card:hover, .rcard:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+/* theme switches crossfade surfaces instead of snapping */
+body, aside, header, .studio, .thread, .dock {
+  transition: background-color 300ms ease, border-color 300ms ease;
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .fade-in, .slide-up, .slide-up-soft, .panel-enter {
+  .fade-in, .slide-up, .slide-up-soft, .panel-enter,
+  .view-panel, .urow, .arow, .qmsg, .followups, .wframe, .wcard {
     animation: none !important;
+  }
+  .wframe:hover, .pcard:hover, .mcard:hover, .card:hover, .rcard:hover {
+    transform: none;
   }
 }
 

@@ -6,7 +6,9 @@
   import Code from '@lucide/svelte/icons/code';
   import FileText from '@lucide/svelte/icons/file-text';
 
-  let { onsuggest } = $props();
+  // `composer` is a snippet from Chat.svelte — the same composer that docks at
+  // the bottom of a running thread renders here, centered, hero-style.
+  let { onsuggest, composer } = $props();
 
   const chips = [
     { icon: Brain, label: 'Explain transformers',
@@ -30,15 +32,21 @@
 </script>
 
 <div class="welcome">
-  <div class="pond">
-    <Duck px={2.5} mood="swim" interactive />
-  </div>
-  <h2>{greeting}, {name}</h2>
+  <h1 class="greet">
+    <span class="gduck"><Duck px={1.15} mood="swim" interactive /></span>
+    <span class="gtext">{greeting}, {name}</span>
+  </h1>
+
+  {#if composer}
+    <div class="herobox">{@render composer()}</div>
+  {/if}
+
   <div class="chips">
-    {#each chips as c (c.label)}
+    {#each chips as c, i (c.label)}
       <button
         type="button"
         class="chip"
+        style="--i:{i}"
         onclick={() => onsuggest?.(c.prompt)}
       >
         <c.icon size={14} />
@@ -50,61 +58,91 @@
 
 <style>
   .welcome {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    min-height: min(52vh, 460px);
+    width: 100%;
+    display: flex; flex-direction: column; align-items: center;
     text-align: center;
-    padding: 28px 16px 20px;
+    padding: 16px;
+    box-sizing: border-box;
   }
 
-  .pond {
-    display: grid; place-items: center;
-    width: 80px; height: 80px; border-radius: 22px;
-    background: var(--bg-raised);
-    border: 1px solid var(--border-soft);
-    margin-bottom: 18px;
-  }
-  h2 {
-    margin: 0 0 24px;
-    font-size: clamp(20px, 3.6vw, 24px);
-    font-weight: 500;
-    letter-spacing: -0.02em;
+  .greet {
+    display: flex; align-items: center; gap: 16px;
+    margin: 0 0 28px;
+    font-family: var(--serif);
+    font-size: clamp(26px, 4.2vw, 38px);
+    font-weight: 480;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
     color: var(--text);
+    animation: greetIn 560ms var(--ease-out) both;
+  }
+  .gduck {
+    display: grid; place-items: center;
+    flex-shrink: 0;
+    animation: duckIn 640ms var(--ease-spring) both;
+  }
+  .gtext { min-width: 0; }
+
+  .herobox {
+    width: 100%;
+    max-width: min(var(--chat-maxw), 720px);
+    text-align: left;
+    animation: riseIn 560ms var(--ease-out) 90ms both;
   }
 
   .chips {
     display: flex; flex-wrap: wrap; justify-content: center;
     gap: 8px;
-    max-width: 520px;
+    max-width: 680px;
+    margin-top: 22px;
   }
   .chip {
     display: inline-flex; align-items: center; gap: 7px;
-    padding: 8px 13px;
+    padding: 8px 14px;
     font-size: 13px; font-weight: 450; color: var(--text-dim);
-    background: var(--bg-raised);
+    background: transparent;
     border: 1px solid var(--border-soft);
     border-radius: 999px;
-    transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+    animation: riseIn 480ms var(--ease-out) both;
+    animation-delay: calc(180ms + var(--i) * 55ms);
+    transition: border-color 140ms ease, background 140ms ease, color 140ms ease,
+                transform 140ms var(--ease-out);
   }
   .chip :global(svg) {
     color: var(--text-faint);
     flex-shrink: 0;
+    transition: color 140ms ease;
   }
   .chip:hover {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent-dim) 40%, var(--border));
-    background: var(--bg-hover);
+    border-color: color-mix(in srgb, var(--accent-dim) 45%, var(--border));
+    background: var(--bg-raised);
+    transform: translateY(-1px);
   }
-  .chip:hover :global(svg) { color: var(--text-dim); }
-  .chip:active { background: var(--bg-card); }
+  .chip:hover :global(svg) { color: var(--accent); }
+  .chip:active { transform: none; background: var(--bg-card); }
+
+  @keyframes greetIn {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes duckIn {
+    from { opacity: 0; transform: translateY(6px) scale(0.7); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes riseIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .greet, .gduck, .herobox, .chip { animation: none; }
+  }
 
   @media (max-width: 768px) {
-    .welcome {
-      min-height: min(44vh, 360px);
-      padding: 18px 12px 14px;
-    }
-    .pond { width: 72px; height: 72px; border-radius: 18px; margin-bottom: 14px; }
-    h2 { font-size: 19px; margin-bottom: 18px; }
-    .chips { gap: 6px; max-width: 100%; }
+    .welcome { padding: 12px 4px; }
+    .greet { gap: 12px; margin-bottom: 20px; font-size: clamp(22px, 6vw, 28px); }
+    .chips { gap: 6px; margin-top: 18px; }
     .chip { padding: 8px 12px; font-size: 12.5px; }
   }
 </style>

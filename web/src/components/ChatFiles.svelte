@@ -208,18 +208,26 @@
     all: unset; cursor: pointer; align-self: flex-start;
     display: flex; flex-direction: column; align-items: center; gap: 8px;
     padding: 12px 7px; margin: 10px 8px 0 0;
-    border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf));
+    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
     color: var(--text-faint); background: var(--bg-sidebar);
+    transition: color 140ms ease, background 140ms ease, transform 140ms var(--ease-out);
   }
-  .rail:hover { color: var(--text); background: var(--bg-hover); }
+  .rail:hover { color: var(--text); background: var(--bg-hover); transform: translateX(-2px); }
   .railtxt { writing-mode: vertical-rl; font-size: 11px; letter-spacing: 0.08em; }
 
   .panel {
-    width: 220px; flex-shrink: 0; margin: 10px 10px 10px 0;
-    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
+    width: 224px; flex-shrink: 0; margin: 10px 10px 10px 0;
+    border: 1px solid var(--border-soft); border-radius: calc(16px * var(--rf));
     background: var(--bg-sidebar);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14), 0 8px 24px rgba(0, 0, 0, 0.12);
     display: flex; flex-direction: column; min-height: 0; max-height: calc(100% - 20px);
+    animation: panelSlide 320ms var(--ease-out);
   }
+  @keyframes panelSlide {
+    from { opacity: 0; transform: translateX(14px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) { .panel { animation: none; } }
   @media (max-width: 768px) {
     .rail {
       position: fixed; right: 10px; bottom: max(72px, calc(56px + env(safe-area-inset-bottom)));
@@ -251,15 +259,22 @@
   .hbtn:hover { color: var(--text); background: var(--bg-hover); }
   .hbtn.dim { opacity: 0.35; }
 
-  .tree { overflow-y: auto; flex: 1; padding: 4px 0; }
-  .rowwrap { display: flex; align-items: center; gap: 2px; padding-right: 4px; }
+  .tree { overflow-y: auto; flex: 1; padding: 5px 4px; }
+  .rowwrap {
+    display: flex; align-items: center; gap: 2px; padding-right: 4px;
+    border-radius: calc(7px * var(--rf));
+    transition: background 120ms ease;
+  }
+  .rowwrap:hover { background: var(--bg-hover); }
   .row {
     all: unset; box-sizing: border-box; flex: 1; min-width: 0; cursor: pointer;
     display: flex; align-items: center; gap: 6px;
-    padding-top: 3.5px; padding-bottom: 3.5px; padding-right: 4px;
+    padding-top: 4.5px; padding-bottom: 4.5px; padding-right: 4px;
+    border-radius: calc(7px * var(--rf));
     font-size: 12px; color: var(--text-dim);
+    transition: color 120ms ease;
   }
-  .row:hover { background: var(--bg-hover); color: var(--text); }
+  .rowwrap:hover .row { color: var(--text); }
   .row.dir { cursor: default; color: var(--text-faint); width: 100%; }
   .pv {
     all: unset; cursor: pointer; flex-shrink: 0;

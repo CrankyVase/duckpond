@@ -10,7 +10,6 @@
   import Files from '@lucide/svelte/icons/files';
   import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
-  import MessageSquare from '@lucide/svelte/icons/message-square';
   import Palette from '@lucide/svelte/icons/palette';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
   import Search from '@lucide/svelte/icons/search';
@@ -195,7 +194,6 @@
             href={app.user?.id != null ? chatPath(app.user.id, c.title, c.id) : '#'}
             onclick={(e) => { e.preventDefault(); openChat(c.id); }}
             role="link">
-            <span class="ci"><MessageSquare size={13} /></span>
             <span class="title">{c.title}</span>
             <button class="del" onclick={(e) => remove(c.id, e)} title="Delete chat">
               <X size={13} />
@@ -315,15 +313,24 @@
   }
   .new {
     width: 100%; display: flex; align-items: center; gap: 9px;
-    padding: 9px 13px; font-size: 13.5px; font-weight: 500;
-    background: var(--bg-raised); box-sizing: border-box;
+    padding: 9px 12px; font-size: 13.5px; font-weight: 500;
+    background: transparent; border-color: transparent;
+    box-sizing: border-box;
+    transition: background 130ms ease, transform 130ms var(--ease-out);
   }
-  .new :global(svg) { color: var(--text-dim); flex-shrink: 0; }
+  .new:hover { background: var(--bg-hover); border-color: transparent; }
+  .new :global(svg) { color: var(--accent); flex-shrink: 0; }
   .search {
     display: flex; align-items: center; gap: 8px;
     padding: 0 11px; border-radius: calc(10px * var(--rf));
-    background: var(--bg-input); border: 1px solid var(--border-soft);
+    background: transparent; border: 1px solid transparent;
     color: var(--text-faint); min-width: 0;
+    transition: background 140ms ease, border-color 140ms ease;
+  }
+  .search:hover { background: var(--bg-raised); }
+  .search:focus-within {
+    background: var(--bg-input);
+    border-color: var(--border-soft);
   }
   .search input {
     flex: 1; min-width: 0; background: none; border: none; box-shadow: none;
@@ -345,15 +352,13 @@
   }
   .item {
     display: flex; align-items: center; gap: 8px;
-    padding: 7px 8px 7px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer;
+    padding: 7px 8px 7px 11px; border-radius: calc(9px * var(--rf)); cursor: pointer;
     color: var(--text-dim); font-size: 13.5px;
     text-decoration: none; min-width: 0;
-    transition: background 110ms ease, color 110ms ease;
+    transition: background 120ms ease, color 120ms ease, transform 120ms var(--ease-out);
   }
-  .item:hover { background: var(--bg-hover); color: var(--text); }
+  .item:hover { background: var(--bg-hover); color: var(--text); transform: translateX(2px); }
   .item.active { background: var(--bg-raised); color: var(--text); }
-  .ci { display: grid; place-items: center; color: var(--text-faint); flex-shrink: 0; }
-  .item.active .ci { color: var(--text-dim); }
   .title {
     flex: 1 1 auto; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -381,23 +386,22 @@
   }
 
   .pages {
-    display: flex; gap: 6px; padding: 10px 12px 8px;
+    display: flex; flex-direction: column; gap: 1px; padding: 8px 8px 6px;
     border-top: 1px solid var(--border-soft);
     flex-shrink: 0;
   }
   .page {
-    all: unset; cursor: pointer; flex: 1 1 0; min-width: 0;
-    display: flex; align-items: center; justify-content: center; gap: 7px;
-    padding: 8px 10px; border-radius: calc(9px * var(--rf));
+    all: unset; cursor: pointer; min-width: 0;
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 11px; border-radius: calc(9px * var(--rf));
     text-decoration: none; box-sizing: border-box;
-    font-size: 12px; font-weight: 500; color: var(--text-dim);
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
+    font-size: 13px; font-weight: 450; color: var(--text-dim);
+    transition: background 120ms ease, color 120ms ease, transform 120ms var(--ease-out);
   }
-  .page:hover { background: var(--bg-hover); color: var(--text); }
-  .page.active { color: var(--text); border-color: var(--border); background: var(--bg-card); }
+  .page:hover { background: var(--bg-hover); color: var(--text); transform: translateX(2px); }
+  .page.active { color: var(--text); background: var(--bg-raised); transform: none; }
   .page :global(svg) { color: var(--text-faint); flex-shrink: 0; }
-  .page.active :global(svg) { color: var(--text-dim); }
+  .page.active :global(svg), .page:hover :global(svg) { color: var(--text-dim); }
 
   .bottom {
     padding: 11px 14px;
@@ -524,25 +528,18 @@
     .item .del { opacity: 0.75; }
     .del:active { opacity: 1; background: rgba(192, 96, 79, 0.18); color: var(--red); }
 
-    /* equal Files | Stats tiles */
     .pages {
-      display: grid !important;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      padding: 10px 12px 8px;
+      gap: 2px;
+      padding: 8px 8px 6px;
       border-top: 1px solid var(--border-soft);
     }
     .page {
-      flex: none;
       width: 100%;
       min-height: 44px;
-      padding: 10px 8px;
-      font-size: 13px;
-      gap: 6px;
-    }
-    /* owner Control: full-width third row */
-    .pages > :nth-child(3) {
-      grid-column: 1 / -1;
+      padding: 10px 12px;
+      font-size: 14px;
+      gap: 10px;
+      box-sizing: border-box;
     }
 
     .bottom {

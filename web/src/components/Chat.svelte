@@ -88,6 +88,8 @@
   const path = $derived(app.conv ? visiblePath(app.conv.messages, app.conv.active_leaf_id) : []);
   const kidsMap = $derived(app.conv ? childrenMap(app.conv.messages) : new Map());
   const busy = $derived(!!app.streaming);
+  // empty conversation → hero layout: greeting + composer centered mid-screen
+  const isHero = $derived(!path.length && !app.streaming && !msgQueue.length);
   // the stream in app.streaming may belong to a conversation the user has
   // since navigated away from — only show its live bubble on that conversation
   const streamingHere = $derived(app.streaming && app.conv && app.streaming.convId === app.conv.id ? app.streaming : null);
@@ -1005,15 +1007,90 @@
     e.target.style.height = 'auto';
     e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px';
   }
+
+  // The composer remounts when the layout flips hero ↔ thread — keep the
+  // caret in it on desktop (no keyboard pop on touch).
+  $effect(() => {
+    if (inputEl && typeof matchMedia !== 'undefined'
+        && matchMedia('(pointer: fine)').matches) {
+      inputEl.focus();
+    }
+  });
 </script>
+
+{#snippet composerBox()}
+  <div class="composer" class:active={busy} class:drag={dragOver}
+    ondragenter={onComposerDrag} ondragover={onComposerDrag}
+    ondragleave={onComposerDrag} ondrop={onComposerDrag}
+    onpaste={onComposerPaste}>
+    {#if attachedDocs.length || attachedImgs.length}
+      <div class="docchips">
+        {#each attachedImgs as u (u.id)}
+          <span class="docchip imgchip" title={u.description || 'Attached image — every model gets a description; vision models also see pixels'}>
+            <img class="ithumb" src={`/api/uploads/${u.id}/file`} alt="" />
+            <span class="dname">{u.name}</span>
+            <button class="dx" onclick={() => detachImgChip(u)} title="Detach from this chat"><X size={11} /></button>
+          </span>
+        {/each}
+        {#each attachedDocs as d (d.id)}
+          <span class="docchip" title={`${d.chunks} section${d.chunks === 1 ? '' : 's'} — any model can read this file`}>
+            <FileText size={12} />
+            <span class="dname">{d.name}</span>
+            <button class="dx" onclick={() => detachDocChip(d)} title="Detach from this chat"><X size={11} /></button>
+          </span>
+        {/each}
+      </div>
+    {/if}
+    <textarea rows="1"
+      placeholder={busy
+        ? 'Queue a follow-up…'
+        : dragOver ? 'Drop files to attach…' : 'Message DuckPond…'}
+      bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
+      onpaste={onComposerPaste}
+      disabled={!app.conv}></textarea>
+    <div class="bar">
+      <input type="file" multiple hidden bind:this={fileInput}
+        accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
+        onchange={(e) => { uploadDocs([...e.target.files]); e.target.value = ''; }} />
+      <button class="tool" class:on={attachedDocs.length > 0 || attachedImgs.length > 0} disabled={uploading}
+        title={uploading ? 'Reading…' : 'Attach images or documents — every model can read them'}
+        onclick={pickFiles}><Paperclip size={15} /></button>
+      <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
+        title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
+        onclick={cycleResearch}>
+        {#if prefs.researchMode === 'ultra'}<Telescope size={15} />{:else}<Globe size={15} />{/if}
+        {#if prefs.researchMode !== 'normal'}<span class="rlbl">{prefs.researchMode === 'ultra' ? 'Ultra' : 'Quick'}</span>{/if}
+      </button>
+      <button class="tool" class:on={thinkingOn} disabled={!model}
+        title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
+        onclick={toggleThinking}><Lightbulb size={15} /></button>
+      <div class="grow"></div>
+      {#if msgQueue.length}
+        <span class="qcount" title="{msgQueue.length} message{msgQueue.length === 1 ? '' : 's'} queued">{msgQueue.length} queued</span>
+      {/if}
+      {#if busy}
+        <button class="send stop" onclick={stop} title="Stop generating">
+          <Square size={12} fill="currentColor" />
+        </button>
+      {/if}
+      <button class="send" class:ready={input.trim()} onclick={send}
+        disabled={!input.trim() || !app.conv}
+        title={busy ? 'Queue message (sends when the reply finishes)' : 'Send (Enter)'}>
+        <ArrowUp size={17} />
+      </button>
+    </div>
+  </div>
+{/snippet}
 
 <div class="chat">
  <div class="main">
+  {#if isHero}
+    <div class="heroview">
+      <Welcome onsuggest={suggest} composer={composerBox} />
+    </div>
+  {:else}
   <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="thread">
-      {#if !path.length && !streamingHere}
-        <Welcome onsuggest={suggest} />
-      {/if}
       {#each path as m, i (m.id)}
         <Message msg={m} siblings={siblingsOf(m)} last={i === path.length - 1 && !streamingHere}
           onedit={onEdit} onregenerate={onRegenerate} onpin={onPin}
@@ -1022,6 +1099,10 @@
       {#if streamingHere}
         {#if streamingHere.events?.length}
           <div class="agentwork fade-in">
+            <div class="awhead">
+              <span class="awdot" aria-hidden="true"></span>
+              <span class="awlabel">Working in the pond</span>
+            </div>
             <RunFeed events={streamingHere.events}
               pendingApproval={streamingHere.pendingApproval} onapprove={approve} />
           </div>
@@ -1126,68 +1207,9 @@
         <ArrowDown size={16} />
       </button>
     {/if}
-    <div class="composer" class:active={busy} class:drag={dragOver}
-      ondragenter={onComposerDrag} ondragover={onComposerDrag}
-      ondragleave={onComposerDrag} ondrop={onComposerDrag}
-      onpaste={onComposerPaste}>
-      {#if attachedDocs.length || attachedImgs.length}
-        <div class="docchips">
-          {#each attachedImgs as u (u.id)}
-            <span class="docchip imgchip" title={u.description || 'Attached image — every model gets a description; vision models also see pixels'}>
-              <img class="ithumb" src={`/api/uploads/${u.id}/file`} alt="" />
-              <span class="dname">{u.name}</span>
-              <button class="dx" onclick={() => detachImgChip(u)} title="Detach from this chat"><X size={11} /></button>
-            </span>
-          {/each}
-          {#each attachedDocs as d (d.id)}
-            <span class="docchip" title={`${d.chunks} section${d.chunks === 1 ? '' : 's'} — any model can read this file`}>
-              <FileText size={12} />
-              <span class="dname">{d.name}</span>
-              <button class="dx" onclick={() => detachDocChip(d)} title="Detach from this chat"><X size={11} /></button>
-            </span>
-          {/each}
-        </div>
-      {/if}
-      <textarea rows="1"
-        placeholder={busy
-          ? 'Queue a follow-up…'
-          : dragOver ? 'Drop files to attach…' : 'Message DuckPond… (paste or drop images/files)'}
-        bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
-        onpaste={onComposerPaste}
-        disabled={!app.conv}></textarea>
-      <div class="bar">
-        <input type="file" multiple hidden bind:this={fileInput}
-          accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
-          onchange={(e) => { uploadDocs([...e.target.files]); e.target.value = ''; }} />
-        <button class="tool" class:on={attachedDocs.length > 0 || attachedImgs.length > 0} disabled={uploading}
-          title={uploading ? 'Reading…' : 'Attach images or documents — every model can read them'}
-          onclick={pickFiles}><Paperclip size={15} /></button>
-        <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
-          title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
-          onclick={cycleResearch}>
-          {#if prefs.researchMode === 'ultra'}<Telescope size={15} />{:else}<Globe size={15} />{/if}
-          {#if prefs.researchMode !== 'normal'}<span class="rlbl">{prefs.researchMode === 'ultra' ? 'Ultra' : 'Quick'}</span>{/if}
-        </button>
-        <button class="tool" class:on={thinkingOn} disabled={!model}
-          title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
-          onclick={toggleThinking}><Lightbulb size={15} /></button>
-        <div class="grow"></div>
-        {#if msgQueue.length}
-          <span class="qcount" title="{msgQueue.length} message{msgQueue.length === 1 ? '' : 's'} queued">{msgQueue.length} queued</span>
-        {/if}
-        {#if busy}
-          <button class="send stop" onclick={stop} title="Stop generating">
-            <Square size={12} fill="currentColor" />
-          </button>
-        {/if}
-        <button class="send" class:ready={input.trim()} onclick={send}
-          disabled={!input.trim() || !app.conv}
-          title={busy ? 'Queue message (sends when the reply finishes)' : 'Send (Enter)'}>
-          <ArrowUp size={17} />
-        </button>
-      </div>
-    </div>
+    {@render composerBox()}
   </div>
+  {/if}
  </div>
  {#if app.conv?.workspace_id}
    <ChatFiles />
@@ -1197,15 +1219,40 @@
 <style>
   .chat { flex: 1; display: flex; min-width: 0; min-height: 0; }
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  /* empty chat → hero: greeting + composer centered, optically a bit high */
+  .heroview {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto;
+    display: flex; flex-direction: column;
+    padding: 0 24px;
+  }
+  .heroview :global(.welcome) { margin: auto; }
+  .heroview::after { content: ''; flex: 0 0 9vh; }
   .scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-padding-bottom: 40px; -webkit-overflow-scrolling: touch; }
   .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 20px 24px 0; width: 100%; box-sizing: border-box; }
   .pad { height: 24px; }
   .agentwork {
     margin: 14px 0 8px 42px;
     padding: 12px 14px;
-    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
+    border: 1px solid var(--border-soft); border-radius: calc(16px * var(--rf));
     background: var(--bg-card);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16), 0 8px 24px rgba(0, 0, 0, 0.14);
   }
+  .awhead {
+    display: flex; align-items: center; gap: 8px;
+    margin: -2px 0 10px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+    color: var(--text-faint);
+    user-select: none;
+  }
+  .awdot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    background: var(--accent);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent);
+    animation: awpulse 1.3s ease-in-out infinite;
+  }
+  @keyframes awpulse { 50% { opacity: 0.3; } }
+  @media (prefers-reduced-motion: reduce) { .awdot { animation: none; } }
   .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 42px; min-height: 26px; }
   .dimtok { opacity: 0.65; }
   .stream-err {
@@ -1240,21 +1287,24 @@
     display: flex; flex-direction: column;
     background: var(--bg-input);
     border: 1px solid var(--border);
-    border-radius: calc(18px * var(--rf));
-    padding: 10px 10px 8px 16px;
-    transition: border-color 160ms ease, box-shadow 160ms ease;
+    border-radius: calc(22px * var(--rf));
+    padding: 12px 12px 10px 18px;
+    box-shadow: 0 2px 14px rgba(0, 0, 0, 0.16);
+    transition: border-color 180ms ease, box-shadow 220ms ease,
+                background 180ms ease, transform 180ms var(--ease-out);
   }
   .composer.drag {
     border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
     background: color-mix(in srgb, var(--accent-dim) 12%, var(--bg-input));
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-dim) 35%, transparent);
   }
-  /* Quiet highlight — warm edge, no glow bloom */
+  /* Quiet highlight — warm edge, gentle lift, no glow bloom */
   .composer:focus-within {
+    transform: translateY(-1px);
     border-color: color-mix(in srgb, var(--accent-dim) 50%, var(--border));
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--accent-dim) 28%, transparent),
-      0 6px 20px rgba(0, 0, 0, 0.28);
+      0 10px 32px rgba(0, 0, 0, 0.32);
   }
   .composer textarea {
     resize: none; max-height: 200px;
@@ -1285,11 +1335,12 @@
   .tool {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 30px; height: 28px; border-radius: calc(8px * var(--rf));
+    width: 32px; height: 30px; border-radius: calc(9px * var(--rf));
     color: var(--text-faint);
-    transition: background 120ms ease, color 120ms ease;
+    transition: background 120ms ease, color 120ms ease, transform 120ms var(--ease-out);
   }
-  .tool:hover { background: var(--bg-hover); color: var(--text-dim); }
+  .tool:hover { background: var(--bg-hover); color: var(--text-dim); transform: translateY(-1px); }
+  .tool:active { transform: none; }
   .tool.on { color: var(--accent); }
   .tool.ultra { color: var(--accent); background: var(--accent-glow); }
   .tool :global(.rlbl) { font-size: 11px; font-weight: 600; }
@@ -1301,13 +1352,17 @@
     background: var(--bg-hover); border: none;
     color: var(--text-dim);
     opacity: 0.6;
-    transition: background 130ms ease, opacity 130ms ease, box-shadow 130ms ease;
+    transform: scale(0.94);
+    transition: background 140ms ease, opacity 140ms ease, box-shadow 140ms ease,
+                color 140ms ease, transform 220ms var(--ease-spring);
   }
   .send.ready {
-    background: var(--accent); color: #16110a; opacity: 1;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    background: var(--accent); color: var(--on-accent); opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
   }
-  .send.ready:hover { background: var(--accent-deep); }
+  .send.ready:hover { background: var(--accent-deep); transform: scale(1.06); }
+  .send.ready:active { transform: scale(0.94); }
   .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; box-shadow: none; }
   .imgjob {
     margin: 14px 0 8px 42px;
@@ -1426,6 +1481,8 @@
       max-width: 100%;
       width: 100%;
     }
+    .heroview { padding: 0 12px; }
+    .heroview::after { flex-basis: 5vh; }
     .dock {
       max-width: 100%;
       width: 100%;

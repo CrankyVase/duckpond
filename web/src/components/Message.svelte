@@ -252,9 +252,8 @@
   .ububble {
     max-width: 68%;
     background: var(--bg-card);
-    /* warm edge — defined, not glowing */
-    border: 1px solid color-mix(in srgb, var(--accent-dim) 22%, var(--border-soft));
-    border-radius: calc(16px * var(--rf)) calc(16px * var(--rf)) calc(5px * var(--rf)) calc(16px * var(--rf));
+    border: 1px solid var(--border-soft);
+    border-radius: calc(20px * var(--rf)) calc(20px * var(--rf)) calc(6px * var(--rf)) calc(20px * var(--rf));
     padding: 10px 16px;
     white-space: pre-wrap;
     word-break: break-word;
@@ -280,7 +279,7 @@
   .avatar {
     width: 30px; height: 30px; flex-shrink: 0;
     display: grid; place-items: center;
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    background: transparent; border: none;
     border-radius: calc(9px * var(--rf)); margin-top: 2px;
   }
   .abody { flex: 1; min-width: 0; }
