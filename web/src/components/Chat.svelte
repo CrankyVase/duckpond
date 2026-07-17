@@ -2,7 +2,7 @@
   import { api, sse, sseGet } from '../lib/api.js';
   import { prefs, savePrefs } from '../lib/prefs.svelte.js';
   import {
-    app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, openConversation, refreshContext, visiblePath,
+    app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, newConversation, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
@@ -748,6 +748,7 @@
   let attachedImgs = $state([]);
   let fileInput = $state(null);
   let uploading = $state(false);
+  let dragOver = $state(false);
   const isImageFile = (f) => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif)$/i.test(f.name);
   $effect(() => {
     const id = app.conv?.id;
@@ -758,29 +759,42 @@
       api(`/api/conversations/${id}/uploads`).then((d) => { if (app.conv?.id === id) attachedImgs = d; }).catch(() => {});
     }
   });
+  async function ensureConv() {
+    if (app.conv?.id) return app.conv;
+    await newConversation();
+    return app.conv;
+  }
   async function uploadDocs(files) {
-    if (!app.conv || !files?.length) return;
+    if (!files?.length) return;
+    const conv = await ensureConv();
+    if (!conv?.id) {
+      toast('Could not open a chat to attach files', 'error');
+      return;
+    }
     uploading = true;
     for (const f of files) {
       try {
         if (isImageFile(f)) {
-          toast(`Attaching image ${f.name}…`);
-          const res = await fetch(`/api/uploads?name=${encodeURIComponent(f.name)}&conv=${app.conv.id}`, {
+          toast(`Attaching image ${f.name}… (describing so every model can read it)`);
+          const res = await fetch(`/api/uploads?name=${encodeURIComponent(f.name)}&conv=${conv.id}`, {
             method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f,
           });
           const up = await res.json();
           if (!res.ok) throw new Error(up.error ?? `HTTP ${res.status}`);
-          attachedImgs = [...attachedImgs, up];
-          toast(`${f.name} attached — any model can use it (vision sees it; others get a description)`, 'ok');
+          if (app.conv?.id === conv.id) attachedImgs = [...attachedImgs, up];
+          const hasRealDesc = up.description && !/Auto-description unavailable/i.test(up.description);
+          toast(hasRealDesc
+            ? `${f.name} attached — every model gets a description of it`
+            : `${f.name} attached — description was weak; models still see the attachment note`, 'ok');
         } else {
           toast(`Reading ${f.name}…`);
-          const res = await fetch(`/api/docs?name=${encodeURIComponent(f.name)}&conv=${app.conv.id}`, {
+          const res = await fetch(`/api/docs?name=${encodeURIComponent(f.name)}&conv=${conv.id}`, {
             method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f,
           });
           const doc = await res.json();
           if (!res.ok) throw new Error(doc.error ?? `HTTP ${res.status}`);
-          attachedDocs = [...attachedDocs, doc];
-          toast(`${f.name} attached — ${doc.chunks} sections indexed`, 'ok');
+          if (app.conv?.id === conv.id) attachedDocs = [...attachedDocs, doc];
+          toast(`${f.name} attached — ${doc.chunks} section${doc.chunks === 1 ? '' : 's'} ready for any model`, 'ok');
         }
       } catch (err) {
         toast(`${f.name}: ${err.message ?? err}`, 'error');
@@ -795,6 +809,33 @@
   async function detachImgChip(up) {
     await api(`/api/conversations/${app.conv.id}/uploads/${up.id}`, { method: 'DELETE' });
     attachedImgs = attachedImgs.filter((u) => u.id !== up.id);
+  }
+  function onComposerDrag(e) {
+    e.preventDefault();
+    if (e.type === 'dragenter' || e.type === 'dragover') dragOver = true;
+    if (e.type === 'dragleave' || e.type === 'drop') dragOver = false;
+    if (e.type === 'drop' && e.dataTransfer?.files?.length) {
+      uploadDocs([...e.dataTransfer.files]);
+    }
+  }
+  function onComposerPaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files = [];
+    for (const it of items) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();
+      uploadDocs(files);
+    }
+  }
+  async function pickFiles() {
+    await ensureConv();
+    fileInput?.click();
   }
 
 
@@ -1085,18 +1126,21 @@
         <ArrowDown size={16} />
       </button>
     {/if}
-    <div class="composer" class:active={busy}>
+    <div class="composer" class:active={busy} class:drag={dragOver}
+      ondragenter={onComposerDrag} ondragover={onComposerDrag}
+      ondragleave={onComposerDrag} ondrop={onComposerDrag}
+      onpaste={onComposerPaste}>
       {#if attachedDocs.length || attachedImgs.length}
         <div class="docchips">
           {#each attachedImgs as u (u.id)}
-            <span class="docchip imgchip" title={u.description || 'Attached image — vision models see it; others get a description'}>
+            <span class="docchip imgchip" title={u.description || 'Attached image — every model gets a description; vision models also see pixels'}>
               <img class="ithumb" src={`/api/uploads/${u.id}/file`} alt="" />
               <span class="dname">{u.name}</span>
               <button class="dx" onclick={() => detachImgChip(u)} title="Detach from this chat"><X size={11} /></button>
             </span>
           {/each}
           {#each attachedDocs as d (d.id)}
-            <span class="docchip" title={`${d.chunks} indexed sections — the model reads the relevant parts each message`}>
+            <span class="docchip" title={`${d.chunks} section${d.chunks === 1 ? '' : 's'} — any model can read this file`}>
               <FileText size={12} />
               <span class="dname">{d.name}</span>
               <button class="dx" onclick={() => detachDocChip(d)} title="Detach from this chat"><X size={11} /></button>
@@ -1107,16 +1151,17 @@
       <textarea rows="1"
         placeholder={busy
           ? 'Queue a follow-up…'
-          : 'Message DuckPond…'}
+          : dragOver ? 'Drop files to attach…' : 'Message DuckPond… (paste or drop images/files)'}
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
+        onpaste={onComposerPaste}
         disabled={!app.conv}></textarea>
       <div class="bar">
         <input type="file" multiple hidden bind:this={fileInput}
           accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
           onchange={(e) => { uploadDocs([...e.target.files]); e.target.value = ''; }} />
-        <button class="tool" class:on={attachedDocs.length > 0 || attachedImgs.length > 0} disabled={!app.conv || uploading}
-          title={uploading ? 'Reading…' : 'Attach images or documents — images work with any model'}
-          onclick={() => fileInput?.click()}><Paperclip size={15} /></button>
+        <button class="tool" class:on={attachedDocs.length > 0 || attachedImgs.length > 0} disabled={uploading}
+          title={uploading ? 'Reading…' : 'Attach images or documents — every model can read them'}
+          onclick={pickFiles}><Paperclip size={15} /></button>
         <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
           title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
           onclick={cycleResearch}>
@@ -1198,6 +1243,11 @@
     border-radius: calc(18px * var(--rf));
     padding: 10px 10px 8px 16px;
     transition: border-color 160ms ease, box-shadow 160ms ease;
+  }
+  .composer.drag {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent-dim) 12%, var(--bg-input));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-dim) 35%, transparent);
   }
   /* Quiet highlight — warm edge, no glow bloom */
   .composer:focus-within {

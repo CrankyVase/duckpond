@@ -22,7 +22,7 @@ import {
 import { modelParamsB } from '../modelDescribe.js';
 import { buildCsv, buildPptx } from '../exports.js';
 import { modelSettings } from './models.js';
-import { convDocs, retrieveChunks } from '../docs.js';
+import { convDocs, docFullText, retrieveChunks } from '../docs.js';
 import {
   deleteMemory, indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories,
   saveMemoryDirect, updateMemory,
@@ -1382,27 +1382,40 @@ export default async function chatRoutes(app) {
               + 'facts about them; absence here is not evidence you know nothing.');
         promptMessages[0] = { role: 'system', content: memBlock + '\n\n' + promptMessages[0].content };
       }
-      // attached documents (RAG): pull the excerpts relevant to this message
-      // and pin them at the END of the system prompt, closest to the question
+      // attached documents: small docs go in full so any model can read them;
+      // larger ones use RAG (+ keyword / leading-chunk fallback) so nothing is silent
       if (promptLeaf?.content && promptMessages[0]?.role === 'system') {
         try {
           const attached = convDocs(conv.id);
           if (attached.length) {
-            const hits = await retrieveChunks(req.user.id, attached.map((d) => d.id), promptLeaf.content);
             const names = attached.map((d) => d.name).join(', ');
-            let block = `## Attached documents\nThe user attached these documents to this conversation: ${names}.`;
-            if (hits.length) {
-              req.log.info({ hits: hits.length }, 'doc excerpts injected');
-              block += '\nRelevant excerpts for this message — answer from them when they apply, cite the '
-                + "document by name when you use one, and if they don't contain the answer say so honestly:\n\n"
-                + hits.map((h) => `[${h.name} · part ${h.idx + 1}]\n${h.text.slice(0, 900)}`).join('\n\n');
+            const fulls = attached.map((d) => ({
+              name: d.name, text: docFullText(d.id), chunks: d.chunks,
+            }));
+            const totalChars = fulls.reduce((s, d) => s + (d.text?.length ?? 0), 0);
+            let block = `## Attached documents\nThe user attached these documents to this conversation: ${names}.\n`
+              + 'You CAN read them — the content below is the document text (or the relevant excerpts). '
+              + 'Answer from it, cite by document name, and if it is not there say so honestly.\n';
+            if (totalChars > 0 && totalChars <= 24_000) {
+              req.log.info({ docs: attached.length, chars: totalChars }, 'full docs injected');
+              block += '\n' + fulls.map((d) => `### ${d.name}\n${d.text.slice(0, 20_000)}`).join('\n\n');
             } else {
-              block += '\nNo excerpt matched this message — if the user asks about the documents, say you '
-                + "couldn't find it in them rather than guessing.";
+              const hits = await retrieveChunks(req.user.id, attached.map((d) => d.id), promptLeaf.content, { k: 10 });
+              if (hits.length) {
+                req.log.info({ hits: hits.length }, 'doc excerpts injected');
+                block += '\nRelevant excerpts for this message:\n\n'
+                  + hits.map((h) => `[${h.name} · part ${h.idx + 1}]\n${h.text.slice(0, 1200)}`).join('\n\n');
+              } else {
+                // still give the model the opening of each file rather than nothing
+                block += '\nOpening of each document:\n\n'
+                  + fulls.map((d) => `### ${d.name}\n${(d.text || '').slice(0, 2500)}`).join('\n\n');
+              }
             }
             promptMessages[0] = { role: 'system', content: promptMessages[0].content + '\n\n' + block };
           }
-        } catch { /* embed service down — the turn proceeds without excerpts */ }
+        } catch (err) {
+          req.log.warn({ err }, 'doc inject failed');
+        }
       }
       // attached images: vision models get real pixels; everyone else gets a
       // text description so any chat model can still talk about the picture

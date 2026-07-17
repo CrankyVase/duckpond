@@ -106,21 +106,57 @@ export function detachDoc(convId, docId) {
   db.prepare('DELETE FROM conv_docs WHERE conv_id = ? AND doc_id = ?').run(convId, docId);
 }
 
-// top-k chunks across the attached docs, each tagged for citation
+/** Full reconstructed text of a document (chunk order). */
+export function docFullText(docId) {
+  return db.prepare('SELECT text FROM doc_chunks WHERE doc_id = ? ORDER BY idx')
+    .all(docId).map((r) => r.text).join('\n\n');
+}
+
+function keywordScore(text, query) {
+  const terms = String(query ?? '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2);
+  if (!terms.length) return 0;
+  const hay = String(text).toLowerCase();
+  let s = 0;
+  for (const t of terms) if (hay.includes(t)) s += 1;
+  return s / terms.length;
+}
+
+// top-k chunks across the attached docs, each tagged for citation.
+// Falls back to keyword / leading chunks when embeddings are missing or empty.
 export async function retrieveChunks(userId, docIds, query, { k = 6 } = {}) {
   if (!docIds.length) return [];
-  const qv = await embed(query.slice(0, 2000), 'query');
   const rows = db.prepare(`
     SELECT c.doc_id, c.idx, c.text, c.vec, d.name FROM doc_chunks c
     JOIN documents d ON d.id = c.doc_id
     WHERE c.user_id = ? AND c.doc_id IN (${docIds.map(() => '?').join(',')})`)
     .all(userId, ...docIds);
-  const scored = [];
+  if (!rows.length) return [];
+
+  try {
+    const qv = await embed(query.slice(0, 2000), 'query');
+    const scored = [];
+    for (const r of rows) {
+      if (!r.vec) continue;
+      const sim = dot(qv, fromBlob(r.vec));
+      if (sim >= RETRIEVE_SIM) scored.push({ ...r, sim });
+    }
+    scored.sort((a, b) => b.sim - a.sim);
+    if (scored.length) return scored.slice(0, k);
+  } catch { /* embed down — fall through */ }
+
+  // keyword match
+  const keyed = rows
+    .map((r) => ({ ...r, sim: keywordScore(r.text, query) }))
+    .filter((r) => r.sim > 0)
+    .sort((a, b) => b.sim - a.sim);
+  if (keyed.length) return keyed.slice(0, k);
+
+  // last resort: leading chunks so the model still sees the start of each doc
+  const byDoc = new Map();
   for (const r of rows) {
-    if (!r.vec) continue;
-    const sim = dot(qv, fromBlob(r.vec));
-    if (sim >= RETRIEVE_SIM) scored.push({ ...r, sim });
+    const list = byDoc.get(r.doc_id) ?? [];
+    if (list.length < Math.max(1, Math.ceil(k / docIds.length))) list.push({ ...r, sim: 0 });
+    byDoc.set(r.doc_id, list);
   }
-  scored.sort((a, b) => b.sim - a.sim);
-  return scored.slice(0, k);
+  return [...byDoc.values()].flat().slice(0, k);
 }

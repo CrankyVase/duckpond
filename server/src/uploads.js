@@ -1,6 +1,6 @@
 // Chat image uploads. Vision models get real multimodal content; everything
 // else gets an auto-description so the user can still talk about the picture.
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -10,6 +10,26 @@ import { listModels, streamChat } from './llama.js';
 import { assertQuota, UPLOADS_DIR } from './storage.js';
 
 const execFileAsync = promisify(execFile);
+
+/** Best-effort downscale for chat / caption payloads. Returns { buf, mime }. */
+function maybeResizeImage(buf, name, { maxEdge = 1536, maxBytes = 2_500_000 } = {}) {
+  if (!Buffer.isBuffer(buf) || buf.length <= maxBytes) return { buf, mime: null };
+  const tmpIn = join(UPLOADS_DIR, `_rz-in-${randomUUID().slice(0, 8)}${extOf(name)}`);
+  const tmpOut = join(UPLOADS_DIR, `_rz-out-${randomUUID().slice(0, 8)}.jpg`);
+  try {
+    mkdirSync(UPLOADS_DIR, { recursive: true });
+    writeFileSync(tmpIn, buf);
+    execFileSync('convert', [tmpIn, '-auto-orient', '-resize', `${maxEdge}x${maxEdge}>`, '-quality', '85', tmpOut], {
+      timeout: 12_000,
+    });
+    return { buf: readFileSync(tmpOut), mime: 'image/jpeg' };
+  } catch {
+    return { buf, mime: null };
+  } finally {
+    try { unlinkSync(tmpIn); } catch { /* */ }
+    try { unlinkSync(tmpOut); } catch { /* */ }
+  }
+}
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const IMAGE_MIME = {
   '.png': 'image/png',
@@ -30,8 +50,10 @@ function extOf(name) {
 
 export function modelHasVision(modelId) {
   const lower = String(modelId ?? '').toLowerCase();
+  // Only models that actually accept image_url parts. Plain gemma-4 / qwen text
+  // GGUFs break if we send pixels — they get the auto-description instead.
   return /(?:^|[-_])(vl|vision|llava|moondream|minicpm-v|qwen2\.5-vl|qwen2-vl|pixtral|gemma-3|gemma3|omni)(?:$|[-_])/.test(lower)
-    || /vision|vl-?\d|llava|moondream/.test(lower);
+    || /vision|vl-?\d|llava|moondream|omni/.test(lower);
 }
 
 async function identifyMeta(buf, name) {
@@ -49,14 +71,21 @@ async function identifyMeta(buf, name) {
   }
 }
 
-// Prefer a small vision model if one is listed; otherwise any vision-capable id.
+// Prefer a loaded VL, then an omni/vl-named preset (smaller first).
 async function pickCaptionModel() {
   try {
     const models = await listModels();
     const vis = models.filter((m) => modelHasVision(m.id));
     if (!vis.length) return null;
+    const rank = (id) => {
+      const s = String(id).toLowerCase();
+      if (s.includes('omni') && s.includes('4b')) return 1;
+      if (s.includes('omni')) return 2;
+      if (s.includes('vl') || s.includes('vision') || s.includes('llava')) return 3;
+      return 9;
+    };
     return vis.find((m) => m.status === 'loaded')?.id
-      ?? vis.sort((a, b) => String(a.id).length - String(b.id).length)[0]?.id
+      ?? [...vis].sort((a, b) => rank(a.id) - rank(b.id) || String(a.id).length - String(b.id).length)[0]?.id
       ?? null;
   } catch {
     return null;
@@ -65,9 +94,27 @@ async function pickCaptionModel() {
 
 async function captionWithVision(buf, mime, name) {
   const model = await pickCaptionModel();
-  if (!model) return null;
-  const b64 = buf.toString('base64');
-  const dataUrl = `data:${mime};base64,${b64}`;
+  if (!model) return { text: null, model: null, err: 'no vision-capable model on the router' };
+  // shrink large photos so captioning stays under router / ctx limits
+  let payload = buf;
+  let payloadMime = mime;
+  try {
+    if (buf.length > 1_200_000) {
+      const tmpIn = join(UPLOADS_DIR, `_cap-in-${randomUUID().slice(0, 8)}${extOf(name)}`);
+      const tmpOut = join(UPLOADS_DIR, `_cap-out-${randomUUID().slice(0, 8)}.jpg`);
+      mkdirSync(UPLOADS_DIR, { recursive: true });
+      writeFileSync(tmpIn, buf);
+      await execFileAsync('convert', [tmpIn, '-auto-orient', '-resize', '1280x1280>', '-quality', '82', tmpOut], { timeout: 12_000 });
+      payload = readFileSync(tmpOut);
+      payloadMime = 'image/jpeg';
+      try { unlinkSync(tmpIn); } catch { /* */ }
+      try { unlinkSync(tmpOut); } catch { /* */ }
+    }
+  } catch { /* use original bytes if ImageMagick resize fails */ }
+
+  const dataUrl = `data:${payloadMime};base64,${payload.toString('base64')}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 90_000);
   try {
     const res = await streamChat({
       model,
@@ -76,18 +123,27 @@ async function captionWithVision(buf, mime, name) {
         content: [
           {
             type: 'text',
-            text: 'Describe this image in 2–4 plain sentences for another AI that cannot see it. '
-              + 'Cover subject, setting, text if any, colors, and mood. No preamble.',
+            text: 'Describe this image in 2–5 plain sentences for another AI that cannot see pixels. '
+              + 'Cover subject, setting, any readable text (quote it), colors, and mood. No preamble or title.',
           },
           { type: 'image_url', image_url: { url: dataUrl } },
         ],
       }],
-      params: { max_tokens: 220, temperature: 0.2 },
+      params: {
+        max_tokens: 280,
+        temperature: 0.2,
+        // omni / thinking models waste the budget on chain-of-thought if left on
+        chat_template_kwargs: { enable_thinking: false },
+      },
+      abortSignal: ctrl.signal,
     });
-    const text = (res.content ?? '').trim();
-    return text || null;
-  } catch {
-    return null;
+    // some thinking/omni builds put the visible answer in reasoning when content is empty
+    const text = (res.content ?? '').trim() || String(res.reasoning ?? '').trim();
+    return { text: text || null, model, err: text ? null : 'empty caption' };
+  } catch (err) {
+    return { text: null, model, err: String(err?.message ?? err).slice(0, 200) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -105,10 +161,18 @@ export async function saveUpload(userId, name, buf) {
   writeFileSync(join(dir, file), buf);
 
   const meta = await identifyMeta(buf, name);
-  let description = await captionWithVision(buf, mime, name);
-  if (!description) {
-    description = `User-attached image “${name.slice(0, 120)}” (${meta.geom}, ${meta.fmt}). `
-      + 'No vision model was available to describe it — ask the user what is in the picture if it matters.';
+  const cap = await captionWithVision(buf, mime, name);
+  let description;
+  if (cap.text) {
+    description = cap.text;
+  } else {
+    // Still attachable: every chat model gets this block. Encourage the user
+    // to say what matters if auto-caption couldn't run (no VL model / error).
+    description = `User-attached image “${name.slice(0, 120)}” (${meta.geom || '?'}, ${meta.fmt || mime}, ${buf.length} bytes). `
+      + (cap.err
+        ? `Auto-description unavailable (${cap.err}${cap.model ? ` via ${cap.model}` : ''}). `
+        : 'Auto-description unavailable. ')
+      + 'If the image content matters, the user will describe it — do not invent details that are not written here.';
   }
 
   const r = db.prepare(`
@@ -155,9 +219,9 @@ export function readUploadBuffer(row) {
 }
 
 /**
- * Fold attached images into the last user message of `promptMessages`.
- * Vision models: OpenAI-style multimodal content parts.
- * Others: append a text block with the auto-description so they can still reason.
+ * Fold attached images into the prompt so ANY chat model can use them:
+ * - Always inject a text description block (auto-caption or fallback meta).
+ * - Vision-capable models also get OpenAI-style image_url parts (real pixels).
  */
 export function injectUploadsIntoMessages(promptMessages, uploads, modelId) {
   if (!uploads?.length || !promptMessages?.length) return promptMessages;
@@ -176,29 +240,35 @@ export function injectUploadsIntoMessages(promptMessages, uploads, modelId) {
       ? out[ui].content.filter((p) => p.type === 'text').map((p) => p.text).join('\n')
       : '';
 
+  const descBlock = uploads.map((u, i) => {
+    return `### Image ${i + 1}: ${u.name}\n`
+      + `(${u.width_height || '?'}, ${u.bytes ?? '?'} bytes)\n`
+      + `${u.description || '(no description)'}`;
+  }).join('\n\n');
+
+  const textWithImages = (baseText || '(see attached image(s))')
+    + `\n\n## Attached images\nThe user attached ${uploads.length} image(s) to this conversation. `
+    + (vision
+      ? 'You can also see the pixels below — treat the description as a backup if vision is unclear:\n\n'
+      : 'You cannot see raw pixels; treat the following descriptions as what is in the image and answer from them. '
+        + 'Do not claim you cannot see or access the attachment — the description IS your view of it:\n\n')
+    + descBlock;
+
   if (vision) {
-    const parts = [{ type: 'text', text: baseText || '(see attached image)' }];
+    const parts = [{ type: 'text', text: textWithImages }];
     for (const u of uploads) {
-      const buf = readUploadBuffer(u);
-      if (!buf) continue;
+      const raw = readUploadBuffer(u);
+      if (!raw) continue;
+      const resized = maybeResizeImage(raw, u.name);
+      const sendMime = resized.mime || u.mime || 'image/png';
       parts.push({
         type: 'image_url',
-        image_url: { url: `data:${u.mime};base64,${buf.toString('base64')}` },
+        image_url: { url: `data:${sendMime};base64,${resized.buf.toString('base64')}` },
       });
     }
     out[ui] = { ...out[ui], content: parts };
   } else {
-    const block = uploads.map((u) => {
-      const url = `/api/uploads/${u.id}/file`;
-      return `### Attached image: ${u.name}\n`
-        + `(${u.width_height || '?'}, ${u.bytes} bytes)\n`
-        + `Description (auto, because this model cannot see pixels): ${u.description || 'none'}\n`
-        + `Gallery URL for the user: ${url}`;
-    }).join('\n\n');
-    out[ui] = {
-      ...out[ui],
-      content: `${baseText}\n\n## Attached images\nThe user attached image(s). You cannot see them; use the descriptions:\n\n${block}`,
-    };
+    out[ui] = { ...out[ui], content: textWithImages };
   }
   return out;
 }
