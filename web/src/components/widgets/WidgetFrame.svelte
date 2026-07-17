@@ -22,8 +22,9 @@
 <style>
   .wframe {
     margin: 10px 0; max-width: min(460px, 100%);
-    border: 1px solid var(--border-soft); border-radius: 14px;
+    border: 1px solid var(--border-soft); border-radius: calc(14px * var(--rf));
     background: var(--bg-card); overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
   }
   .whead {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -34,7 +35,8 @@
   .ws { font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wlink {
     flex-shrink: 0; font-size: 11.5px; color: var(--accent); text-decoration: none;
-    border: 1px solid var(--border-soft); border-radius: 7px; padding: 3px 9px;
+    border: 1px solid var(--border-soft); border-radius: calc(7px * var(--rf)); padding: 3px 9px;
+    transition: background 120ms ease, border-color 120ms ease;
   }
-  .wlink:hover { background: var(--bg-hover); }
+  .wlink:hover { background: var(--bg-hover); border-color: var(--border); }
 </style>

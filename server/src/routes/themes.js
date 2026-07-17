@@ -3,6 +3,8 @@
 // Seeds two "community" themes on first boot so the shelf is never empty.
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
+import { streamChat } from '../llama.js';
+import { withGpu } from '../gpuqueue.js';
 
 // ---------------------------------------------------------------------------
 // Seed themes. Full token maps so installs never depend on client presets.
@@ -175,8 +177,135 @@ seed();
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// AI theme designer. A pinned coder model writes Duck Pond themes from a
+// plain-English brief. The system prompt lives HERE, server-side — clients
+// can't edit it. Multi-turn: the client sends prior turns as history plus the
+// current theme JSON, the model returns { reply, theme } (schema-enforced).
+// ---------------------------------------------------------------------------
+
+const THEME_MODEL = process.env.THEME_MODEL ?? 'qwen3-coder-next-q4-k-m';
+
+const THEME_TOKENS = ['bg', 'bg-sidebar', 'bg-raised', 'bg-card', 'bg-hover', 'bg-input',
+  'bg-code', 'bg-code-inline', 'border', 'border-soft', 'text', 'text-dim', 'text-faint',
+  'accent', 'accent-deep', 'accent-dim', 'on-accent', 'green', 'yellow', 'red', 'scrollbar'];
+
+const THEME_SYSTEM_PROMPT = `You are the Duck Pond theme designer — a specialist that designs color themes for a dark, quiet, premium chat app. You output ONLY JSON matching the required schema. Never explain the JSON, never use markdown fences.
+
+A theme is:
+- name: short evocative name (2–4 words).
+- colors: EVERY one of these tokens as #rrggbb hex: ${THEME_TOKENS.join(', ')}.
+  Semantics: bg = app background; bg-sidebar = left rail; bg-raised = buttons/chips; bg-card = cards & bubbles; bg-hover = hover state; bg-input = text fields; bg-code / bg-code-inline = code surfaces; border / border-soft = outlines; text / text-dim / text-faint = the reading ramp; accent / accent-deep / accent-dim = one accent family (deep = pressed, dim = quiet tint); on-accent = text drawn ON accent; green/yellow/red = status; scrollbar.
+- layout (optional): { chatWidth: narrow|normal|wide|full, sidebar: left|right, radius: sharp|soft|round, bubbles: bubbles|minimal }.
+- effects (optional): { glass: off|frosted|liquid, glassBlur: 4–32, glassOpacity: 0.3–0.92, glow: bool, anim: off|subtle|full, bg: solid|gradient|animated|aurora, bgA/bgB: #rrggbb gradient stops, bgAngle: 0–360, uiScale: 0.85–1.25, font: default|rounded|serif|mono }.
+- css (optional): extra custom CSS for a signature scene. Keep it SUBTLE: fixed-position, pointer-events:none, low-opacity. Always respect motion preferences by adding: html[data-anim='off'] <selector> { display:none; } for anything animated. Never restyle layout-critical properties (no display/position changes on app chrome).
+
+Design rules:
+- Premium means restrained: near-black backgrounds with a warm or cool cast, one accent family, generous contrast between text and bg (aim for WCAG AA on text/bg), dim/faint steps that read as a ramp, borders barely lighter than the surface they divide.
+- Match the brief's mood. If the user asks for loud/retro/neon, deliver it with conviction — but keep text legible.
+- Dark themes unless asked for light. Light themes: paper-like, soft borders, ink-dark text, on-accent usually near-white.
+- green/yellow/red should harmonize with the palette (muted, never pure #0f0/#ff0/#f00 unless the brief screams terminal).
+- reply: one or two warm sentences describing the look you made (no technical token talk — talk about the feeling). If the user is iterating ("make it bluer"), say what changed.`;
+
+const THEME_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    reply: { type: 'string' },
+    theme: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        colors: {
+          type: 'object',
+          properties: Object.fromEntries(THEME_TOKENS.map((t) => [t, { type: 'string' }])),
+          required: THEME_TOKENS,
+        },
+        layout: {
+          type: 'object',
+          properties: {
+            chatWidth: { enum: ['narrow', 'normal', 'wide', 'full'] },
+            sidebar: { enum: ['left', 'right'] },
+            radius: { enum: ['sharp', 'soft', 'round'] },
+            bubbles: { enum: ['bubbles', 'minimal'] },
+          },
+        },
+        effects: {
+          type: 'object',
+          properties: {
+            glass: { enum: ['off', 'frosted', 'liquid'] },
+            glassBlur: { type: 'integer' },
+            glassOpacity: { type: 'number' },
+            glow: { type: 'boolean' },
+            anim: { enum: ['off', 'subtle', 'full'] },
+            bg: { enum: ['solid', 'gradient', 'animated', 'aurora'] },
+            bgA: { type: 'string' },
+            bgB: { type: 'string' },
+            bgAngle: { type: 'integer' },
+            uiScale: { type: 'number' },
+            font: { enum: ['default', 'rounded', 'serif', 'mono'] },
+          },
+        },
+        css: { type: 'string' },
+      },
+      required: ['name', 'colors'],
+    },
+  },
+  required: ['reply', 'theme'],
+};
+
+function parseThemeReply(content) {
+  // schema-constrained output should be pure JSON; stay tolerant anyway
+  const s = String(content ?? '').trim();
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('the designer returned no JSON');
+  const out = JSON.parse(s.slice(start, end + 1));
+  if (!out || typeof out.reply !== 'string' || !out.theme?.colors) {
+    throw new Error('the designer returned an incomplete theme');
+  }
+  return out;
+}
+
 export default async function themeRoutes(app) {
   app.addHook('preHandler', requireAuth);
+
+  app.post('/api/theme/assist', async (req, reply) => {
+    const prompt = String(req.body?.prompt ?? '').trim().slice(0, 1500);
+    if (!prompt) return reply.code(400).send({ error: 'prompt required' });
+    // prior turns: clean roles only, short, capped — this is a side-chat, not RAG
+    const history = (Array.isArray(req.body?.history) ? req.body.history : [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .slice(-8)
+      .map((m) => ({ role: m.role, content: m.content.slice(0, 1200) }));
+    const current = req.body?.current && typeof req.body.current === 'object'
+      ? JSON.stringify(req.body.current).slice(0, 6000)
+      : null;
+    const ask = current
+      ? `Current theme (iterate on it):\n${current}\n\nRequest: ${prompt}`
+      : `Request: ${prompt}`;
+    try {
+      const out = await withGpu(() => streamChat({
+        model: THEME_MODEL,
+        messages: [
+          { role: 'system', content: THEME_SYSTEM_PROMPT },
+          ...history,
+          { role: 'user', content: ask },
+        ],
+        params: {
+          max_tokens: 2400,
+          temperature: 0.55,
+          json_schema: THEME_JSON_SCHEMA,
+          chat_template_kwargs: { enable_thinking: false },
+        },
+      }));
+      return parseThemeReply(out.content);
+    } catch (err) {
+      req.log.warn({ err }, 'theme assist failed');
+      return reply.code(502).send({
+        error: `The designer model couldn't answer (${String(err.message ?? err).slice(0, 140)}). It may still be loading — try again in a moment.`,
+      });
+    }
+  });
 
   app.get('/api/themes/market', async (req) => {
     const rows = db.prepare('SELECT * FROM community_themes ORDER BY downloads DESC, id DESC LIMIT 100').all();

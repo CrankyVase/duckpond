@@ -33,6 +33,7 @@ export function sanitizeEffects(raw) {
     glassOpacity: clamp(e.glassOpacity, 0.3, 0.92, 0.6),
     glow: !!e.glow,
     anim: oneOf(e.anim, ANIM_MODES, 'subtle'),
+    lab: !!e.lab,
     bg: oneOf(e.bg, BG_MODES, 'solid'),
     bgA: hexOk(e.bgA), bgB: hexOk(e.bgB),
     bgAngle: clamp(e.bgAngle, 0, 360, 160),
@@ -114,6 +115,7 @@ export function applyTheme(t = theme) {
   const e = eNow;
   el.dataset.glass = e.glass;
   el.dataset.anim = e.anim;
+  el.dataset.lab = e.lab ? 'on' : 'off';
   el.dataset.glow = e.glow ? 'on' : 'off';
   el.dataset.bg = e.bg;
   el.style.setProperty('--glass-blur', `${e.glassBlur}px`);

@@ -156,18 +156,31 @@ export const AGENT_TOOLS = [
   } },
   { type: 'function', function: {
     name: 'read_file',
-    description: 'Read a text file from the workspace.',
+    description: 'Read a text file from the workspace. For big files, read a window with start_line/max_lines instead of the whole thing.',
     parameters: { type: 'object', properties: {
       path: { type: 'string', description: 'workspace-relative path' },
+      start_line: { type: 'number', description: 'first line to read (1-based, default 1)' },
+      max_lines: { type: 'number', description: 'stop after this many lines (default: all)' },
     }, required: ['path'] },
   } },
   { type: 'function', function: {
     name: 'write_file',
-    description: 'Create or overwrite a text file in the workspace with the FULL new content.',
+    description: 'Create or overwrite a text file in the workspace with the FULL new content. For changes to an existing file, prefer edit_file — it is faster and safer than rewriting everything.',
     parameters: { type: 'object', properties: {
       path: { type: 'string', description: 'workspace-relative path' },
       content: { type: 'string', description: 'complete file content' },
     }, required: ['path', 'content'] },
+  } },
+  { type: 'function', function: {
+    name: 'edit_file',
+    description: 'Make targeted edits to an existing file WITHOUT rewriting it: one or more search/replace blocks. Each search string must match the file EXACTLY ONCE — include enough surrounding lines to make it unique, copied verbatim from read_file (whitespace matters). All edits apply in order; if any search fails, nothing is written.',
+    parameters: { type: 'object', properties: {
+      path: { type: 'string', description: 'workspace-relative path' },
+      edits: { type: 'array', items: { type: 'object', properties: {
+        search: { type: 'string', description: 'exact text to find, with enough context to be unique' },
+        replace: { type: 'string', description: 'replacement text (can be empty to delete)' },
+      }, required: ['search', 'replace'] } },
+    }, required: ['path', 'edits'] },
   } },
   { type: 'function', function: {
     name: 'run_command',
@@ -190,7 +203,8 @@ function agentSystemPrompt(ws) {
     '',
     'Rules:',
     '- Look before you leap: list or read files before editing them.',
-    '- write_file replaces the whole file — always write complete content, never fragments or placeholders.',
+    '- For changes to an existing file, use edit_file with exact search/replace blocks — never rewrite a whole file to change a few lines. Reserve write_file for new files or total rewrites; write complete content, never fragments or placeholders.',
+    '- Big files: read a window with start_line/max_lines instead of the whole file.',
     '- NEVER start long-running web/dev servers or bind ports (no npm run dev, vite, http.server, express listen, etc.).',
     '- For websites, write static HTML/CSS/JS. The user previews in-canvas in DuckPond and can download files — there is no hosted preview URL.',
     '- Verify with one-shot commands that exit (tests, node/python scripts, builds), not with servers left running.',
@@ -212,7 +226,15 @@ export async function execTool(run, ws, name, args) {
     }
     case 'read_file': {
       if (!args.path) return 'ERROR: path is required';
-      const text = readWsFile(ws, args.path);
+      let text = readWsFile(ws, args.path);
+      const startLine = Math.max(1, Number(args.start_line) || 1);
+      const maxLines = Math.max(0, Number(args.max_lines) || 0);
+      if (startLine > 1 || maxLines) {
+        const lines = text.split('\n');
+        const total = lines.length;
+        text = lines.slice(startLine - 1, maxLines ? startLine - 1 + maxLines : undefined).join('\n');
+        text = `(lines ${startLine}–${Math.min(total, maxLines ? startLine - 1 + maxLines : total)} of ${total})\n${text}`;
+      }
       return truncateOutput(text, 24_000, 8_000).text;
     }
     case 'write_file': {
@@ -225,6 +247,40 @@ export async function execTool(run, ws, name, args) {
         created: before === null,
       });
       return `wrote ${Buffer.byteLength(args.content ?? '')} bytes to ${args.path}`;
+    }
+    case 'edit_file': {
+      if (!args.path) return 'ERROR: path is required (your arguments may have been truncated — retry the call with complete JSON)';
+      const edits = Array.isArray(args.edits) ? args.edits : [];
+      if (!edits.length) return 'ERROR: edits must be a non-empty array of { search, replace }';
+      let text;
+      try { text = readWsFile(ws, args.path); }
+      catch { return `ERROR: ${args.path} does not exist or is not a readable text file — use write_file to create it`; }
+      // apply against a working copy; any failure discards the whole batch so
+      // the file never ends up half-edited
+      let next = text;
+      for (const [i, e] of edits.entries()) {
+        const search = String(e?.search ?? '');
+        const replace = String(e?.replace ?? '');
+        if (!search) return `ERROR: edit ${i + 1}: search must be a non-empty string. No changes were applied.`;
+        const first = next.indexOf(search);
+        if (first < 0) {
+          return `ERROR: edit ${i + 1}: search string not found in ${args.path}. No changes were applied. `
+            + 'Read the file again and copy the exact text, including whitespace and indentation.';
+        }
+        if (next.indexOf(search, first + search.length) >= 0) {
+          return `ERROR: edit ${i + 1}: search string matches ${args.path} more than once. No changes were applied. `
+            + 'Add more surrounding context so it is unique.';
+        }
+        next = next.slice(0, first) + replace + next.slice(first + search.length);
+      }
+      writeWsFile(ws, args.path, next);
+      emit(run.id, 'diff', {
+        path: args.path,
+        before: truncateOutput(text, 40_000, 20_000).text,
+        after: truncateOutput(next, 40_000, 20_000).text,
+        created: false,
+      });
+      return `applied ${edits.length} edit(s) to ${args.path} (${Buffer.byteLength(next)} bytes)`;
     }
     case 'web_search': {
       if (!args.query?.trim()) return 'ERROR: query is required';
@@ -302,12 +358,13 @@ function requestApproval(run, command) {
   });
 }
 
-// keep the transcript lean: only the newest tool outputs stay verbatim
-function trimHistory(messages, keep = 6) {
+// keep the transcript lean: only the newest tool outputs stay verbatim, and
+// trimmed ones keep enough head to still show WHAT failed (exit line + error)
+function trimHistory(messages, keep = 8) {
   const toolIdx = messages.map((m, i) => (m.role === 'tool' ? i : -1)).filter((i) => i >= 0);
   for (const i of toolIdx.slice(0, Math.max(0, toolIdx.length - keep))) {
-    if (messages[i].content.length > 400) {
-      messages[i] = { ...messages[i], content: messages[i].content.slice(0, 300) + '\n[older output trimmed]' };
+    if (messages[i].content.length > 900) {
+      messages[i] = { ...messages[i], content: messages[i].content.slice(0, 800) + '\n[older output trimmed]' };
     }
   }
 }

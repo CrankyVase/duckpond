@@ -7,11 +7,24 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import CircleX from '@lucide/svelte/icons/circle-x';
+  import FilePenLine from '@lucide/svelte/icons/file-pen-line';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import Folder from '@lucide/svelte/icons/folder';
+  import Globe from '@lucide/svelte/icons/globe';
+  import ImageIcon from '@lucide/svelte/icons/image';
+  import Rocket from '@lucide/svelte/icons/rocket';
   import ShieldAlert from '@lucide/svelte/icons/shield-alert';
   import TerminalIcon from '@lucide/svelte/icons/terminal';
   import Wrench from '@lucide/svelte/icons/wrench';
 
   let { events = [], liveTool = null, pendingApproval = null, onapprove = null } = $props();
+
+  const TOOL_ICONS = {
+    write_file: FilePenLine, edit_file: FilePenLine, read_file: FileText,
+    list_files: Folder, run_command: TerminalIcon, start_project: Rocket,
+    web_search: Globe, fetch_page: Globe, generate_image: ImageIcon,
+  };
+  const toolIcon = (name) => TOOL_ICONS[name] ?? Wrench;
 
   let openOutputs = $state(new Set());
   let liveEl = $state(null);
@@ -45,8 +58,9 @@
     {#if e.type === 'assistant' && e.content?.trim()}
       <div class="note md" use:mdEnhance>{@html renderBlock(e.content)}</div>
     {:else if e.type === 'tool_call'}
+      {@const Ico = toolIcon(e.name)}
       <div class="tool" class:gate={e.name === 'start_project'}>
-        <span class="ticon"><Wrench size={12} /></span>
+        <span class="ticon"><Ico size={12} /></span>
         <span class="tname">{toolLabel(e.name)}</span>
         <span class="targ">{argSummary(e)}</span>
       </div>
@@ -97,6 +111,7 @@
   {#if liveTool}
     <div class="live">
       <div class="livehead">
+        <span class="livedot" aria-hidden="true"></span>
         <span class="ticon"><Wrench size={12} /></span>
         {#if liveTool.name === 'write_file'}
           <span class="tname">writing</span>
@@ -124,6 +139,12 @@
 
 <style>
   .runfeed { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  /* every event settles in quietly as it arrives */
+  .runfeed > * { animation: toolIn 200ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+  @keyframes toolIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: none; }
+  }
   .note { font-size: 13.5px; line-height: 1.6; color: var(--text); overflow-wrap: break-word; }
   .note :global(p) { margin: 0 0 6px; }
   .note :global(p:last-child) { margin-bottom: 0; }
@@ -133,9 +154,23 @@
   }
   .note :global(code) { font-family: var(--mono); font-size: 0.92em; }
 
-  .tool { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); min-width: 0; }
+  .tool {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text-dim); min-width: 0;
+    padding: 5px 9px; margin: -2px -9px;
+    border-radius: calc(8px * var(--rf));
+    transition: background 120ms ease;
+  }
+  .tool:hover { background: var(--bg-hover); }
   .tool.gate .tname { color: var(--accent); font-weight: 600; }
-  .ticon { color: var(--accent-deep); display: grid; place-items: center; flex-shrink: 0; }
+  .ticon {
+    display: grid; place-items: center; flex-shrink: 0;
+    width: 22px; height: 22px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+    border-radius: calc(6px * var(--rf));
+  }
   .tname { font-family: var(--mono); flex-shrink: 0; }
   .targ {
     font-family: var(--mono); font-size: 11px; color: var(--text-faint);
@@ -150,8 +185,17 @@
   }
   .outhead:hover { background: var(--bg-hover); }
   .cmd { font-family: var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .exit { font-family: var(--mono); font-size: 10.5px; color: var(--green); flex-shrink: 0; }
-  .exit.bad { color: var(--red); }
+  .exit {
+    font-family: var(--mono); font-size: 10px; color: var(--green); flex-shrink: 0;
+    padding: 1.5px 8px; border-radius: 999px;
+    background: color-mix(in srgb, var(--green) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--green) 22%, transparent);
+  }
+  .exit.bad {
+    color: var(--red);
+    background: color-mix(in srgb, var(--red) 10%, transparent);
+    border-color: color-mix(in srgb, var(--red) 22%, transparent);
+  }
   .chev { display: grid; place-items: center; transition: transform 140ms ease; }
   .chev.open { transform: rotate(180deg); }
   .outbody {
@@ -203,12 +247,21 @@
     color: var(--red); border-radius: calc(8px * var(--rf)); padding: 8px 11px; font-size: 12.5px;
   }
 
-  .live { border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); background: var(--bg); overflow: hidden; }
+  .live {
+    border: 1px solid color-mix(in srgb, var(--accent-dim) 35%, var(--border-soft));
+    border-radius: calc(10px * var(--rf)); background: var(--bg); overflow: hidden;
+  }
   .livehead {
     display: flex; align-items: center; gap: 7px;
     padding: 6px 10px; font-size: 12px; color: var(--text-dim);
     border-bottom: 1px solid var(--border-soft);
   }
+  .livedot {
+    width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+    background: var(--accent);
+    animation: livedot 1.15s ease-in-out infinite;
+  }
+  @keyframes livedot { 50% { opacity: 0.25; } }
   .livepath { font-family: var(--mono); font-size: 11.5px; color: var(--accent); }
   .caret {
     width: 7px; height: 13px; background: var(--accent);

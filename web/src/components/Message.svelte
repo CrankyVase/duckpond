@@ -86,6 +86,19 @@
     }
   });
 
+  // The streaming caret rides right after the last typed letter: inject it
+  // inside the trailing block tag of the final segment's HTML (paragraph,
+  // list item, heading…) or at the end of a streaming code block. Falls back
+  // to the end of the container for anything else.
+  const CARET_HTML = '<span class="dp-caret" aria-hidden="true"></span>';
+  function withCaret(html) {
+    const block = html.match(/<\/(p|li|h[1-6]|blockquote)>\s*$/);
+    if (block) return html.slice(0, block.index) + CARET_HTML + html.slice(block.index);
+    const code = html.match(/<\/code><\/pre>\s*$/);
+    if (code) return html.slice(0, code.index) + CARET_HTML + html.slice(code.index);
+    return html + CARET_HTML;
+  }
+
   function startEdit() { draft = msg.content; editing = true; }
   function saveEdit() {
     editing = false;
@@ -155,7 +168,7 @@
             <span class="tspin"><LoaderCircle size={13} /></span>
             <span class="shimmer">Thinking…</span>
           </div>
-          <div class="tbody live" bind:this={thinkEl}>{msg.thinking}<span class="cursor think" aria-hidden="true"></span></div>
+          <div class="tbody live" bind:this={thinkEl}>{msg.thinking}<span class="dp-caret think" aria-hidden="true"></span></div>
         {:else}
           <button class="tbar" class:open={showThinking} onclick={() => (showThinking = !showThinking)}>
             <Brain size={13} />
@@ -186,11 +199,15 @@
           {#each segments as seg, i (i)}
             {#if seg.kind === 'widgets'}
               <div class="wgroup">{#each seg.widgets as w (w.id)}<Widget widget={w} />{/each}</div>
+            {:else if streaming && i === segments.length - 1}
+              {@html withCaret(renderBlock(seg.block))}
             {:else}
               {@html renderBlock(seg.block)}
             {/if}
           {/each}
-          {#if streaming && hasText}<span class="cursor" aria-hidden="true"></span>{/if}
+          {#if streaming && hasText && segments[segments.length - 1]?.kind === 'widgets'}
+            <span class="dp-caret" aria-hidden="true"></span>
+          {/if}
         </div>
         {#if streaming && msg.widgets?.length}
           <div class="wgroup stream-in">{#each msg.widgets as w (w.id)}<Widget widget={w} />{/each}</div>
@@ -316,26 +333,8 @@
     transition: border-color 200ms ease;
   }
 
-  /* soft caret while tokens arrive */
-  .cursor {
-    display: inline-block;
-    width: 2px;
-    height: 1.05em;
-    margin-left: 2px;
-    vertical-align: -0.15em;
-    background: var(--text-dim);
-    border-radius: 1px;
-    animation: caret 1.05s ease-in-out infinite;
-  }
-  .cursor.think {
-    height: 0.95em;
-    vertical-align: -0.1em;
-    background: var(--text-faint);
-  }
-  @keyframes caret {
-    0%, 42% { opacity: 1; }
-    50%, 100% { opacity: 0.12; }
-  }
+  /* soft caret while tokens arrive — global .dp-caret lives in app.css
+     (the caret rides inside {@html} markdown, which scoping can't reach) */
 
   /* waiting for first token */
   .typing {
@@ -374,10 +373,9 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .cursor, .typing span, .stream-in, .tspin {
+    .typing span, .stream-in, .tspin {
       animation: none !important;
     }
-    .cursor { opacity: 0.7; }
     .typing span { opacity: 0.6; }
   }
 

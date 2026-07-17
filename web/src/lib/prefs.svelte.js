@@ -11,6 +11,7 @@ const DEFAULTS = {
   autoExpandThinking: false, // open finished thought panels by default
   autoCompact: true,         // summarize old turns automatically at 75% context
   researchMode: 'normal',    // quick | normal | ultra — web-search depth
+  caret: 'beam',             // beam | block | dot — streaming typing caret style
 };
 
 function load() {
@@ -33,4 +34,5 @@ export function resetPrefs() {
 export function applyPrefs() {
   document.documentElement.dataset.fontsize = prefs.fontSize;
   document.documentElement.dataset.density = prefs.density;
+  document.documentElement.dataset.caret = prefs.caret ?? 'beam';
 }

@@ -234,7 +234,9 @@ const hats = {
   tophat: () => [[['.zzzzz...', '.zzzzz...', '.zJJzz...', '.zzzzz...', 'zzzzzzz..', 'IIIIIII..'], 16, 0]],
   wizard: () => [[['....X....', '...XXX...', '..XXYXX..', '..XXXXX..', '.XXXXXXX.', 'IIIIIIIII'], 15, 0]],
   beanie: () => [[['.VVVVVVV.', 'VVVVVVVVV', 'IVVVVVVVI', 'IIIIIIIII'], 15, 2]],
-  chef: () => [[['II.II.II.', 'IIIIIIIII', '.IIIIIII.', 'IIIIIIIII'], 15, 1]],
+  // toque: gray outline + pleat lines + dark band so the white puff reads
+  // against the white head (plain I-on-W was invisible)
+  chef: () => [[['.wwwwwww.', 'wIIIIIIIw', 'wIwIwIwIw', 'ddddddddd'], 15, 1]],
   cowboy: () => [[['..FFFF...', '..FFFF...', 'FFFFFFFF.', 'tttttttt.'], 15, 3]],
   santa: () => [[['......II.', '..jjjjII.', '.jjjjj...', 'jjjjjj...', 'IIIIIII..'], 16, 1]],
   halo: () => [[['.YYYYYYY.', 'Y.......Y', '.YYYYYYY.'], 15, 0]],   // floats above
@@ -609,10 +611,14 @@ const chinWing = [
   '.wWWw',
   '.wWWd',
 ];
+// thought bubbles rise from the head, growing: dot → puff → cloud. Bright H
+// with notched corners so they read as round bubbles against dark themes
+// (the old faint gray singles were near-invisible)
 const thinkDots = [
-  [ [['D'], 25, 6] ],
-  [ [['D'], 25, 6], [['DD'], 27, 4] ],
-  [ [['D'], 25, 6], [['DD'], 27, 4], [['DDD', 'DDD'], 28, 1] ],
+  [ [['HH', 'HH'], 25, 6] ],
+  [ [['HH', 'HH'], 25, 6], [['.HH.', 'HHHH'], 27, 3] ],
+  [ [['HH', 'HH'], 25, 6], [['.HH.', 'HHHH'], 27, 3], [['.HHHH.', 'HHHHHH'], 26, 0] ],
+  [ [['.HH.', 'HHHH'], 27, 3], [['.HHHH.', 'HHHHHH'], 26, 0] ],
 ];
 const thinkFrame = (i) => compose(STAND,
   ...gazeUp, [chinWing, 22, 13], ...thinkDots[i]);
@@ -664,15 +670,15 @@ const searchFrame = (glint) => compose(STAND,
 // it look like a real hinged beak instead of a detached bar.
 const billTalkOpen = [
   [['~~~~~~'], 26, 12], [['~~~~~~'], 26, 13],
-  [['zzzz'], 27, 12],          // mouth gap where the lower bill was
-  [['oOOOO'], 26, 13],         // lower mandible, dropped one row
-  [['.ooo'], 27, 14],
+  [['zzzzz'], 26, 12],         // mouth gap, anchored at the hinge so it
+  [['oOOOO'], 26, 13],         // reads as one shape: dark wedge + dropped
+  [['.ooo'], 27, 14],          // lower mandible (one row down)
 ];
 const billTalkWide = [
   [['~~~~~~'], 26, 12], [['~~~~~~'], 26, 13],
-  [['zzzzz'], 27, 12],
-  [['zzz'], 28, 13],
-  [['oOOOO'], 26, 14],         // dropped two rows — big honk
+  [['zzzzzz'], 26, 12],        // deep mouth wedge, full bill width at the hinge
+  [['zzzzz'], 26, 13],
+  [['oOOOO'], 26, 14],         // lower mandible dropped two rows — big honk
   [['.ooo'], 27, 15],
 ];
 
@@ -773,8 +779,8 @@ const ukeBody = [
   '.FFFFFF',
   '..FFFF.',
 ];
-// neck slopes down-front past the body into clear space, tuning peg at the end
-const ukeNeck = [ [['tt'], 26, 21], [['tt'], 28, 22], [['tt'], 30, 23], [['q'], 31, 24] ];
+// neck angles up-right in a real playing stance, peg head just under the bill
+const ukeNeck = [ [['tt'], 25, 16], [['tt'], 27, 15], [['tt'], 29, 14], [['q'], 31, 13] ];
 const strumUp = [ [['wWw'], 21, 15], [['dWd'], 21, 16] ];
 const strumDown = [ [['wWw'], 21, 19], [['dWd'], 21, 20] ];
 const noteA = [ [['.N', 'NN'], 28, 7] ];
@@ -807,7 +813,9 @@ const beanieDome = [
   'UUjjjjUU',
 ];
 const propStalk = [ [['I'], 20, 2] ];
-const propWide = [ [['YYYY'], 15, 1], [['YYYY'], 22, 1] ];
+// wide = one continuous horizontal bar: the motion blur of spinning blades
+// (the old two separate dashes read as little horns)
+const propWide = [ [['YYYYYYYYYYY'], 13, 1] ];
 const propEdge = [ [['YYY'], 19, 1] ];
 const propF1 = compose(STAND, [beanieDome, 16, 3], ...propStalk, ...propWide);
 const propF2 = compose(STAND, [beanieDome, 16, 3], ...propStalk, ...propEdge);
@@ -846,7 +854,19 @@ const wingWaveB = [
   '..dWWWd.',
   '...dWWd.',
 ];
+// mid-swing — the wing straight up, halfway between the A and B tilts, so the
+// wag reads as a continuous sweep instead of a two-frame teleport
+const wingWaveMid = [
+  '..dWWd..',
+  '.dWWWWd.',
+  '.dWWWWd.',
+  '.dWWWWd.',
+  '..dWWWd.',
+  '..dWWWd.',
+  '...dWWd.',
+];
 const waveF1 = compose(STAND, [wingWaveA, 4, 9], ...eyesHappy);
+const waveMid = compose(STAND, [wingWaveMid, 4, 9], ...eyesHappy);
 const waveF2 = compose(STAND, [wingWaveB, 5, 9], ...eyesHappy);
 
 // DANCE — grooving: lean left/right with the wing flung up, notes bouncing.
@@ -870,11 +890,20 @@ const happyF2 = compose(null, [STAND, 0, -4],
   ...[ [['~~'], 21, 5], [['~~'], 21, 6], [['K..K'], 19, 5], [['.KK.'], 19, 6] ]);
 const happyF3 = compose(STAND, ...eyesHappy, [['w.w'], 9, 29], [['w.w'], 16, 29]);
 
+// HOP — a single sprightly bounce in sprite frames (the old one leaned on the
+// CSS hop transform alone, so it read as a static duck sliding up and down):
+// crouch-anticipation → airborne (feet dangling) → land → recover.
+const hopF1 = compose(null, [STAND, 0, 1]);
+const hopF2 = compose(null, [STAND, 0, -4]);
+const hopF3 = compose(null, [STAND, 0, 1], [['w.w'], 5, 29], [['w.w'], 21, 29]);
+
 // LOVE — heart eyes, blush, hearts floating up.
 const loveF1 = compose(STAND, ...eyesHeart, ...blushCheek, [['r.r', 'rrr', '.r.'], 25, 3]);
 const loveF2 = compose(STAND, ...eyesHeart, ...blushCheek, [['r'], 23, 2], [['r.r', 'rrr', '.r.'], 28, 4]);
 
-// QUACK — bill thrown wide, eyes squeezed, sound arcs radiating out.
+// QUACK — bill thrown wide, eyes squeezed, sound arcs radiating out. A
+// half-open frame eases the closed↔wide jump so the bill visibly hinges.
+const quackF0 = compose(STAND, ...billTalkOpen, ...eyesClosed);
 const quackF1 = compose(STAND, ...billTalkWide, ...eyesClosed, [['Q'], 31, 9], [['Q'], 30, 7]);
 const quackF2 = compose(STAND, ...billTalkWide, ...eyesClosed,
   [['Q'], 31, 6], [['QQ'], 30, 10], [['Q'], 31, 13]);
@@ -1035,14 +1064,14 @@ const gardenF3 = compose(STAND, ...canArt, ...eyesHappy,
 // ==========================================================================
 Object.assign(ANIM, {
   // cognition (worker A salvage)
-  think:     { frames: [thinkFrame(0), thinkFrame(1), thinkFrame(2)], ms: 480, loop: true, css: 'breathe' },
+  think:     { frames: [thinkFrame(0), thinkFrame(1), thinkFrame(2), thinkFrame(3)], ms: 260, loop: true, css: 'breathe' },
   // thinking HARD = the think pose under strain: same chin-wing + raised gaze,
   // but a furrowed brow, a sweat bead, and a denser cloud of thought dots.
   thinkhard: { frames: [
     compose(STAND, ...gazeUp, [chinWing, 22, 13], [['dd'], 20, 7],
       ...thinkDots[2], [['L'], 24, 8]),
     compose(STAND, ...gazeUp, [chinWing, 22, 13], [['dd'], 20, 7],
-      ...thinkDots[1], [['DD'], 26, 2], [['L'], 24, 9], [['b'], 24, 10]),
+      ...thinkDots[1], [['HH'], 26, 2], [['L'], 24, 9], [['b'], 24, 10]),
   ], ms: 420, loop: true, css: 'breathe' },
   search:    { frames: [
     searchFrame([ [['I'], 21, 7], [['I'], 22, 8] ]),
@@ -1052,7 +1081,8 @@ Object.assign(ANIM, {
     STAND,
     compose(STAND, ...billTalkOpen, [['b'], 31, 8], [['b'], 30, 10]),
     compose(STAND, ...billTalkWide, [['b'], 31, 7], [['b'], 30, 9]),
-  ], ms: 220, loop: true, css: 'bob' },
+    compose(STAND, ...billTalkOpen, [['b'], 31, 8], [['b'], 30, 10]),
+  ], ms: 90, loop: true, css: 'bob' },
 
   // water (worker C salvage)
   swim:      { frames: [swimFrame(0), swimFrame(1), swimFrame(2)], ms: 420, loop: true, css: 'sway' },
@@ -1070,14 +1100,15 @@ Object.assign(ANIM, {
   // costume / greeting
   propeller: { frames: [propF1, propF2], ms: 130, loop: true, css: 'breathe' },
   party:     { frames: [partyF1, partyF2], ms: 340, loop: true, css: 'bob' },
-  wave:      { frames: [waveF1, waveF2], ms: 320, loop: true, css: '' },
+  wave:      { frames: [waveF1, waveMid, waveF2, waveMid], ms: 90, loop: true, css: '' },
   dance:     { frames: [danceF1, danceF3, danceF2, danceF3], ms: 260, loop: true, css: '' },
 
   // emotes
   sleep:     { frames: [sleepF1, sleepF2, sleepF3], ms: 720, loop: true, css: 'breathe' },
   happy:     { frames: [happyF1, happyF2, happyF3], ms: 260, loop: true, css: '' },
+  hop:       { frames: [hopF1, hopF2, hopF3, STAND], ms: 110, loop: true, css: '' },
   love:      { frames: [loveF1, loveF2], ms: 380, loop: true, css: 'bob' },
-  quack:     { frames: [STAND, quackF1, quackF2, quackF1], ms: 200, loop: true, css: 'bob' },
+  quack:     { frames: [STAND, quackF0, quackF1, quackF2, quackF1, quackF0], ms: 90, loop: true, css: 'bob' },
   nom:       { frames: [eatF1, eatF2, eatF3, eatF2], ms: 420, loop: true, css: '' },
   giggle:    { frames: [giggleF1, giggleF2], ms: 300, loop: true, css: 'bob' },
 
@@ -1152,19 +1183,22 @@ const paintS3 = compose(CODE_SHELL,
   [['~~~~~~~~~~'], 22, 11], [['~~~~~~~~~~'], 22, 12], [['~~~~~~~~~~'], 22, 13],
   [easelTall, 23, 7], ...easelDabsB, ...brushArmUp);
 
-// reading: open V-book held up in front of the face, page flip.
+// reading: open V-book held at chest height (not floating at the face), gaze
+// aimed down at the pages, wingtip pressing the page edge; a page flips over.
 const eraseLaptop = [
   [['~~~~~~~~~~~~'], 20, 8], [['~~~~~~~~~~~~'], 20, 9], [['~~~~~~~~~~~~'], 20, 10],
   [['~~~~~~~~~~~~'], 20, 11], [['~~~~~~~~~~~~'], 20, 12], [['~~~~~~~~~~~~'], 20, 13],
   [['~~~~~~~~~~~~'], 20, 14], [['~~~~~~~~~~~~'], 20, 15], [['~~~~~~~~~~~~'], 20, 16],
 ];
+// gaze down at the book: pupil sits on the bottom row of the eye socket
+const readEyes = [ [['~~'], 11, 9], [['~~'], 11, 10], [['KK'], 11, 10] ];
+const readGrip = [ [['wW'], 19, 16], [['dW'], 19, 17] ];   // wingtip on the page
 const readS1 = compose(CODE_SHELL, ...eraseLaptop,
-  [openBook, 21, 10],
-  [['wWWw'], 16, 13], [['dWWd'], 16, 14]);
+  [openBook, 20, 14], ...readGrip, ...readEyes);
 const readS2 = compose(CODE_SHELL, ...eraseLaptop,
-  [openBook, 21, 10],
-  [['I'], 26, 7], [['I'], 26, 8], [['II'], 25, 9],
-  [['wWWw'], 16, 13], [['dWWd'], 16, 14]);
+  [openBook, 20, 14],
+  [['I'], 27, 10], [['I'], 27, 11], [['II'], 26, 12], [['I'], 26, 13],  // page mid-flip
+  ...readGrip, ...readEyes);
 
 ANIM.image = { frames: [paintS1, paintS2, paintS3], ms: 460, loop: true, css: '' };
 ANIM.read  = { frames: [readS1, readS1, readS2], ms: 700, loop: true, css: 'breathe' };

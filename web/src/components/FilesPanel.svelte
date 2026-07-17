@@ -567,20 +567,29 @@
   .qlbl { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
 
   .tabs {
-    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px;
+    display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 18px;
+    width: fit-content; max-width: 100%;
+    border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf));
+    overflow: hidden; background: var(--bg-card);
   }
   .tabs button {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 7px 12px; font-size: 12.5px; font-weight: 500;
-    border-radius: 999px; background: var(--bg-raised); border: 1px solid var(--border-soft);
+    padding: 8px 14px; font-size: 12.5px; font-weight: 500;
+    border-radius: 0; background: transparent; border: none;
+    border-right: 1px solid var(--border-soft);
     color: var(--text-dim);
-    transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
+    transition: background 120ms ease, color 120ms ease;
   }
-  .tabs button:hover { color: var(--text); }
-  .tabs button.on { color: var(--text); border-color: var(--border); background: var(--bg-card); }
+  .tabs button:last-child { border-right: none; }
+  .tabs button:hover { color: var(--text); background: var(--bg-hover); }
+  .tabs button.on {
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
   .tabs em {
     font-style: normal; font-family: var(--mono); font-size: 11px;
-    color: var(--text-faint); padding: 1px 6px; border-radius: 999px; background: var(--bg-input);
+    color: var(--text-faint); font-variant-numeric: tabular-nums;
   }
 
   .studio {
@@ -590,7 +599,9 @@
   }
   .stitle {
     display: flex; align-items: center; gap: 8px;
-    font-size: 13px; font-weight: 600; margin-bottom: 12px;
+    font-size: 11px; font-weight: 600; color: var(--text-faint);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 14px;
   }
   .stitle :global(svg) { color: var(--accent); }
 
@@ -612,11 +623,17 @@
   }
   .srow label {
     display: flex; flex-direction: column; gap: 4px;
-    font-size: 11.5px; color: var(--text-faint);
+    color: var(--text-faint);
+  }
+  /* label captions only — controls inside labels inherit font, so scope here */
+  .srow label > span, .advanced label > span {
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
   }
   .srow label.grow { flex: 1; min-width: 140px; }
   .srow label span em, .advanced label span em {
     font-style: normal; color: var(--text-faint); opacity: 0.75; font-weight: 400;
+    text-transform: none; letter-spacing: normal;
   }
   .srow select, .srow input[type="number"], .srow input[type="text"],
   .advanced input[type="text"] {
@@ -627,7 +644,7 @@
   .srow input[type="number"] { width: 72px; font-family: var(--mono); }
   .chk {
     flex-direction: row !important; align-items: center !important;
-    gap: 6px !important; padding-bottom: 6px; color: var(--text-dim);
+    gap: 6px !important; padding-bottom: 6px; color: var(--text-dim); font-size: 12.5px;
   }
   .studio textarea, .advanced textarea {
     width: 100%; resize: vertical; min-height: 72px; box-sizing: border-box;
@@ -640,7 +657,7 @@
     padding: 12px; border-radius: 12px;
     background: var(--bg-raised); border: 1px solid var(--border-soft);
   }
-  .advanced label.full { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--text-faint); }
+  .advanced label.full { display: flex; flex-direction: column; gap: 4px; color: var(--text-faint); }
   .advtoggle {
     align-self: flex-start; padding: 4px 0; font-size: 12px;
     color: var(--accent); background: none; border: none; cursor: pointer;
@@ -735,6 +752,12 @@
     position: relative; margin: 0;
     background: var(--bg-raised); border: 1px solid var(--border-soft);
     border-radius: calc(12px * var(--rf)); overflow: hidden;
+    transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+  }
+  .card:hover {
+    transform: translateY(-2px);
+    border-color: var(--border);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
   }
   .thumb {
     all: unset; cursor: pointer; display: block; width: 100%;
@@ -762,8 +785,16 @@
     display: flex; align-items: center; gap: 12px;
     padding: 10px 12px; border-radius: calc(12px * var(--rf));
     background: var(--bg-raised); border: 1px solid var(--border-soft);
+    transition: background 140ms ease, border-color 140ms ease;
   }
-  .ico { color: var(--text-faint); display: grid; place-items: center; width: 28px; }
+  .row:hover { background: var(--bg-hover); border-color: var(--border); }
+  .ico {
+    width: 28px; height: 28px; flex-shrink: 0;
+    display: grid; place-items: center;
+    color: var(--text-faint);
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    border-radius: calc(8px * var(--rf));
+  }
   .info { flex: 1; min-width: 0; }
   .name {
     font-size: 13.5px; font-weight: 500; color: var(--text);
@@ -790,6 +821,7 @@
     padding: 24px; padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
       max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
     cursor: zoom-out;
+    animation: fadeIn 160ms ease;
   }
   .lb img {
     max-width: min(92vw, 960px); max-height: 80vh; max-height: 80dvh;
@@ -850,18 +882,18 @@
       text-align: right;
     }
     .tabs {
-      gap: 6px;
+      gap: 0;
+      width: 100%;
       overflow-x: auto;
       flex-wrap: nowrap;
       -webkit-overflow-scrolling: touch;
-      padding-bottom: 4px;
       margin-bottom: 14px;
       scrollbar-width: none;
     }
     .tabs::-webkit-scrollbar { display: none; }
     .tabs button {
       flex-shrink: 0;
-      padding: 9px 12px;
+      padding: 10px 12px;
       min-height: 40px;
       font-size: 12.5px;
     }

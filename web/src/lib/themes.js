@@ -367,6 +367,7 @@ export const BG_MODES = [
   ['solid', 'Solid', 'theme background'],
   ['gradient', 'Gradient', 'two-color blend'],
   ['animated', 'Animated', 'slow drifting blend'],
+  ['aurora', 'Aurora', 'soft pond lights, always moving'],
 ];
 export const FONT_OPTIONS = [
   ['default', 'Pond', "'Inter Variable', 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif"],
@@ -381,7 +382,8 @@ export const DEFAULT_EFFECTS = {
   glassOpacity: 0.6,   // surface tint strength, 0.3..0.92
   glow: false,         // accent glow on primary controls
   anim: 'subtle',      // off | subtle | full
-  bg: 'solid',         // solid | gradient | animated
+  lab: false,          // experimental premium motion pack
+  bg: 'solid',         // solid | gradient | animated | aurora
   bgA: '', bgB: '',    // gradient stops ('' → derived from the theme)
   bgAngle: 160,        // degrees
   uiScale: 1,          // 0.85..1.25

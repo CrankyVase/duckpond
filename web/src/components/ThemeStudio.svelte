@@ -12,7 +12,7 @@
     sanitizeEffects, snapshotTheme, theme, toggleFavorite,
   } from '../lib/theme.svelte.js';
   import {
-    ALL_PRESETS, ANIM_MODES, BG_MODES, BROWSE_PRESETS, COLOR_GROUPS,
+    ALL_PRESETS, ALL_TOKENS, ANIM_MODES, BG_MODES, BROWSE_PRESETS, COLOR_GROUPS,
     DEFAULT_EFFECTS, DEFAULT_LAYOUT, FEATURED_PRESETS, FONT_OPTIONS,
     filterPresets, GLASS_MODES, LAYOUT_OPTIONS, PRESETS, TOKEN_GROUPS,
   } from '../lib/themes.js';
@@ -29,10 +29,12 @@
   import SwatchBook from '@lucide/svelte/icons/swatch-book';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import UploadCloud from '@lucide/svelte/icons/upload-cloud';
+  import Wand2 from '@lucide/svelte/icons/wand-2';
   import X from '@lucide/svelte/icons/x';
 
   const TABS = [
     ['themes', 'Themes', SwatchBook],
+    ['designer', 'Designer', Wand2],
     ['market', 'Market', Store],
     ['colors', 'Colors', Brush],
     ['effects', 'Effects', Sparkles],
@@ -229,6 +231,95 @@
     theme.custom = theme.custom.filter((c) => c.id !== id);
     if (theme.preset === id) { theme.preset = c?.base ?? 'pond'; theme.colors = {}; }
     applyTheme();
+  }
+
+  // ---- AI designer: a pinned server-side model writes themes from a brief ----
+  let dMsgs = $state([]);       // { role: 'user'|'assistant', content, palette? }[]
+  let dInput = $state('');
+  let dBusy = $state(false);
+  let dScroll = $state(null);
+
+  const D_EXAMPLES = [
+    'Rainy midnight marina — deep teal, brass lantern light',
+    'Warm library at dusk, oxblood leather and reading-lamp gold',
+    'Brutalist concrete with one safety-orange accent',
+  ];
+
+  function designScroll() {
+    queueMicrotask(() => { if (dScroll) dScroll.scrollTop = dScroll.scrollHeight; });
+  }
+
+  /** Validate + adopt a designer theme as a custom theme, live.
+   *  Reuses the current AI design entry when iterating so the shelf doesn't fill up. */
+  function applyDesign(t) {
+    const colors = {};
+    for (const [k, v] of Object.entries(t?.colors ?? {})) {
+      if (ALL_TOKENS.includes(k) && /^#[0-9a-fA-F]{6}$/.test(v)) colors[k] = v.toLowerCase();
+    }
+    if (Object.keys(colors).length < 10) return null;
+    const layout = {};
+    for (const [key, opts] of Object.entries(LAYOUT_OPTIONS)) {
+      if (opts.some(([id]) => id === t?.layout?.[key])) layout[key] = t.layout[key];
+    }
+    const name = String(t.name ?? 'AI design').slice(0, 40) || 'AI design';
+    const entry = {
+      name, base: 'pond', colors,
+      ...(Object.keys(layout).length ? { layout: { ...DEFAULT_LAYOUT, ...layout } } : {}),
+      ...(t.effects ? { effects: sanitizeEffects(t.effects) } : {}),
+      ...(typeof t.css === 'string' && t.css.trim() ? { css: t.css.slice(0, 20000) } : {}),
+    };
+    // iterating on an AI design: update that entry in place (pickPreset early-outs
+    // when the id is unchanged, so re-apply layout/effects/css + applyTheme here)
+    const curId = theme.preset;
+    if (typeof curId === 'string' && curId.startsWith('ai-') && theme.custom.some((c) => c.id === curId)) {
+      const next = { id: curId, ...entry };
+      theme.custom = theme.custom.map((c) => (c.id === curId ? next : c));
+      theme.colors = {};
+      if (next.layout) theme.layout = { ...DEFAULT_LAYOUT, ...next.layout };
+      if (next.effects) theme.effects = sanitizeEffects(next.effects);
+      if (next.css !== undefined) { theme.customCss = next.css; cssDraft = next.css; }
+      else if (!next.css) { theme.customCss = ''; cssDraft = ''; }
+      applyTheme();
+      return { name, colors };
+    }
+    const id = `ai-${Date.now().toString(36)}`;
+    theme.custom = [...theme.custom, { id, ...entry }];
+    pickPreset(id); // adopts the custom entry's layout/effects/css and applies live
+    return { name, colors };
+  }
+
+  async function designSend(text) {
+    const promptText = String(text ?? dInput).trim();
+    if (!promptText || dBusy) return;
+    dInput = '';
+    dBusy = true;
+    dMsgs = [...dMsgs, { role: 'user', content: promptText }];
+    designScroll();
+    try {
+      const current = {
+        name: activePresetMeta().name,
+        colors: resolveColors(),
+        layout: { ...theme.layout },
+        effects: { ...theme.effects },
+        ...(theme.customCss.trim() ? { css: theme.customCss } : {}),
+      };
+      const r = await api('/api/theme/assist', {
+        method: 'POST',
+        body: { prompt: promptText, history: dMsgs.slice(0, -1), current },
+      });
+      const applied = applyDesign(r.theme);
+      dMsgs = [...dMsgs, {
+        role: 'assistant',
+        content: r.reply ?? 'Done.',
+        palette: applied ? Object.values(applied.colors).slice(0, 8) : null,
+        appliedName: applied?.name ?? null,
+      }];
+      if (applied) toast(`“${applied.name}” applied — Save theme to keep it`, 'ok');
+    } catch (e) {
+      dMsgs = [...dMsgs, { role: 'assistant', content: `Sorry — ${e.message ?? e}`, failed: true }];
+    }
+    dBusy = false;
+    designScroll();
   }
 
   // ---- market ----
@@ -489,6 +580,58 @@
           {/if}
           <p class="hint">Heart themes to pin them under Favorites. Picking a theme clears color tweaks — save them as your own theme first (Colors tab) if you want to keep them.</p>
 
+        {:else if tab === 'designer'}
+          <div class="designer">
+            <div class="dthread" bind:this={dScroll}>
+              {#if !dMsgs.length}
+                <div class="dhero">
+                  <span class="dwand"><Wand2 size={18} /></span>
+                  <div class="dherotitle">Describe a look — get a theme</div>
+                  <p class="dherosub">A pinned coding model with fixed design rules writes a complete Duck Pond
+                    theme from your brief and applies it live. Iterate in plain words: “darker”, “more teal”, “softer contrast”.</p>
+                  <div class="dexamples">
+                    {#each D_EXAMPLES as ex (ex)}
+                      <button type="button" class="dex" onclick={() => designSend(ex)} disabled={dBusy}>{ex}</button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              {#each dMsgs as m, i (i)}
+                {#if m.role === 'user'}
+                  <div class="dmsg user">{m.content}</div>
+                {:else}
+                  <div class="dmsg ai" class:failed={m.failed}>
+                    <div class="dreply">{m.content}</div>
+                    {#if m.palette}
+                      <div class="dpal" title={m.appliedName ?? 'applied palette'}>
+                        {#each m.palette as hex (hex)}
+                          <span class="dsw" style="background:{hex}"></span>
+                        {/each}
+                        {#if m.appliedName}<span class="dname">{m.appliedName} — applied</span>{/if}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              {/each}
+              {#if dBusy}
+                <div class="dmsg ai"><span class="dthinking">Designing<span class="ddots"><i>.</i><i>.</i><i>.</i></span></span></div>
+              {/if}
+            </div>
+            <div class="dcomposer">
+              <input
+                placeholder={dMsgs.length ? 'Refine it… (“darker”, “more teal”, “softer contrast”)' : 'Describe a look…'}
+                bind:value={dInput}
+                onkeydown={(e) => { if (e.key === 'Enter') designSend(); }}
+                disabled={dBusy}
+              />
+              <button class="primary" onclick={() => designSend()} disabled={dBusy || !dInput.trim()}>
+                {dBusy ? 'Designing…' : 'Design'}
+              </button>
+            </div>
+            <p class="hint">Everything applies live so you can look around — hit <b>Save theme</b> below to keep one.
+              It lands in “Your themes” on the Themes tab, and you can fine-tune it in Colors.</p>
+          </div>
+
         {:else if tab === 'market'}
           <div class="pubbox">
             <div class="pubfields">
@@ -624,6 +767,21 @@
           </div>
 
           <div class="fxblock">
+            <div class="subhead">Experimental</div>
+            <div class="seg" role="group" aria-label="Experimental">
+              <button type="button" class="segbtn" class:on={!fx.lab} onclick={() => setFx('lab', false)}>
+                <span class="seglabel">Off</span>
+                <span class="segblurb">stock behavior</span>
+              </button>
+              <button type="button" class="segbtn" class:on={fx.lab} onclick={() => setFx('lab', true)}>
+                <span class="seglabel">Premium motion</span>
+                <span class="segblurb">entrances, soft lifts, gentle crossfades</span>
+              </button>
+            </div>
+            <p class="hint">Early access — a quiet layer of polish: messages rise in, cards lift under the pointer, the composer breathes on focus, and theme switches crossfade. Motion: off still wins.</p>
+          </div>
+
+          <div class="fxblock">
             <div class="subhead">Accent glow</div>
             <div class="seg" role="group" aria-label="Accent glow">
               <button type="button" class="segbtn" class:on={!fx.glow} onclick={() => setFx('glow', false)}>
@@ -726,6 +884,19 @@
                 <button type="button" class="segbtn" class:on={prefs.density === id}
                   onclick={() => { prefs.density = id; savePrefs(); applyPrefs(); }}>
                   <span class="seglabel">{label}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="fxblock">
+            <div class="subhead">Typing caret</div>
+            <div class="seg" role="group" aria-label="Typing caret">
+              {#each [['beam', 'Beam', 'a thin line after the last letter'], ['block', 'Block', 'a solid block, terminal style'], ['dot', 'Dot', 'a small round pulse']] as [id, label, blurb]}
+                <button type="button" class="segbtn" class:on={(prefs.caret ?? 'beam') === id}
+                  onclick={() => { prefs.caret = id; savePrefs(); applyPrefs(); }} title={blurb}>
+                  <span class="seglabel">{label}</span>
+                  <span class="segblurb">{blurb}</span>
                 </button>
               {/each}
             </div>
@@ -896,6 +1067,65 @@
     color: var(--on-accent); background: var(--accent);
     padding: 1px 6px; border-radius: 999px; line-height: 1.4;
   }
+
+  /* ---- AI designer ---- */
+  .designer { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  .dthread {
+    display: flex; flex-direction: column; gap: 8px;
+    min-height: 260px; max-height: 380px; overflow-y: auto;
+    padding: 4px 2px;
+  }
+  .dhero { text-align: center; padding: 28px 18px 18px; margin: auto; }
+  .dwand {
+    display: inline-grid; place-items: center;
+    width: 40px; height: 40px; border-radius: calc(12px * var(--rf));
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    margin-bottom: 12px;
+  }
+  .dherotitle { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  .dherosub { font-size: 12.5px; color: var(--text-faint); line-height: 1.55; max-width: 420px; margin: 0 auto 14px; }
+  .dexamples { display: flex; flex-direction: column; gap: 6px; max-width: 380px; margin: 0 auto; }
+  .dex {
+    all: unset; cursor: pointer;
+    font-size: 12px; color: var(--text-dim); text-align: left;
+    padding: 8px 12px; border-radius: calc(10px * var(--rf));
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+  .dex:hover { color: var(--text); background: var(--bg-hover); border-color: var(--border); }
+  .dmsg { max-width: 85%; font-size: 13px; line-height: 1.5; }
+  .dmsg.user {
+    align-self: flex-end;
+    background: var(--bg-card);
+    border: 1px solid color-mix(in srgb, var(--accent-dim) 22%, var(--border-soft));
+    border-radius: calc(14px * var(--rf)) calc(14px * var(--rf)) calc(5px * var(--rf)) calc(14px * var(--rf));
+    padding: 8px 13px;
+  }
+  .dmsg.ai {
+    align-self: flex-start;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-soft);
+    border-radius: calc(14px * var(--rf)) calc(14px * var(--rf)) calc(14px * var(--rf)) calc(5px * var(--rf));
+    padding: 9px 13px;
+  }
+  .dmsg.ai.failed { border-color: color-mix(in srgb, var(--red) 30%, var(--border-soft)); color: var(--text-dim); }
+  .dpal { display: flex; align-items: center; gap: 5px; margin-top: 8px; }
+  .dsw {
+    width: 18px; height: 18px; border-radius: 5px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .dpal .dname { font-size: 11px; color: var(--text-faint); margin-left: 4px; }
+  .dthinking { color: var(--text-faint); font-family: var(--mono); font-size: 12px; }
+  .ddots i { animation: ddot 1.2s ease-in-out infinite; font-style: normal; }
+  .ddots i:nth-child(2) { animation-delay: 0.18s; }
+  .ddots i:nth-child(3) { animation-delay: 0.36s; }
+  @keyframes ddot { 0%, 60%, 100% { opacity: 0.2; } 30% { opacity: 1; } }
+  .dcomposer { display: flex; gap: 8px; }
+  .dcomposer input { flex: 1; min-width: 0; font-size: 13px; }
+  .dcomposer .primary { flex-shrink: 0; }
+  .designer .hint b { color: var(--text-dim); font-weight: 600; }
 
   /* ---- market ---- */
   .pubbox {
