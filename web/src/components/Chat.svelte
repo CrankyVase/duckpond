@@ -155,6 +155,10 @@
         // another user holds the GPU — ev.position is how many are ahead (0 = ours now)
         if (s) { s.queued = ev.position ?? 0; if (s.queued) s.loading = false; }
         break;
+      case 'notice':
+        // transient server info worth a toast (auto-compaction, model fallback)
+        if (here && ev.message) toast(ev.message, 'ok', 4000);
+        break;
       case 'loading': if (s) s.loading = true; break;
       case 'thinking': if (s) { s.loading = false; pendThink += ev.text; scheduleFlush(); } break;
       case 'delta':
