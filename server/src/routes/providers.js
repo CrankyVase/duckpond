@@ -5,6 +5,7 @@ import { db } from '../db.js';
 import {
   PROVIDER_PRESETS, providerModelFor, syncProviderModels, testProvider,
 } from '../providers.js';
+import { providerMonthSpend } from '../costs.js';
 
 const ownerOnly = (req, reply) => {
   if (req.user?.role !== 'owner') {
@@ -23,6 +24,8 @@ const mask = (p) => ({
   cache_enabled: !!p.cache_enabled,
   fallback: JSON.parse(p.fallback_json ?? '[]'),
   free_only: !!p.free_only,
+  spend_cap_usd: p.spend_cap_usd ?? null,
+  month_spend: providerMonthSpend(p.id),
   has_key: !!p.api_key,
   key_hint: p.api_key ? `…${p.api_key.slice(-4)}` : null,
   last_sync_at: p.last_sync_at,
@@ -106,7 +109,7 @@ export default async function providerRoutes(app) {
     if (!ownerOnly(req, reply)) return;
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    const { name, base_url, api_key, enabled, cache_enabled, fallback, free_only } = req.body ?? {};
+    const { name, base_url, api_key, enabled, cache_enabled, fallback, free_only, spend_cap_usd } = req.body ?? {};
     if (name !== undefined) db.prepare('UPDATE providers SET name = ? WHERE id = ?')
       .run(String(name).trim().slice(0, 80) || p.name, p.id);
     if (base_url !== undefined) {
@@ -120,6 +123,14 @@ export default async function providerRoutes(app) {
       .run(enabled ? 1 : 0, p.id);
     if (cache_enabled !== undefined) db.prepare('UPDATE providers SET cache_enabled = ? WHERE id = ?')
       .run(cache_enabled ? 1 : 0, p.id);
+    if (spend_cap_usd !== undefined) {
+      // monthly USD cap: null/'' clears, otherwise a finite number ≥ 0
+      const v = (spend_cap_usd === null || spend_cap_usd === '') ? null : Number(spend_cap_usd);
+      if (v !== null && (!Number.isFinite(v) || v < 0)) {
+        return reply.code(400).send({ error: 'spend_cap_usd must be a number ≥ 0 (or null to clear)' });
+      }
+      db.prepare('UPDATE providers SET spend_cap_usd = ? WHERE id = ?').run(v, p.id);
+    }
     if (free_only !== undefined) {
       db.prepare('UPDATE providers SET free_only = ? WHERE id = ?').run(free_only ? 1 : 0, p.id);
       // turning it on only takes effect at the next sync — re-sync now so the
