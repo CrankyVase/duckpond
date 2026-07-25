@@ -1,47 +1,26 @@
-import { clientIp, requireAuth } from '../auth.js';
-import { db, nowSec } from '../db.js';
-import { ipLocation } from '../geoip.js';
-import { countInputTokens, listModels, streamChat } from '../llama.js';
-import {
-  AGENT_TOOLS, FETCH_PAGE_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL,
-  agentLoop, bindRunAbort, createRun, createWorkspaceRow,
-  emit as emitRunEvent, execTool, finishRun, isRunLive, listTree, releaseRunAbort,
-  stopRunsForWorkspace, subscribeRun,
-} from './agent.js';
-import { checkUserContent } from '../contentFilter.js';
-import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
-import { convUploads, injectUploadsIntoMessages } from '../uploads.js';
-import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
+// Shared chat helpers: conversation-tree walking, prompt building, message
+// inserts, interrupted-reply persistence, usage/cost recording, and every tool
+// definition + widget builder. Split out of routes/chat.js with chatpolicy.js,
+// chatflow.js and routes/chatPost.js.
+import { db } from './db.js';
 import {
   makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
   makeDashboardWidget, makeDictionaryWidget, makeFileWidget, makeGithubWidget, makeHackerNewsWidget,
   makeImagesWidget, makeLinkPreviewWidget, makeMapWidget, makeMathPlotWidget, makeMermaidWidget,
   makeNewsWidget, makeNpmWidget, makeQrWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget,
   makeYoutubeWidget,
-} from '../widgets.js';
-import { modelParamsB } from '../modelDescribe.js';
-import { buildCsv, buildPptx } from '../exports.js';
-import { modelSettings } from './models.js';
-import { convDocs, docFullText, retrieveChunks } from '../docs.js';
+} from './widgets.js';
+import { modelParamsB } from './modelDescribe.js';
+import { buildCsv, buildPptx } from './exports.js';
+import { modelSettings } from './routes/models.js';
 import {
-  deleteMemory, indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories,
-  saveMemoryDirect, updateMemory,
-} from '../memory.js';
-import { corePrompt } from '../settings.js';
-import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
-import { acquireGpu } from '../gpuqueue.js';
-import {
-  attachListener, broadcast, createLiveJob, finishLiveJob, getLiveJob, stopLiveJob,
-} from '../liveJobs.js';
+  deleteMemory, indexMessage, saveMemoryDirect, updateMemory,
+} from './memory.js';
+import { corePrompt } from './settings.js';
+import { broadcast } from './liveJobs.js';
 // remote providers + cost saver (feat/remote-providers)
-import { auxModelFor, isRemoteId } from '../chatBackend.js';
-import {
-  auxBaselineCost, costFor, modelRowForRemoteId, priceRemoteTurn, recordEvent,
-} from '../costs.js';
-import {
-  cacheKey, cacheLookup, cacheStore, estimateTokens, resolveRemote,
-} from '../providers.js';
-import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tokenSaver.js';
+import { isRemoteId } from './chatBackend.js';
+import { modelRowForRemoteId, priceRemoteTurn, recordEvent } from './costs.js';
 
 // ---------- tree helpers ----------
 
