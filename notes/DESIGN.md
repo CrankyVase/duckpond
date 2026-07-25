@@ -9,10 +9,10 @@ first-class feature.
 
 | Thing | Where | Notes |
 |---|---|---|
-| llama-server ROUTER mode | `127.0.0.1:8081` (`llama-router-8081.service`) | prebuilt b9625 Vulkan, `--models-preset /home/lewis/llama-router-bazzite-vulkan.ini`, `--models-max 1`, `--models-autoload`, `--sleep-idle-seconds 600` |
+| llama-server ROUTER mode | `127.0.0.1:8081` (`llama-router-8081.service`) | prebuilt b9625 Vulkan, `--models-preset <router-config>.ini`, `--models-max 1`, `--models-autoload`, `--sleep-idle-seconds 600` |
 | Image-gen bridge (OpenAI-compatible) | `127.0.0.1:8765` (`image-gen-bridge-8765.service`) | diffusers in podman ROCm container; FLUX2-klein, Juggernaut-XL, Ideogram4; already handles unload-LLM→generate→reload-LLM VRAM juggling. One-shot today; step-preview streaming is a future add. |
 | Open WebUI | `:3000` → moves to `:3001` | kept, not removed; Cloudflare tunnel ingress points at 3000 |
-| Model GGUFs | `/home/lewis/llm-models/llama.cpp-models/` | presets defined in the router INI |
+| Model GGUFs | `<models-dir>/` | presets defined in the router INI |
 
 ### Router API surface (verified against b9625-f05cf4676)
 - `GET /v1/models` — list w/ per-model `status.value` (`loaded`/`unloaded`) + launch args
