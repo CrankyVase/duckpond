@@ -31,7 +31,7 @@
     }} title="Back to chat">
       <MessageSquare size={16} />
     </button>
-    <span class="viewtitle">{app.view === 'stats' ? 'Stats' : app.view === 'files' ? 'Files' : 'Speech Lab'}</span>
+    <span class="viewtitle">{app.view === 'stats' ? 'Stats' : app.view === 'files' ? 'Files' : app.view === 'providers' ? 'Providers' : app.view === 'costs' ? 'Costs & savings' : 'Speech Lab'}</span>
     <div class="spacer"></div>
   {/if}
   {#if vram}
