@@ -1,10 +1,11 @@
-// llama.cpp router client + remote-provider dispatcher.
+// Client for llama-server ROUTER mode (b9625) on 127.0.0.1:8081.
+// Endpoints verified against the running build: /v1/models (per-model status),
+// /models/load, /models/unload, /v1/chat/completions (+/input_tokens), /slots.
 //
-// Local models live behind the llama.cpp router (LLAMA_URL). Remote models
-// (ids like "r{providerId}:{modelId}", see providers.js) are answered by an
-// OpenAI-compatible endpoint instead — this module decides which is which so
-// every caller (chat turns, memory, compaction, follow-ups, agent loop) works
-// on either side without knowing which.
+// streamChat / countInputTokens double as the dispatcher for REMOTE models
+// (ids like "r3:claude-sonnet-4.5" — see providers.js): every caller (chat
+// turns, memory extraction, compaction, follow-ups, agent loop) transparently
+// works on either side without knowing which.
 import { execFile } from 'node:child_process';
 import {
   estimateTokens, fallbackCandidates, isRemoteId, isRetryableRemoteError,
@@ -86,38 +87,54 @@ export async function reapIdleModels(log) {
     if (!a) { markUse(m.id); continue; }        // discovered resident: start the clock
     if (a.active > 0 || Date.now() - a.lastUsed < IDLE_UNLOAD_MS) continue;
     log?.info({ model: m.id }, 'idle 10min — unloading from VRAM');
-    try { await unloadModel(m.id); } catch { /* router will reap eventually */ }
+    await unloadModel(m.id).catch(() => {});
   }
 }
 
-async function j(path, opts = {}, timeoutMs = 5000) {
-  const res = await fetch(`${BASE}${path}`, { ...opts, signal: AbortSignal.timeout(timeoutMs) });
+async function jfetch(path, opts = {}) {
+  const res = await fetch(BASE + path, {
+    ...opts,
+    headers: { 'content-type': 'application/json', ...opts.headers },
+  });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`llama ${path} → ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`llama ${path} ${res.status}: ${body.slice(0, 300)}`);
   }
   return res.json();
 }
 
 export async function listModels() {
-  const jsn = await j('/v1/models', {}, 8000);
-  return jsn?.data ?? [];
+  const { data } = await jfetch('/v1/models');
+  return data.map((m) => ({
+    id: m.id,
+    status: m.status?.value ?? 'unknown',   // 'loaded' | 'unloaded' | 'loading'
+    args: m.status?.args ?? [],
+    ctxSize: extractCtx(m.status?.args),
+  }));
 }
 
-export async function loadModel(id) {
-  return j('/v1/models/load', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: id }),
-  }, 10 * 60 * 1000); // big ggufs take a while to mmap
+function extractCtx(args) {
+  if (!Array.isArray(args)) return null;
+  const i = args.indexOf('--ctx-size');
+  return i >= 0 ? Number(args[i + 1]) : null;
 }
 
-export async function unloadModel(id) {
-  return j('/v1/models/unload', {
+export const loadModel = (model) =>
+  jfetch('/models/load', { method: 'POST', body: JSON.stringify({ model }) });
+export const unloadModel = (model) =>
+  jfetch('/models/unload', { method: 'POST', body: JSON.stringify({ model }) });
+
+export async function countInputTokens(model, messages) {
+  // remote endpoints have no token counter — chars/4 estimate is all we need
+  // for the context bar and auto-compaction pressure check
+  if (isRemoteId(model)) return estimateTokens(messages);
+  markUse(model);
+  const r = await jfetch('/v1/chat/completions/input_tokens', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: id }),
-  }, 30 * 1000);
+    body: JSON.stringify({ model, messages }),
+  });
+  // shape: { input_tokens: N } (fallbacks for other builds)
+  return r.input_tokens ?? r.prompt_tokens ?? r.tokens ?? null;
 }
 
 // Streaming chat completion. Calls onDelta(textChunk, meta) per SSE chunk and
@@ -132,24 +149,26 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
     return await streamChatInner({ model, messages, params, onDelta, abortSignal });
   } finally {
     act.active--;
+    act.lastUsed = Date.now();
   }
 }
 
 async function streamChatInner({ model, messages, params = {}, onDelta, abortSignal }) {
-  const res = await fetch(`${BASE}/v1/chat/completions`, {
+  const res = await fetch(BASE + '/v1/chat/completions', {
     method: 'POST',
-    signal: abortSignal,
     headers: { 'content-type': 'application/json' },
+    signal: abortSignal,
     body: JSON.stringify({
       model,
       messages,
       stream: true,
+      timings_per_token: true,
       ...params,
     }),
   });
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => '');
-    throw new Error(`llama chat → ${res.status}: ${body.slice(0, 400)}`);
+    throw new Error(`llama chat ${res.status}: ${body.slice(0, 300)}`);
   }
 
   const reader = res.body.getReader();
@@ -157,105 +176,68 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
   let buf = '';
   let content = '';
   let reasoning = '';
-  let usage = null;
   let timings = null;
-  const toolCalls = [];
+  let usage = null;
+  let finishReason = null;
+  const toolCalls = []; // streamed as fragments keyed by index; arguments concatenate
 
-  for (;;) {
+  while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
     let nl;
-    while ((nl = buf.indexOf('\n')) !== -1) {
+    while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (data === '[DONE]') continue;
-      let ev;
-      try { ev = JSON.parse(data); } catch { continue; }
-      const choice = ev.choices?.[0];
-      if (!choice) {
-        if (ev.usage) usage = ev.usage;
-        if (ev.timings) timings = ev.timings;
-        continue;
-      }
-      const delta = choice.delta ?? {};
-      if (typeof delta.content === 'string' && delta.content) {
-        content += delta.content;
-        onDelta?.(delta.content, {});
-      }
-      const rText = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '';
-      if (rText) {
-        reasoning += rText;
-        onDelta?.('', { reasoning: rText });
-      }
+      if (!line.startsWith('data: ')) continue;
+      const payload = line.slice(6);
+      if (payload === '[DONE]') continue;
+      let json;
+      try { json = JSON.parse(payload); } catch { continue; }
+      if (json.timings) timings = json.timings;
+      if (json.usage) usage = json.usage;
+      if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
+      const delta = json.choices?.[0]?.delta ?? {};
       if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const i = tc.index ?? 0;
-          if (!toolCalls[i]) toolCalls[i] = { id: tc.id ?? `call_${i}`, type: 'function', function: { name: '', arguments: '' } };
-          if (tc.id) toolCalls[i].id = tc.id;
-          if (tc.function?.name) toolCalls[i].function.name += tc.function.name;
-          if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments;
-          onDelta?.('', { toolFrag: { index: i, name: tc.function?.name, args: tc.function?.arguments ?? '' } });
+        for (const frag of delta.tool_calls) {
+          const i = frag.index ?? 0;
+          const tc = (toolCalls[i] ??= { id: '', type: 'function', function: { name: '', arguments: '' } });
+          if (frag.id) tc.id = frag.id;
+          if (frag.function?.name) tc.function.name += frag.function.name;
+          if (frag.function?.arguments) {
+            tc.function.arguments += frag.function.arguments;
+            // live view of the agent "typing" a tool call (file content, command…)
+            onDelta?.('', { toolFrag: { index: i, name: tc.function.name, args: frag.function.arguments } });
+          }
         }
       }
-      if (ev.usage) usage = ev.usage;
-      if (ev.timings) timings = ev.timings;
+      // reasoning_content: emitted by llama-server for thinking models
+      if (delta.reasoning_content) {
+        reasoning += delta.reasoning_content;
+        onDelta?.('', { reasoning: delta.reasoning_content, timings: json.timings });
+      }
+      if (delta.content) {
+        content += delta.content;
+        onDelta?.(delta.content, { timings: json.timings });
+      }
     }
   }
-  const toolCallsOut = toolCalls.filter(Boolean).filter((t) => t.function.name);
-  return {
-    content,
-    reasoning: reasoning || null,
-    toolCalls: toolCallsOut.length ? toolCallsOut : null,
-    usage,
-    timings,
-  };
+  return { content, reasoning, timings, usage, toolCalls: toolCalls.filter(Boolean), finishReason };
 }
 
-// Exact prompt-token count via the router's input_tokens endpoint; falls back
-// to null when the router is too old to have it (callers tolerate null).
-export async function countInputTokens(model, messages) {
-  if (isRemoteId(model)) return estimateTokens(messages);
-  try {
-    const jsn = await j('/v1/chat/completions/input_tokens', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, messages }),
-    }, 60 * 1000);
-    return jsn?.tokens ?? jsn?.input_tokens ?? null;
-  } catch {
-    return null;
-  }
-}
-
-// GPU VRAM readout for the settings panel. Prefers the router's /props when it
-// exposes device memory; falls back to rocm-smi on the host.
-export async function gpuVram() {
-  try {
-    const props = await j('/props', {}, 3000);
-    const devices = props?.devices ?? props?.system_info?.devices;
-    if (Array.isArray(devices) && devices.length) {
-      const total = devices.reduce((s, d) => s + (d.memory_total ?? d.total_memory ?? 0), 0);
-      const free = devices.reduce((s, d) => s + (d.memory_free ?? d.free_memory ?? 0), 0);
-      if (total > 0) return { totalBytes: total, usedBytes: total - free };
-    }
-  } catch { /* no router props */ }
-  try {
-    return await new Promise((resolve) => {
-      execFile('rocm-smi', ['--showmeminfo', 'vram', '--json'], { timeout: 3000 }, (err, stdout) => {
-        if (err) return resolve(null);
-        try {
-          const jsn = JSON.parse(stdout);
-          const card = Object.values(jsn)[0] ?? {};
-          const total = Number(card['VRAM Total Memory (B)'] ?? 0);
-          const used = Number(card['VRAM Total Used Memory (B)'] ?? 0);
-          resolve(total > 0 ? { totalBytes: total, usedBytes: used } : null);
-        } catch { resolve(null); }
-      });
+// VRAM via rocm-smi (card0 = RX 9070 XT). Cheap enough to poll every few seconds.
+export function gpuVram() {
+  return new Promise((resolve) => {
+    execFile('rocm-smi', ['--showmeminfo', 'vram', '--json'], { timeout: 4000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      try {
+        const j = JSON.parse(stdout);
+        const c = j.card0 ?? Object.values(j)[0];
+        resolve({
+          totalBytes: Number(c['VRAM Total Memory (B)']),
+          usedBytes: Number(c['VRAM Total Used Memory (B)']),
+        });
+      } catch { resolve(null); }
     });
-  } catch {
-    return null;
-  }
+  });
 }
