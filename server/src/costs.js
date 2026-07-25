@@ -30,6 +30,18 @@ export function recordEvent({
 }
 
 /**
+ * This calendar month's actual spend for one provider (ledger `provider_id`,
+ * all users — provider keys are global, so the cap must be too). Backs the
+ * per-provider spend cap + the panel's "spent this month" line.
+ */
+export function providerMonthSpend(providerId) {
+  return db.prepare(`
+    SELECT COALESCE(SUM(cost_usd),0) AS s FROM usage_events
+    WHERE provider_id = ? AND created_at >= unixepoch('now', 'start of month')`)
+    .get(providerId).s;
+}
+
+/**
  * Price a finished remote turn. Returns { cost, cachedDiscount } — the
  * discount is the part of the bill the provider's prompt caching erased,
  * which counts as savings on the dashboard.
