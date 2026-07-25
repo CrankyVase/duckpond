@@ -1,775 +1,285 @@
-import { clientIp, requireAuth } from '../auth.js';
-import { db, nowSec } from '../db.js';
-import { ipLocation } from '../geoip.js';
-import { countInputTokens, listModels, streamChat } from '../llama.js';
+// Chat + conversation routes: CRUD, live-attach, stop, compaction, context.
+// The main POST /chat streaming turn lives in ./chatPost.js (registered at the
+// bottom); helpers in ../chatkit.js, policies in ../chatpolicy.js, turn flows
+// in ../chatflow.js — the original single chat.js outgrew one file.
+import { requireAuth } from '../auth.js';
+import { db } from '../db.js';
+import { countInputTokens, streamChat } from '../llama.js';
+import { stopRunsForWorkspace } from './agent.js';
 import {
-  AGENT_TOOLS, FETCH_PAGE_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL,
-  agentLoop, bindRunAbort, createRun, createWorkspaceRow,
-  emit as emitRunEvent, execTool, finishRun, isRunLive, listTree, releaseRunAbort,
-  stopRunsForWorkspace, subscribeRun,
-} from './agent.js';
-import { checkUserContent } from '../contentFilter.js';
-import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
-import { convUploads, injectUploadsIntoMessages } from '../uploads.js';
-import { fetchPageStructured, searchWebStructured, sourceLabel } from '../websearch.js';
-import {
-  makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
-  makeDashboardWidget, makeDictionaryWidget, makeFileWidget, makeGithubWidget, makeHackerNewsWidget,
-  makeImagesWidget, makeLinkPreviewWidget, makeMapWidget, makeMathPlotWidget, makeMermaidWidget,
-  makeNewsWidget, makeNpmWidget, makeQrWidget, makeTableWidget, makeWeatherWidget, makeWikipediaWidget,
-  makeYoutubeWidget,
-} from '../widgets.js';
-import { modelParamsB } from '../modelDescribe.js';
-import { buildCsv, buildPptx } from '../exports.js';
-import { modelSettings } from './models.js';
-import { convDocs, docFullText, retrieveChunks } from '../docs.js';
-import {
-  deleteMemory, indexMessage, memoryEnabled, rememberFromExchange, retrieveMemories,
-  saveMemoryDirect, updateMemory,
-} from '../memory.js';
-import { corePrompt } from '../settings.js';
-import { diffusionModelFile, generateDiffusion, isDiffusionModel } from '../diffusiongen.js';
-import { acquireGpu } from '../gpuqueue.js';
-import {
-  attachListener, broadcast, createLiveJob, finishLiveJob, getLiveJob, stopLiveJob,
+  attachListener, getLiveJob, stopLiveJob,
 } from '../liveJobs.js';
 // remote providers + cost saver (feat/remote-providers)
 import { auxModelFor, isRemoteId } from '../chatBackend.js';
 import {
-  auxBaselineCost, costFor, modelRowForRemoteId, priceRemoteTurn, recordEvent,
+  auxBaselineCost, costFor, modelRowForRemoteId, recordEvent,
 } from '../costs.js';
 import {
-  cacheKey, cacheLookup, cacheStore, estimateTokens, resolveRemote,
-} from '../providers.js';
-import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tokenSaver.js';
+  buildPrompt, convForUser, insertMessage, pathToRoot, setLeaf,
+} from '../chatkit.js';
+import { registerChatPost } from './chatPost.js';
 
-// ---------- tree helpers ----------
+// ---------- routes ----------
 
-export function pathToRoot(leafId) {
-  // returns messages root→leaf along parent links
-  const out = [];
-  let id = leafId;
-  const get = db.prepare('SELECT * FROM messages WHERE id = ?');
-  const seen = new Set(); // rowid reuse once produced a self-parent cycle → heap OOM
-  while (id && !seen.has(id)) {
-    seen.add(id);
-    const m = get.get(id);
-    if (!m) break;
-    out.push(m);
-    id = m.parent_id;
-  }
-  return out.reverse();
-}
+export default async function chatRoutes(app) {
+  app.addHook('preHandler', requireAuth);
 
-// Prompt for the model: the active path, minus messages covered by compaction
-// summaries on that path. Compaction nodes become system summaries in place.
-export function buildPrompt(conv, leafId) {
-  const path = pathToRoot(leafId);
-  const covered = new Set();
-  for (const m of path) {
-    if (m.role === 'compaction' && m.covers_json) {
-      for (const cid of JSON.parse(m.covers_json)) covered.add(cid);
+  // Stop / empty POSTs: browsers and some proxies send odd Content-Types (or
+  // application/json with a zero-length body). Fastify then 415s before our
+  // handler runs, so the run never aborts and the next chat 409s forever.
+  const emptyBody = (req, body, done) => {
+    if (body == null || body === '' || (Buffer.isBuffer(body) && body.length === 0)) {
+      return done(null, {});
     }
-  }
-  // all system content (prompt + compaction summaries) must be hoisted into ONE
-  // leading system message — qwen-style templates reject system turns mid-chat
-  const sysParts = [];
-  const settings = conv._settings;
-  const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-  sysParts.push(`Today's date is ${todayStr}. Trust this over any date you might otherwise assume from training — use the correct current year (not an older one) when searching the web or reasoning about "latest", "current", "recent", or anything time-sensitive.`);
-  const core = corePrompt();
-  if (core?.trim()) sysParts.push(core);
-  if (settings.system_prompt?.trim()) sysParts.push(settings.system_prompt);
-  const msgs = [];
-  for (const m of path) {
-    if (covered.has(m.id)) continue;
-    if (m.role === 'compaction') {
-      sysParts.push(`[Summary of earlier conversation]\n${m.content}`);
-    } else {
-      msgs.push({ role: m.role, content: m.content });
+    if (Buffer.isBuffer(body)) {
+      try { return done(null, JSON.parse(body.toString('utf8') || '{}')); }
+      catch (err) { return done(err); }
     }
-  }
-  return sysParts.length
-    ? [{ role: 'system', content: sysParts.join('\n\n') }, ...msgs]
-    : msgs;
-}
-
-function convForUser(id, userId) {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(id, userId);
-  if (conv) conv._settings = { ...modelSettings(conv.model_id ?? ''), ...JSON.parse(conv.settings_json) };
-  return conv;
-}
-
-function insertMessage(convId, parentId, role, content, extra = {}) {
-  const r = db.prepare(`
-    INSERT INTO messages (conv_id, parent_id, role, content, thinking, model_id, tokens_in, tokens_out, tok_per_sec, covers_json, run_id, search_json)
-    VALUES (@convId, @parentId, @role, @content, @thinking, @modelId, @tokensIn, @tokensOut, @tokPerSec, @coversJson, @runId, @searchJson)`)
-    .run({
-      convId, parentId, role, content,
-      thinking: extra.thinking ?? null, modelId: extra.modelId ?? null,
-      tokensIn: extra.tokensIn ?? null, tokensOut: extra.tokensOut ?? null,
-      tokPerSec: extra.tokPerSec ?? null, coversJson: extra.coversJson ?? null,
-      runId: extra.runId ?? null,
-      searchJson: extra.searchJson ?? null,
-    });
-  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
-  indexMessage(msg); // fire-and-forget: semantic-search vector for this message
-  return msg;
-}
-
-function setLeaf(convId, leafId) {
-  db.prepare('UPDATE conversations SET active_leaf_id = ?, updated_at = unixepoch() WHERE id = ?')
-    .run(leafId, convId);
-}
-
-/** True if the live job has anything worth parking as an assistant bubble. */
-function jobHasPartial(job) {
-  if (!job) return false;
-  const s = job.state || {};
-  return !!(s.text || s.thinking || s.error || s.lastWrite || s.liveTool
-    || (s.events && s.events.length) || (s.widgets && s.widgets.length)
-    || s.image || s.diffusion || s.search);
-}
-
-/**
- * When generation dies mid-flight (error, abort, proxy blip after server stop),
- * always park an assistant message in the DB so:
- *  - the user still sees the work
- *  - saying "continue" has the partial + error on the path for the model
- * Skips if `done` already saved a final message.
- */
-function persistInterruptedReply(job, conv, promptLeaf, { aborted = false, log } = {}) {
-  if (!job || job.finalMsg || !promptLeaf || !conv) return null;
-  const s = job.state || {};
-  if (!jobHasPartial(job) && !aborted && !s.error) return null;
-
-  let text = String(s.text || '').trim();
-  // Surface in-progress writes so "continue" can see what was mid-flight
-  const write = s.lastWrite || (s.liveTool?.content ? s.liveTool : null);
-  if (write?.path && write?.content && !text.includes(write.path)) {
-    const lang = String(write.path).split('.').pop() || '';
-    text += `${text ? '\n\n' : ''}// ${write.path}\n\`\`\`${lang}\n${write.content}\n\`\`\``;
-  } else if (write?.path && !text.includes(write.path)) {
-    text += `${text ? '\n\n' : ''}(was writing \`${write.path}\` — check Project files)`;
-  }
-  if (s.events?.length && !text) {
-    const tools = s.events.filter((e) => e.type === 'tool_call').map((e) => e.name).filter(Boolean);
-    if (tools.length) text = `Work in progress (${[...new Set(tools)].join(', ')}). Check Project files for what was written.`;
-  }
-
-  const reason = s.error
-    ? String(s.error)
-    : aborted
-      ? 'Stopped by user.'
-      : 'Connection or generation interrupted.';
-  if (!text) text = `_(no text yet)_`;
-  if (!text.includes(reason) && !text.includes('Interrupted:') && !text.includes('Stopped')) {
-    text += `\n\n> Interrupted: ${reason}`;
-  }
-  if (!/say \*\*continue\*\*|say continue/i.test(text)) {
-    text += `\n\n_Say **continue** to pick up from here — project files already written stay put._`;
-  }
-
-  try {
-    const asst = insertMessage(conv.id, promptLeaf.id, 'assistant', text, {
-      thinking: s.thinking || null,
-      modelId: conv.model_id,
-      runId: s.run?.id ?? null,
-    });
-    setLeaf(conv.id, asst.id);
-    job.finalMsg = asst;
-    // Fans out to every attached client (primary + reattach tails)
-    broadcast(job, { type: 'done', msg: asst });
-    return asst;
-  } catch (err) {
-    log?.error?.({ err }, 'persistInterruptedReply failed');
-    return null;
-  }
-}
-
-function recordUsage(modelId, usage, timings, { userId = null, convId = null, kind = 'chat' } = {}) {
-  const day = new Date().toISOString().slice(0, 10);
-  db.prepare(`
-    INSERT INTO usage_stats (model_id, day, tokens_in, tokens_out, gen_ms, requests)
-    VALUES (?, ?, ?, ?, ?, 1)
-    ON CONFLICT(model_id, day) DO UPDATE SET
-      tokens_in = tokens_in + excluded.tokens_in,
-      tokens_out = tokens_out + excluded.tokens_out,
-      gen_ms = gen_ms + excluded.gen_ms,
-      requests = requests + 1`)
-    .run(modelId, day,
-      usage?.prompt_tokens ?? timings?.prompt_n ?? 0,
-      usage?.completion_tokens ?? timings?.predicted_n ?? 0,
-      Math.round(timings?.predicted_ms ?? 0));
-  // cost ledger: price remote calls; provider prompt-cache discounts count as savings
-  if (userId != null && isRemoteId(modelId)) {
-    try {
-      const { cost, cachedDiscount, tin, tout, cached } = priceRemoteTurn(modelRowForRemoteId(modelId), {
-        prompt_tokens: usage?.prompt_tokens ?? timings?.prompt_n ?? 0,
-        completion_tokens: usage?.completion_tokens ?? timings?.predicted_n ?? 0,
-        cached_tokens: usage?.cached_tokens ?? 0,
-      });
-      recordEvent({
-        userId, convId, modelId, kind,
-        tokensIn: tin, tokensOut: tout, cachedTokens: cached,
-        costUsd: cost, baselineUsd: cost + cachedDiscount,
-      });
-    } catch { /* ledger is best-effort */ }
-  }
-}
-
-const GEN_PARAM_KEYS = ['temperature', 'top_p', 'top_k', 'repeat_penalty'];
-
-// ---------- chat agent mode ----------
-// Project mode is entered through ONE explicit tool call: until a conversation
-// has a workspace, the model is only offered `start_project`. Calling it
-// creates the sandbox, saves the model's plan as PLAN.md, and unlocks the real
-// file/command tools for the rest of the run (and all later turns).
-
-const START_PROJECT_TOOL = { type: 'function', function: {
-  name: 'start_project',
-  description: 'Enter project mode: creates a persistent sandboxed Linux workspace for this conversation, saves your plan as PLAN.md, and unlocks file and shell tools (list/read/write files, run commands). Call this ONLY when the user wants real, runnable, multi-file work built — never for snippets, examples, or discussion.',
-  parameters: { type: 'object', properties: {
-    name: { type: 'string', description: 'short kebab-case project name, e.g. "snake-game"' },
-    plan: { type: 'string', description: 'concise markdown plan: goal, files you will create, implementation steps, how you will verify it' },
-  }, required: ['name', 'plan'] },
-} };
-
-// Widget tools: each returns a typed object we render as an interactive card in
-// the chat and persist as a ```duckwidget``` block. More types come in later phases.
-const SHOW_WEATHER_TOOL = { type: 'function', function: {
-  name: 'show_weather',
-  description: "Show an interactive weather card in the chat for a place. Use when the user asks about weather, temperature, or forecast. Pass the place name; omit it to use the user's own location if it's available.",
-  parameters: { type: 'object', properties: {
-    place: { type: 'string', description: 'city or place, e.g. "Tokyo" or "Austin, TX". Omit to use the user\'s current location.' },
-    units: { type: 'string', enum: ['metric', 'imperial'], description: 'metric (°C) or imperial (°F). Default imperial (°F) — only pass metric when the place is clearly outside the US or the user asks for Celsius.' },
-  }, required: [] },
-} };
-
-const SHOW_MAP_TOOL = { type: 'function', function: {
-  name: 'show_map',
-  description: 'Show an interactive map with a pin in the chat. Use when the user wants to see where a place, address, business, or landmark is. Pass a query (name or address).',
-  parameters: { type: 'object', properties: {
-    query: { type: 'string', description: 'place, address, business, or landmark to locate, e.g. "Blue Bottle Coffee, San Francisco"' },
-    label: { type: 'string', description: 'optional short label for the pin' },
-  }, required: ['query'] },
-} };
-
-const SHOW_GITHUB_TOOL = { type: 'function', function: {
-  name: 'show_github_repo',
-  description: 'Show a GitHub repository card (stars, language, description) in the chat. Use when discussing or recommending a specific repo.',
-  parameters: { type: 'object', properties: {
-    repo: { type: 'string', description: 'repository as "owner/name" or a github.com URL' },
-  }, required: ['repo'] },
-} };
-
-const SHOW_WIKIPEDIA_TOOL = { type: 'function', function: {
-  name: 'show_wikipedia',
-  description: 'Show a Wikipedia summary card (title, extract, image) in the chat. Use to give a quick factual overview of a person, place, thing, or event.',
-  parameters: { type: 'object', properties: {
-    title: { type: 'string', description: 'article title or topic, e.g. "Great Barrier Reef"' },
-  }, required: ['title'] },
-} };
-
-const SHOW_YOUTUBE_TOOL = { type: 'function', function: {
-  name: 'show_youtube',
-  description: 'Embed a playable YouTube video in the chat. Use when you have a specific relevant video URL or id to show.',
-  parameters: { type: 'object', properties: {
-    url: { type: 'string', description: 'YouTube link or 11-character video id' },
-  }, required: ['url'] },
-} };
-
-const SHOW_IMAGES_TOOL = { type: 'function', function: {
-  name: 'show_images',
-  description: 'Show a small grid of real photos found on the web for a query. Use when the user wants to see what something looks like.',
-  parameters: { type: 'object', properties: {
-    query: { type: 'string', description: 'what to show photos of, e.g. "red panda"' },
-    count: { type: 'integer', description: 'how many images (1-12, default 6)' },
-  }, required: ['query'] },
-} };
-
-const SHOW_CHART_TOOL = { type: 'function', function: {
-  name: 'show_chart',
-  description: 'Render an interactive chart in the chat from data you provide. Use to visualize numbers, comparisons, trends, or proportions. You supply all the data.',
-  parameters: { type: 'object', properties: {
-    kind: { type: 'string', enum: ['bar', 'line', 'area', 'pie', 'donut', 'scatter'], description: 'chart type' },
-    title: { type: 'string', description: 'short chart title' },
-    labels: { type: 'array', items: { type: 'string' }, description: 'category / x-axis labels' },
-    series: {
-      type: 'array',
-      description: 'one or more data series; each has a name and numeric values aligned to labels',
-      items: { type: 'object', properties: {
-        name: { type: 'string' }, values: { type: 'array', items: { type: 'number' } },
-      }, required: ['values'] },
-    },
-  }, required: ['kind', 'labels', 'series'] },
-} };
-
-const SHOW_CRYPTO_TOOL = { type: 'function', function: {
-  name: 'show_crypto',
-  description: 'Show a cryptocurrency price card with a 7-day sparkline. Use when asked about a coin\'s price.',
-  parameters: { type: 'object', properties: { coin: { type: 'string', description: 'coin name or symbol, e.g. "bitcoin" or "eth"' } }, required: ['coin'] },
-} };
-const SHOW_DICTIONARY_TOOL = { type: 'function', function: {
-  name: 'show_dictionary',
-  description: 'Show a dictionary card (pronunciation, definitions, examples) for an English word.',
-  parameters: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] },
-} };
-const SHOW_LINK_TOOL = { type: 'function', function: {
-  name: 'show_link_preview',
-  description: 'Show a rich preview card (title, description, image) for any web page URL.',
-  parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
-} };
-const SHOW_MERMAID_TOOL = { type: 'function', function: {
-  name: 'show_diagram',
-  description: 'Render a diagram (flowchart, sequence, mind map, gantt, etc.) from Mermaid source. Use for flows, architectures, timelines, or relationships. Provide valid Mermaid code.',
-  parameters: { type: 'object', properties: {
-    code: { type: 'string', description: 'Mermaid diagram source, e.g. "graph TD; A-->B;"' },
-    title: { type: 'string' },
-  }, required: ['code'] },
-} };
-
-const SHOW_CURRENCY_TOOL = { type: 'function', function: {
-  name: 'show_currency',
-  description: 'Show a currency conversion card between two currencies at the latest rate.',
-  parameters: { type: 'object', properties: {
-    from: { type: 'string', description: '3-letter code, e.g. USD' },
-    to: { type: 'string', description: '3-letter code, e.g. EUR' },
-    amount: { type: 'number', description: 'amount to convert (default 1)' },
-  }, required: ['from', 'to'] },
-} };
-const SHOW_NPM_TOOL = { type: 'function', function: {
-  name: 'show_npm',
-  description: 'Show an npm package card (version, weekly downloads, description).',
-  parameters: { type: 'object', properties: { package: { type: 'string' } }, required: ['package'] },
-} };
-const SHOW_HN_TOOL = { type: 'function', function: {
-  name: 'show_hackernews',
-  description: 'Show the top Hacker News story for a topic (or the current front-page top if no query).',
-  parameters: { type: 'object', properties: { query: { type: 'string' } }, required: [] },
-} };
-const SHOW_TABLE_TOOL = { type: 'function', function: {
-  name: 'show_table',
-  description: 'Render a clean, sortable data table in the chat from columns and rows you provide.',
-  parameters: { type: 'object', properties: {
-    title: { type: 'string' },
-    columns: { type: 'array', items: { type: 'string' } },
-    rows: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'each row is an array of cell values aligned to columns' },
-  }, required: ['columns', 'rows'] },
-} };
-
-const SHOW_NEWS_TOOL = { type: 'function', function: {
-  name: 'show_news',
-  description: 'Show a list of recent news headlines for a topic.',
-  parameters: { type: 'object', properties: { query: { type: 'string' }, count: { type: 'integer' } }, required: ['query'] },
-} };
-const SHOW_COUNTDOWN_TOOL = { type: 'function', function: {
-  name: 'show_countdown',
-  description: 'Show a live countdown timer to a future date/time.',
-  parameters: { type: 'object', properties: {
-    title: { type: 'string' }, date: { type: 'string', description: 'ISO date/time, e.g. 2027-01-01T00:00:00Z' },
-  }, required: ['date'] },
-} };
-const SHOW_PALETTE_TOOL = { type: 'function', function: {
-  name: 'show_color_palette',
-  description: 'Show a color palette card with copyable hex swatches.',
-  parameters: { type: 'object', properties: {
-    title: { type: 'string' },
-    colors: { type: 'array', items: { type: 'object', properties: { hex: { type: 'string' }, name: { type: 'string' } }, required: ['hex'] } },
-  }, required: ['colors'] },
-} };
-const SHOW_QR_TOOL = { type: 'function', function: {
-  name: 'show_qr',
-  description: 'Show a scannable QR code for a URL or text.',
-  parameters: { type: 'object', properties: { text: { type: 'string' }, label: { type: 'string' } }, required: ['text'] },
-} };
-const SHOW_MATHPLOT_TOOL = { type: 'function', function: {
-  name: 'show_math_plot',
-  description: 'Plot a mathematical function y = f(x) over a range. Use for graphing equations.',
-  parameters: { type: 'object', properties: {
-    expr: { type: 'string', description: 'expression in x, e.g. "sin(x)*x" or "x^2 - 3*x + 2" (functions: sin,cos,tan,sqrt,abs,exp,ln,log; constants: pi,e)' },
-    from: { type: 'number' }, to: { type: 'number' },
-  }, required: ['expr'] },
-} };
-
-// Generative UI (EPIC 3): the model composes several of the widgets above into
-// one titled grid instead of scattering separate cards. Only offered to models
-// big enough to reliably author the nested tool-call JSON — see
-// dashboardCapable() and the gate where disabledTools is built in the route.
-const DASHBOARD_PANEL_TOOLS = [
-  SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL, SHOW_WIKIPEDIA_TOOL,
-  SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
-  SHOW_DICTIONARY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL, SHOW_CURRENCY_TOOL,
-  SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL, SHOW_NEWS_TOOL,
-  SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL, SHOW_MATHPLOT_TOOL,
-];
-const DASHBOARD_PANEL_NAMES = new Set(DASHBOARD_PANEL_TOOLS.map((t) => t.function.name));
-
-const SHOW_DASHBOARD_TOOL = { type: 'function', function: {
-  name: 'show_dashboard',
-  description: 'Compose 2-8 of the other show_* widgets into ONE titled dashboard grid. Use it when the user wants an overview that naturally spans several cards: a trip (weather + map + currency), a project (github repo + npm + chart), a market snapshot (crypto cards + a chart). Each panel names a widget tool and passes exactly the arguments that tool takes. When several cards clearly belong together, prefer one dashboard over separate widget calls.',
-  parameters: { type: 'object', properties: {
-    title: { type: 'string', description: 'short dashboard title, e.g. "Tokyo trip"' },
-    panels: {
-      type: 'array',
-      description: '2-8 panels in display order',
-      items: { type: 'object', properties: {
-        tool: { type: 'string', enum: [...DASHBOARD_PANEL_NAMES], description: 'which widget fills this panel' },
-        args: { type: 'object', description: 'the arguments you would pass to that widget tool' },
-        wide: { type: 'boolean', description: 'span the full dashboard width — good for charts, tables, news' },
-      }, required: ['tool', 'args'] },
-    },
-  }, required: ['title', 'panels'] },
-} };
-
-// Models below this many (total) params too often fumble the nested tool-call
-// JSON a dashboard needs; unknown sizes count as not capable — the model can
-// still show every widget individually. Remote (paid API) models are all
-// frontier-grade tool users, so they always qualify.
-const DASHBOARD_MIN_TOTAL_B = 9;
-const dashboardCapable = (modelId) => isRemoteId(modelId) || (modelParamsB(modelId).totalB ?? 0) >= DASHBOARD_MIN_TOTAL_B;
-
-const GENERATE_SLIDES_TOOL = { type: 'function', function: {
-  name: 'generate_slides',
-  description: 'Create a real downloadable PowerPoint (.pptx) presentation from an outline you write. Use when the user wants slides, a deck, or a presentation (it also opens in Google Slides via upload). You write ALL the content: a deck title and one entry per slide with a title and bullet points.',
-  parameters: { type: 'object', properties: {
-    title: { type: 'string', description: 'deck title for the cover slide' },
-    subtitle: { type: 'string', description: 'optional cover subtitle, e.g. author or date' },
-    slides: {
-      type: 'array',
-      description: 'the content slides, in order (max 40)',
-      items: { type: 'object', properties: {
-        title: { type: 'string' },
-        bullets: { type: 'array', items: { type: 'string' }, description: 'up to ~8 concise bullet points' },
-        notes: { type: 'string', description: 'optional speaker notes' },
-      }, required: ['title'] },
-    },
-  }, required: ['title', 'slides'] },
-} };
-
-const EXPORT_CSV_TOOL = { type: 'function', function: {
-  name: 'export_csv',
-  description: 'Create a downloadable CSV file from tabular data you provide. Use when the user wants data as a file/spreadsheet rather than just shown in chat.',
-  parameters: { type: 'object', properties: {
-    name: { type: 'string', description: 'short file name, e.g. "expenses-2026"' },
-    columns: { type: 'array', items: { type: 'string' } },
-    rows: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'rows of cell values aligned to columns' },
-  }, required: ['columns', 'rows'] },
-} };
-
-// A dashboard call fans out into the panel widgets' own builders, in parallel.
-// A failed panel becomes an error tile instead of sinking the whole grid; only
-// when every panel fails does the tool itself error.
-async function dashboardPanels(a, ctx) {
-  const raw = Array.isArray(a.panels) ? a.panels.slice(0, 8) : [];
-  if (raw.length < 2) throw new Error('a dashboard needs 2-8 panels, each { tool, args }');
-  const panels = await Promise.all(raw.map(async (p) => {
-    const tool = String(p?.tool ?? '');
-    const wide = !!p?.wide;
-    if (!DASHBOARD_PANEL_NAMES.has(tool)) return { wide, tool, error: 'not a widget tool that can be used inside a dashboard' };
-    try { return { wide, widget: await WIDGET_BUILDERS[tool](p.args ?? {}, ctx) }; }
-    catch (err) { return { wide, tool, error: String(err.message ?? err).slice(0, 200) }; }
-  }));
-  if (!panels.some((p) => p.widget)) {
-    throw new Error(`every panel failed: ${panels.map((p) => `${p.tool} (${p.error})`).join('; ')}`.slice(0, 400));
-  }
-  return panels;
-}
-
-// name → builder(args, ctx). ctx has { userLoc, userId }. Each returns a widget
-// object. Exported so the builders can be exercised without booting the server.
-export const WIDGET_BUILDERS = {
-  show_dashboard: async (a, ctx) => makeDashboardWidget({ title: a.title, panels: await dashboardPanels(a, ctx) }),
-  generate_slides: async (a, ctx) => {
-    const f = await buildPptx(ctx.userId, a);
-    return makeFileWidget({ ...f, detail: `${f.slides} slides` });
-  },
-  export_csv: async (a, ctx) => {
-    const f = await buildCsv(ctx.userId, a);
-    return makeFileWidget({ ...f, detail: `${f.rows} rows` });
-  },
-  show_weather: (a, ctx) => makeWeatherWidget({
-    place: a.place?.trim() || undefined, lat: ctx.userLoc?.lat, lon: ctx.userLoc?.lon,
-    label: a.place?.trim() ? undefined : ctx.userLoc?.label,
-    units: a.units === 'metric' ? 'metric' : 'imperial',
-  }),
-  show_map: (a, ctx) => makeMapWidget({
-    query: a.query?.trim() || undefined,
-    lat: a.query ? undefined : ctx.userLoc?.lat, lon: a.query ? undefined : ctx.userLoc?.lon,
-    label: a.label?.trim() || (a.query ? undefined : ctx.userLoc?.label),
-  }),
-  show_github_repo: (a) => makeGithubWidget(a.repo),
-  show_wikipedia: (a) => makeWikipediaWidget(a.title),
-  show_youtube: (a) => makeYoutubeWidget(a.url),
-  show_images: (a) => makeImagesWidget(a.query, a.count ?? 6),
-  show_chart: (a) => makeChartWidget(a),
-  show_crypto: (a) => makeCryptoWidget(a.coin),
-  show_dictionary: (a) => makeDictionaryWidget(a.word),
-  show_link_preview: (a) => makeLinkPreviewWidget(a.url),
-  show_diagram: (a) => makeMermaidWidget(a),
-  show_currency: (a) => makeCurrencyWidget(a),
-  show_npm: (a) => makeNpmWidget(a.package),
-  show_hackernews: (a) => makeHackerNewsWidget(a.query),
-  show_table: (a) => makeTableWidget(a),
-  show_news: (a) => makeNewsWidget(a.query, a.count ?? 5),
-  show_countdown: (a) => makeCountdownWidget(a),
-  show_color_palette: (a) => makeColorPaletteWidget(a),
-  show_qr: (a) => makeQrWidget(a),
-  show_math_plot: (a) => makeMathPlotWidget(a),
-};
-
-const WIDGET_TOOLS = [
-  SHOW_WEATHER_TOOL, SHOW_MAP_TOOL, SHOW_GITHUB_TOOL, SHOW_WIKIPEDIA_TOOL,
-  SHOW_YOUTUBE_TOOL, SHOW_IMAGES_TOOL, SHOW_CHART_TOOL, SHOW_CRYPTO_TOOL,
-  SHOW_DICTIONARY_TOOL, SHOW_LINK_TOOL, SHOW_MERMAID_TOOL,
-  SHOW_CURRENCY_TOOL, SHOW_NPM_TOOL, SHOW_HN_TOOL, SHOW_TABLE_TOOL,
-  SHOW_NEWS_TOOL, SHOW_COUNTDOWN_TOOL, SHOW_PALETTE_TOOL, SHOW_QR_TOOL, SHOW_MATHPLOT_TOOL,
-  SHOW_DASHBOARD_TOOL, GENERATE_SLIDES_TOOL, EXPORT_CSV_TOOL,
-];
-const WIDGET_TOOL_NAMES = new Set(WIDGET_TOOLS.map((t) => t.function.name));
-
-// Memory tools: the model's direct line into its own long-term memory, on top
-// of the automatic post-exchange extraction. Recalled memories are injected
-// with their ids, so update/forget can target them precisely.
-const MEMORY_TOOLS = [
-  { type: 'function', function: {
-    name: 'save_memory',
-    description: 'Save a durable fact about the user to your long-term memory, so you still know it in future conversations. Use when the user tells you something worth keeping (their name, people in their life, preferences, projects) or asks you to remember something. Facts are also extracted automatically after each exchange — reach for this when something clearly matters or the user says "remember this".',
-    parameters: { type: 'object', properties: {
-      text: { type: 'string', description: 'the fact, one short third-person sentence, e.g. "Lewis\'s dog is named Pretzel"' },
-      tier: { type: 'string', enum: ['core', 'durable', 'context'], description: 'core = permanent identity (name, family, where they live) — never fades. durable = preferences, tools, interests — fades slowly if never used. context = current project / temporary situation — fades in weeks. Default durable.' },
-    }, required: ['text'] },
-  } },
-  { type: 'function', function: {
-    name: 'update_memory',
-    description: 'Correct or update one of your existing memories about the user (they are listed with ids in your system prompt when recalled). Use when the user corrects you or a remembered fact is outdated.',
-    parameters: { type: 'object', properties: {
-      id: { type: 'integer', description: 'the memory id, from the recalled list' },
-      text: { type: 'string', description: 'the corrected fact (omit to keep the text)' },
-      tier: { type: 'string', enum: ['core', 'durable', 'context'], description: 'new tier (omit to keep)' },
-    }, required: ['id'] },
-  } },
-  { type: 'function', function: {
-    name: 'forget_memory',
-    description: 'Permanently delete one of your memories about the user, by id. Use when the user asks you to forget something or a memory is plain wrong with no correction.',
-    parameters: { type: 'object', properties: {
-      id: { type: 'integer', description: 'the memory id, from the recalled list' },
-    }, required: ['id'] },
-  } },
-];
-const MEMORY_TOOL_NAMES = new Set(MEMORY_TOOLS.map((t) => t.function.name));
-
-async function execMemoryTool(name, args, { userId, convId }) {
-  if (name === 'save_memory') {
-    const r = await saveMemoryDirect({ userId, text: args.text, tier: args.tier, convId, source: 'tool' });
-    if (r.error) return `ERROR: ${r.error}`;
-    return r.action === 'reinforced'
-      ? `You already had a memory very close to that (id ${r.id}) — it was strengthened instead of duplicated.`
-      : `Saved to long-term memory (id ${r.id}). You will recall this in future conversations when it's relevant. No need to announce the mechanics — a brief natural acknowledgement is enough.`;
-  }
-  if (name === 'update_memory') {
-    const r = await updateMemory({ userId, id: Number(args.id), text: args.text, tier: args.tier });
-    return r.error ? `ERROR: ${r.error}` : `Memory ${r.id} updated.`;
-  }
-  if (name === 'forget_memory') {
-    return deleteMemory(userId, Number(args.id))
-      ? `Memory ${args.id} deleted.` : `ERROR: no memory with id ${args.id}`;
-  }
-  return `ERROR: unknown memory tool ${name}`;
-}
-
-// Small models sometimes hallucinate a markdown image (![alt](url), often with
-// a bogus/empty url) right next to a widget/generated-image tool call — as if
-// narrating "here's a photo" on top of the card that's already rendered. Every
-// *real* image or widget in a reply is appended by us (mdImgs/mdWidgets), never
-// typed by the model, so any ![...](...)  found in the model's own raw text is
-// always spurious. Strip it there, before it's combined with the real markdown.
-const stripFakeImages = (s) => (s ?? '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/[ \t]+\n/g, '\n').trim();
-
-// per-model-profile tool gating (settings panel "enabled tools" checkboxes)
-const filterTools = (tools, disabled) => (disabled.size ? tools.filter((t) => !disabled.has(t.function.name)) : tools);
-
-// ---------- speculative tool calling ----------
-// Tool-call JSON streams token by token, and for the latency-bound tools the
-// interesting argument (the query / the url) is complete long before the JSON
-// closes and the round finishes. Start the network work the moment the
-// argument string closes; when the tool actually executes, take the in-flight
-// result instead of starting over. Wrong guesses just get dropped — the
-// speculative fetch was going to a search engine / public page either way.
-// Biggest wins: multi-call rounds (call 2's page loads while call 1 still
-// streams) and slow models (seconds of JSON tail + finalization to overlap).
-const SPEC_ARG = {
-  web_search: /"query"\s*:\s*"((?:[^"\\]|\\.)*)"/,
-  fetch_page: /"url"\s*:\s*"((?:[^"\\]|\\.)*)"/,
-};
-const SPEC_MAX_INFLIGHT = 6;
-
-function makeSpeculator(log) {
-  const buf = new Map();    // stream index → { name, args, fired }
-  const cache = new Map();  // "name\0arg" → promise of the tool result
-  return {
-    // wire into onDelta: watch fragments accumulate, fire when the arg closes
-    onFrag(frag) {
-      let b = buf.get(frag.index);
-      if (!b) { b = { name: '', args: '', fired: false }; buf.set(frag.index, b); }
-      if (frag.name) b.name = frag.name;
-      b.args += frag.args ?? '';
-      const re = SPEC_ARG[b.name];
-      if (!re || b.fired || cache.size >= SPEC_MAX_INFLIGHT) return;
-      const m = b.args.match(re);
-      if (!m) return;
-      let val;
-      try { val = JSON.parse(`"${m[1]}"`); } catch { return; } // arg still mid-escape
-      b.fired = true;
-      const key = `${b.name}\0${val}`;
-      if (cache.has(key)) return;
-      log?.info({ tool: b.name, arg: val.slice(0, 120) }, 'speculative tool start');
-      cache.set(key, (b.name === 'web_search'
-        ? searchWebStructured(val.slice(0, 300))
-        : fetchPageStructured(val)
-      ).then((r) => ({ ok: true, r }), (err) => ({ ok: false, err })));
-    },
-    // stream indexes restart at 0 every round — reset the buffers, keep the cache
-    newRound() { buf.clear(); },
-    // executor side: claim the in-flight result for this exact call, if any
-    take(name, val) {
-      const p = cache.get(`${name}\0${val}`);
-      if (p) cache.delete(`${name}\0${val}`);
-      return p ?? null;
-    },
+    if (typeof body === 'string') {
+      try { return done(null, JSON.parse(body || '{}')); }
+      catch (err) { return done(err); }
+    }
+    done(null, body);
   };
-}
-
-// [tool name, one-line description] — data-driven so a disabled tool both
-// drops out of the offered `tools` array AND stops being described here.
-const WIDGET_LINES = [
-  ['show_weather', "live weather card for a place (or the user's location)."],
-  ['show_map', '3D map with a pin for a place, address, or business.'],
-  ['show_github_repo', 'a GitHub repo card (stars, language, description).'],
-  ['show_wikipedia', 'a Wikipedia summary card (title, extract, image).'],
-  ['show_youtube', 'embed a playable YouTube video.'],
-  ['show_images', 'a grid of real photos for a query.'],
-  ['show_chart', 'an interactive chart (bar/line/area/pie/donut/scatter) from data you provide.'],
-  ['show_crypto', 'a coin price card with a 7-day sparkline.'],
-  ['show_dictionary', "a word's pronunciation, definitions, and examples."],
-  ['show_link_preview', 'a rich preview card for any web page URL.'],
-  ['show_diagram', 'render a Mermaid diagram (flowchart, sequence, mind map, etc.).'],
-  ['show_currency', 'convert between two currencies at the latest rate.'],
-  ['show_npm', 'an npm package card (version, downloads, description).'],
-  ['show_hackernews', 'the top Hacker News story for a topic.'],
-  ['show_table', 'a clean data table from columns and rows you provide.'],
-  ['show_news', 'recent news headlines for a topic.'],
-  ['show_countdown', 'a live countdown to a date/time.'],
-  ['show_color_palette', 'copyable hex color swatches.'],
-  ['show_qr', 'a scannable QR code for a URL or text.'],
-  ['show_math_plot', 'graph a function y = f(x) over a range.'],
-  ['show_dashboard', 'compose 2-8 of the widgets above into ONE titled grid — prefer it over separate calls when the cards belong together (a trip: weather + map + currency; a project: repo + npm + chart).'],
-  ['generate_slides', 'build a real downloadable PowerPoint deck from an outline you write.'],
-  ['export_csv', 'save tabular data as a downloadable CSV file.'],
-];
-
-const EMPTY_DISABLED = new Set();
-
-function widgetPolicyFor(disabled) {
-  const lines = WIDGET_LINES.filter(([name]) => !disabled.has(name)).map(([name, desc]) => `- ${name} — ${desc}`);
-  if (!lines.length) return null;
-  return `## Widgets\nYou can drop interactive cards right into the chat:\n${lines.join('\n')}\nBe proactive with these — don't wait to be asked for "the widget". The moment you're about to state a fact one of these covers, call the tool instead of just typing the number: a temperature or forecast → show_weather; a coin price → show_crypto; an exchange rate → show_currency; a package version/downloads → show_npm; a repo's stars/language → show_github_repo; a word's definition → show_dictionary; a place, address, or business → show_map; a date you're counting down to → show_countdown; a set of hex colors → show_color_palette; a small table of numbers or comparisons → show_table; a y=f(x) relationship → show_math_plot. Recommending a restaurant, landmark, or repo also earns its card the same way. The card renders for the user automatically, so don't paste a link, id, or coordinates in your text — just call the tool, then add one short sentence around it. You may use more than one in a reply, and it's fine to lead with the tool call before you've written anything.`;
-}
-
-const GATE_POLICY = `## Project mode
-You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git), saves your plan as PLAN.md, and unlocks file and shell tools.
-
-Call start_project ONLY when:
-- the user asks for a real project, app, game, script, or website they want to keep, run, or iterate on
-- the work needs multiple files or packages, or must be executed to verify it
-
-Do NOT call it when:
-- the user wants a snippet, one-file example, or code just to read — answer in chat with a markdown code block
-- the user is asking a question, discussing, or still planning — keep talking; only start the project when they clearly want it built
-
-CRITICAL — no hosting / no ports:
-- NEVER start a long-running web server, dev server, or anything that listens on a port (no npm run dev, vite, webpack-dev-server, python -m http.server, flask/django/express listen, etc.).
-- There is no live preview host. The user previews HTML/CSS/JS in-canvas in the DuckPond Files rail (static files only) and can download any file.
-- For websites/apps, write complete static files (index.html + css/js) or a self-contained HTML document. For scripts, write the file and verify with a one-shot command (node x.js, python x.py, tests) that exits.
-
-If you do call start_project, briefly tell the user what you're about to build first, then call the tool with a short kebab-case name and a concise plan.`;
-
-const ACTIVE_POLICY = `## Project mode (active)
-This conversation has a persistent sandboxed workspace at /workspace (Debian, Node 24 + npm, Python 3.13 + pip, git). You have tools to list/read/write files and run shell commands.
-
-Rules:
-- Use tools when the user wants project work done (build, change, fix, run). For pure questions or discussion, just answer in chat — no tools.
-- Keep PLAN.md current: check items off as you finish them; update it when the plan changes.
-- Look before you leap: list or read files before editing them.
-- write_file replaces the whole file — always write complete content, never fragments or placeholders.
-- NEVER start long-running servers or bind ports. No dev servers. Write static HTML/CSS/JS for UIs; the user previews them in-canvas and can download files. Verify with one-shot commands that exit (node, python, test runners, build tools that finish).
-- Package installs pause for the user's approval and may be denied; if denied, adapt.
-- After tool work, finish with a short plain-text summary: what you built, how you verified it, what could come next. No tool calls in that final message.`;
-
-const SEARCH_POLICY = `## Web search
-You can search the web with web_search and read pages with fetch_page. Use them for current events, prices, versions, library docs, or any fact you are not confident about — never guess when you can check.
-Use today's actual date (given above) when it matters: for anything about "latest", "current", "this year", recent releases, or news, search with the real current year — do not default to a year from your training data, and do not assume something is out of date just because it's after your training cutoff.
-Work in small batches: run a search, then read up to about 3 of the most promising results with fetch_page. If that is not enough, refine your query and read another batch. Most questions need only a handful of pages — stop as soon as you are confident. You may read many more if a question truly demands deep research (a hard limit of 200 pages), but reaching for a lot of pages should be rare, not the default.
-Cite as you write: right after any sentence or bullet that rests on something you read, add a markdown link to the exact page it came from, like [OpenAI pricing](https://example.com/pricing). Use the real page URL, never a bare URL on its own line, and never invent a link. If two pages back the same point, add both links next to each other. These links render as small source tags, so keep the link text to a couple of words. Skip searching for things you already know well.`;
-
-// Search depth tiers. Caps flow into the inline-search loop; ultra also raises
-// the thinking budget, turns up reasoning, and injects a deep-research directive.
-const RESEARCH_MODES = {
-  quick: { reads: 8, searches: 6, rounds: 12, thinkMs: 60 * 60_000, ultra: false },
-  normal: { reads: 200, searches: 40, rounds: 80, thinkMs: 60 * 60_000, ultra: false },
-  ultra: { reads: 400, searches: 80, rounds: 160, thinkMs: 60 * 60_000, ultra: true },
-};
-const ULTRA_DIRECTIVE = `## Deep research mode (active)
-The user wants the most thorough, concrete answer you can produce. Do real research:
-1. Break the question into sub-questions.
-2. Search each, and read widely — open many sources with fetch_page, not just snippets.
-3. Cross-check facts across independent sources; prefer primary/authoritative ones; note disagreements.
-4. Keep going until you can answer with specifics and confidence (you may read up to 400 pages).
-5. Then synthesize a well-structured, richly cited answer — cite the pages you used inline.
-Do not stop early or hand-wave; be exhaustive, then conclude clearly.`;
-
-const IMAGE_POLICY = `## Image generation
-You can create real images with the generate_image tool (local diffusion model). Use it when the user asks for a picture, artwork, photo, logo, or wallpaper. Write the complete visual prompt yourself — subject, setting, style, lighting, composition — don't ask the user to write it. Generation takes a few minutes on the local GPU, so briefly say what you're creating before the call. Never claim you made an image without calling the tool; the finished image is shown to the user automatically.`;
-
-const NAME_STOPWORDS = new Set([
-  'make', 'me', 'a', 'an', 'the', 'i', 'want', 'you', 'to', 'please', 'pls', 'build',
-  'create', 'write', 'my', 'for', 'of', 'in', 'with', 'that', 'this', 'it', 'can',
-  'and', 'then', 'than', 'like', 'us', 'some', 'new', 'app', 'project', 'game',
-]);
-
-function wsNameFrom(text) {
-  const words = text.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/)
-    .filter((w) => w && !NAME_STOPWORDS.has(w));
-  return (words.slice(0, 3).join('-') || 'project').slice(0, 40);
-}
-
-function slugify(name) {
-  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '').slice(0, 40);
-}
-
-function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, userLoc = null, disabled = EMPTY_DISABLED) {
-  const locPolicy = userLoc
-    ? `## User location\nAn approximate location is available for the user (lat ${userLoc.lat}, lon ${userLoc.lon}, near ${userLoc.label ?? 'their area'}). You may omit place/query in show_weather or show_map to use it — do not ask them where they are.`
-    : `## User location\nNo location is available for the user right now. Never omit place/query in show_weather or show_map expecting it to fall back to "where they are" — it will fail. Ask what place they mean.`;
-  const showGate = !wsRow && !disabled.has('start_project');
-  const showImage = imageAllowed && !disabled.has('generate_image');
-  const showSearch = !disabled.has('web_search');
-  const parts = [
-    wsRow ? ACTIVE_POLICY : (showGate ? GATE_POLICY : null),
-    showImage ? IMAGE_POLICY : null,
-    showSearch ? SEARCH_POLICY : null,
-    widgetPolicyFor(disabled),
-    locPolicy,
-  ].filter(Boolean);
-  if (wsRow) {
-    const files = listTree(wsRow).slice(0, 60)
-      .map((f) => (f.dir ? `${f.path}/` : f.path)).join('\n');
-    parts.push(`Current workspace files:\n${files || '(empty)'}`);
+  // only register once per app instance
+  if (!app.hasContentTypeParser('application/json')) {
+    app.addContentTypeParser('application/json', { parseAs: 'string' }, emptyBody);
   }
-  const policy = parts.join('\n\n');
-  if (promptMessages[0]?.role === 'system') {
-    return [{ role: 'system', content: promptMessages[0].content + '\n\n' + policy }, ...promptMessages.slice(1)];
+  for (const ct of ['text/plain', 'application/x-www-form-urlencoded', '']) {
+    try {
+      if (!app.hasContentTypeParser(ct)) {
+        app.addContentTypeParser(ct, { parseAs: 'string' }, emptyBody);
+      }
+    } catch { /* already registered */ }
   }
-  return [{ role: 'system', content: policy }, ...promptMessages];
+
+  app.get('/api/conversations', async (req) =>
+    db.prepare(`SELECT id, title, model_id, updated_at FROM conversations
+                WHERE user_id = ? ORDER BY updated_at DESC`).all(req.user.id));
+
+  app.post('/api/conversations', async (req) => {
+    const { model_id } = req.body ?? {};
+    const r = db.prepare('INSERT INTO conversations (user_id, model_id) VALUES (?, ?)')
+      .run(req.user.id, model_id ?? null);
+    return db.prepare('SELECT * FROM conversations WHERE id = ?').get(r.lastInsertRowid);
+  });
+
+  app.get('/api/conversations/:id', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    const messages = db.prepare('SELECT * FROM messages WHERE conv_id = ? ORDER BY id').all(conv.id);
+    return { ...conv, messages, settings: conv._settings };
+  });
+
+  app.patch('/api/conversations/:id', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    const { title, model_id, active_leaf_id, settings } = req.body ?? {};
+    if (title !== undefined)
+      db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(String(title).slice(0, 200), conv.id);
+    if (model_id !== undefined)
+      db.prepare('UPDATE conversations SET model_id = ? WHERE id = ?').run(model_id, conv.id);
+    if (active_leaf_id !== undefined) {
+      // never point the leaf at a message outside this conversation (or a deleted one)
+      const ok = active_leaf_id == null
+        || db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(active_leaf_id, conv.id);
+      if (ok) setLeaf(conv.id, active_leaf_id ?? null);
+    }
+    if (settings !== undefined)
+      db.prepare('UPDATE conversations SET settings_json = ? WHERE id = ?').run(JSON.stringify(settings), conv.id);
+    return { ok: true };
+  });
+
+  app.delete('/api/conversations/:id', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    db.prepare('DELETE FROM conversations WHERE id = ?').run(conv.id);
+    return { ok: true };
+  });
+
+  app.post('/api/messages/:id/pin', async (req, reply) => {
+    const msg = db.prepare(`
+      SELECT m.* FROM messages m JOIN conversations c ON c.id = m.conv_id
+      WHERE m.id = ? AND c.user_id = ?`).get(req.params.id, req.user.id);
+    if (!msg) return reply.code(404).send({ error: 'not found' });
+    const pinned = req.body?.pinned ? 1 : 0;
+    db.prepare('UPDATE messages SET pinned = ? WHERE id = ?').run(pinned, msg.id);
+    return { ok: true, pinned: !!pinned };
+  });
+
+  // Delete a message AND its whole subtree (replies/branches under it).
+  // If the active leaf was inside the subtree, the path retracts to the parent.
+  app.delete('/api/messages/:id', async (req, reply) => {
+    const msg = db.prepare(`
+      SELECT m.*, c.active_leaf_id, c.user_id FROM messages m
+      JOIN conversations c ON c.id = m.conv_id
+      WHERE m.id = ? AND c.user_id = ?`).get(req.params.id, req.user.id);
+    if (!msg) return reply.code(404).send({ error: 'not found' });
+    const subtree = db.prepare(`
+      WITH RECURSIVE sub(id) AS (
+        SELECT id FROM messages WHERE id = ?
+        UNION ALL
+        SELECT m.id FROM messages m JOIN sub s ON m.parent_id = s.id
+      ) SELECT id FROM sub`).all(msg.id).map((r) => r.id);
+    db.transaction(() => {
+      if (subtree.includes(msg.active_leaf_id)) setLeaf(msg.conv_id, msg.parent_id ?? null);
+      const del = db.prepare(`DELETE FROM messages WHERE id IN (${subtree.map(() => '?').join(',')})`);
+      del.run(...subtree);
+    })();
+    return { ok: true, deleted: subtree.length };
+  });
+
+  // Re-attach to an in-flight (or just-finished) generation after a refresh.
+  // Sends a `resume` snapshot, then tails live events. 204 when nothing is live.
+  app.get('/api/conversations/:id/live', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    const job = getLiveJob(conv.id);
+    if (!job || job.userId !== req.user.id) return reply.code(204).send();
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    let ping = null;
+    let unsub = () => {};
+    const closeLive = () => {
+      if (ping) { clearInterval(ping); ping = null; }
+      unsub();
+      unsub = () => {};
+      if (!reply.raw.writableEnded) {
+        try { reply.raw.end(); } catch { /* ignore */ }
+      }
+    };
+    const write = (obj) => {
+      if (reply.raw.writableEnded || reply.raw.destroyed) return;
+      try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
+      // done / stream_end — hang up so the client promise resolves
+      if (obj?.type === 'done' || obj?.type === 'stream_end') closeLive();
+    };
+    unsub = attachListener(job, write);
+    // finished jobs only needed the resume snapshot — close immediately
+    if (job.status !== 'running') {
+      closeLive();
+      return;
+    }
+    ping = setInterval(() => {
+      if (!reply.raw.writableEnded) {
+        try { reply.raw.write(': ping\n\n'); } catch { /* ignore */ }
+      }
+    }, 15_000);
+    reply.raw.on('close', () => {
+      if (ping) { clearInterval(ping); ping = null; }
+      unsub();
+      // do NOT abort the job — refresh/tab-close must not kill generation
+    });
+  });
+
+  // Explicit stop only. Page refresh must never cancel the model.
+  // Accept empty / missing body (browsers & CF sometimes omit Content-Type on
+  // POST — that used to 415 and leave the run stuck "running" forever).
+  app.post('/api/conversations/:id/stop', {
+    config: { rawBody: false },
+    // skip JSON body requirement
+  }, async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    const live = stopLiveJob(conv.id, req.user.id);
+    // Always free the workspace run slot, even if the live job map already
+    // forgot it (e.g. after a partial crash) — otherwise "already active" 409s.
+    let runs = 0;
+    try {
+      if (conv.workspace_id) runs = stopRunsForWorkspace(conv.workspace_id);
+    } catch (err) { req.log.warn({ err }, 'stopRunsForWorkspace failed'); }
+    return { ok: live || runs > 0, live, runs };
+  });
+
+  // Compaction: summarize older turns with the resident model and splice a
+  // 'compaction' node onto the active path. System prompt, pinned messages and
+  // the last `keep` turns stay verbatim; covered originals stay in the DB and
+  // are skipped by buildPrompt from now on. (notes/COMPACTION.md)
+  // Remote conversations compact on the cheap aux model and log the savings.
+  app.post('/api/conversations/:id/compact', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    if (!conv.model_id || !conv.active_leaf_id) return reply.code(400).send({ error: 'nothing to compact' });
+
+    const KEEP = Math.max(2, Number(req.body?.keep ?? 8));
+    const path = pathToRoot(conv.active_leaf_id);
+    const covered = new Set();
+    for (const m of path) {
+      if (m.role === 'compaction' && m.covers_json) {
+        for (const cid of JSON.parse(m.covers_json)) covered.add(cid);
+      }
+    }
+    const eligible = path.filter((m) =>
+      (m.role === 'user' || m.role === 'assistant') && !m.pinned && !covered.has(m.id));
+    const toCompact = eligible.slice(0, Math.max(0, eligible.length - KEEP));
+    if (toCompact.length < 4) return reply.code(400).send({ error: 'not enough history to compact yet' });
+
+    const remote = isRemoteId(conv.model_id);
+    const auxModel = remote ? await auxModelFor(conv.model_id, req.log) : conv.model_id;
+    const transcript = toCompact.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+    const { content: summary, usage: compactUsage } = await streamChat({
+      model: auxModel,
+      messages: [{
+        role: 'user',
+        content: 'Compress this chat history into a context brief for a language model. '
+          + 'Keep: user goals, decisions made, key facts (names, numbers, file paths, code identifiers), '
+          + 'and unresolved tasks. Terse bullet points under the headings Goals / Decisions / Facts / Open items. '
+          + `No preamble, no commentary.\n\n---\n${transcript}\n---`,
+      }],
+      params: { max_tokens: 900, temperature: 0.2, chat_template_kwargs: { enable_thinking: false } },
+    });
+    if (!summary.trim()) return reply.code(502).send({ error: 'model returned an empty summary' });
+    if (remote) {
+      try {
+        const tin = compactUsage?.prompt_tokens ?? Math.ceil(transcript.length / 4);
+        const tout = compactUsage?.completion_tokens ?? 300;
+        recordEvent({
+          userId: req.user.id, convId: conv.id, modelId: auxModel, kind: 'aux_compact',
+          tokensIn: tin, tokensOut: tout,
+          costUsd: costFor(modelRowForRemoteId(auxModel), tin, tout, 0),
+          baselineUsd: auxBaselineCost(modelRowForRemoteId(conv.model_id), tin, tout),
+        });
+      } catch { /* ledger best-effort */ }
+    }
+
+    let before = null;
+    let after = null;
+    try { before = await countInputTokens(conv.model_id, toCompact.map((m) => ({ role: m.role, content: m.content }))); } catch { /* cosmetic */ }
+    try { after = await countInputTokens(conv.model_id, [{ role: 'system', content: summary }]); } catch { /* cosmetic */ }
+
+    const header = `Compacted ${toCompact.length} messages`
+      + (before && after ? ` (~${(before / 1000).toFixed(1)}k → ~${after} tokens)` : '');
+    const node = insertMessage(conv.id, conv.active_leaf_id, 'compaction',
+      `${header}\n\n${summary.trim()}`, {
+        modelId: conv.model_id,
+        coversJson: JSON.stringify(toCompact.map((m) => m.id)),
+      });
+    setLeaf(conv.id, node.id);
+
+    let used = null;
+    try { used = await countInputTokens(conv.model_id, buildPrompt(conv, node.id)); } catch { /* bar refreshes later */ }
+    return { ok: true, node, compacted: toCompact.length, used, budget: conv._settings.ctx_size };
+  });
+
+  // exact context usage for the current active path (drives the bar on load)
+  app.get('/api/conversations/:id/context', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    if (!conv.model_id || !conv.active_leaf_id) return { used: 0, budget: conv?._settings?.ctx_size ?? 32768 };
+    const msgs = buildPrompt(conv, conv.active_leaf_id);
+    try {
+      const used = await countInputTokens(conv.model_id, msgs);
+      return { used: used ?? 0, budget: conv._settings.ctx_size };
+    } catch {
+      return { used: 0, budget: conv._settings.ctx_size, unavailable: true };
+    }
+  });
+
+  registerChatPost(app);
 }
