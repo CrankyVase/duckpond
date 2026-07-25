@@ -38,6 +38,69 @@ export function resolveRemote(id) {
   return { provider, model: providerModelFor(parsed.providerId, parsed.modelId), ...parsed };
 }
 
+// ---------- model fallback chains ----------
+// Worth retrying on the next chain model: transient network failures, rate
+// limits, server errors, and a model that vanished from the provider. Auth and
+// bad-request errors fail fast — every model on a provider shares the key and
+// the request shape, so a sibling model would fail the same way.
+const RETRYABLE_STATUS = new Set([404, 408, 409, 429, 500, 502, 503, 504]);
+export function isRetryableRemoteError(err) {
+  if (err?.status != null) return RETRYABLE_STATUS.has(Number(err.status));
+  return true; // fetch/network/timeout errors carry no status
+}
+
+// Ordered fallback candidates for a failing model: the provider's chain
+// (fallback_json, preference order) starting AFTER the failing model's
+// position, or the whole chain when the model isn't listed. Enabled models
+// only; the failing model itself is never re-offered.
+export function fallbackCandidates(providerId, modelId) {
+  const provider = providerFor(providerId);
+  let chain = [];
+  try { chain = JSON.parse(provider?.fallback_json ?? '[]'); } catch { chain = []; }
+  if (!Array.isArray(chain) || !chain.length) return [];
+  const idx = chain.indexOf(modelId);
+  const ordered = (idx >= 0 ? chain.slice(idx + 1) : chain)
+    .filter((id) => id && id !== modelId);
+  return ordered.filter((id) => {
+    const row = providerModelFor(providerId, id);
+    return row && row.enabled;
+  });
+}
+
+// ---------- starter presets (add with just an API key) ----------
+// Free-model id convention: OpenRouter's ":free" variants, Zen's "-free" tier,
+// NVIDIA's free endpoints, etc.
+export const isFreeModelId = (id) => /(:|-)free$/i.test(String(id ?? ''));
+
+// Curated OpenAI-compatible providers with free models — the user only pastes
+// an API key. freeOnly presets default to importing just the free models.
+export const PROVIDER_PRESETS = [
+  { key: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1',
+    freeOnly: false, keyUrl: 'https://openrouter.ai/keys',
+    blurb: 'One key for 400+ models. Lots of :free variants — flip on Free-only import to get just those.' },
+  { key: 'opencode-zen', name: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/v1',
+    freeOnly: true, keyUrl: 'https://opencode.ai/zen',
+    blurb: 'Curated coding models with several genuinely free ones (all chat/completions-compatible). Free-only import defaults on.' },
+  { key: 'nvidia', name: 'NVIDIA Build', baseUrl: 'https://integrate.api.nvidia.com/v1',
+    freeOnly: false, keyUrl: 'https://build.nvidia.com/',
+    blurb: '100+ models on NVIDIA-hosted endpoints, many free with one key.' },
+  { key: 'minimax', name: 'MiniMax', baseUrl: 'https://api.minimax.io/v1',
+    freeOnly: false, keyUrl: 'https://platform.minimax.io/',
+    blurb: 'M-series direct (M3, M2.7…). Trial credits on signup.' },
+  { key: 'groq', name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1',
+    freeOnly: false, keyUrl: 'https://console.groq.com/keys',
+    blurb: 'Ultra-fast Llama/Qwen/GPT-OSS with a free tier.' },
+  { key: 'gemini', name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    freeOnly: false, keyUrl: 'https://aistudio.google.com/apikey',
+    blurb: 'Gemini models with a generous free tier.' },
+  { key: 'cerebras', name: 'Cerebras', baseUrl: 'https://api.cerebras.ai/v1',
+    freeOnly: false, keyUrl: 'https://cloud.cerebras.ai/',
+    blurb: 'Wafer-scale fast inference, free tier.' },
+  { key: 'github-models', name: 'GitHub Models', baseUrl: 'https://models.github.ai/inference',
+    freeOnly: false, keyUrl: 'https://github.com/settings/tokens',
+    blurb: 'Free with a GitHub token (rate-limited). GPT/Llama/Phi/Mistral and more.' },
+];
+
 // ---------- pricing + context knowledge ----------
 // Fallback table used when a provider's /models gives no pricing/context.
 // USD per 1M tokens; deliberately rough — the provider's own metadata always
@@ -158,7 +221,9 @@ async function jfetch(base, path, apiKey, { method = 'GET', body, timeoutMs = 20
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status} from ${stripSlash(base)}${path}: ${text.slice(0, 300)}`);
+    const err = new Error(`HTTP ${res.status} from ${stripSlash(base)}${path}: ${text.slice(0, 300)}`);
+    err.status = res.status; // lets the fallback chain tell transient from fatal
+    throw err;
   }
   return res;
 }
@@ -185,8 +250,21 @@ export async function syncProviderModels(providerId, log) {
   try {
     const res = await jfetch(provider.base_url, '/models', provider.api_key, { timeoutMs: 30_000 });
     const j = await res.json();
-    const list = (Array.isArray(j?.data) ? j.data : Array.isArray(j) ? j : [])
+    let list = (Array.isArray(j?.data) ? j.data : Array.isArray(j) ? j : [])
       .filter((m) => m && typeof m.id === 'string');
+
+    // Free-only import mode: keep just models we can tell are free — a
+    // :free/-free id suffix always counts (OpenRouter variants, Zen's free
+    // tier), otherwise both prices must be reported as exactly 0. When the
+    // provider reports no pricing at all we can only go by the id suffix.
+    if (provider.free_only) {
+      const metas = list.map((m) => [m, normalizeModelMeta(m.id, m)]);
+      const anyPriced = metas.some(([, meta]) => meta.price_in != null || meta.price_out != null);
+      list = metas
+        .filter(([m, meta]) => isFreeModelId(m.id)
+          || (anyPriced && Number(meta.price_in) === 0 && Number(meta.price_out) === 0))
+        .map(([m]) => m);
+    }
 
     const upsert = db.prepare(`
       INSERT INTO provider_models
@@ -287,7 +365,9 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
   });
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => '');
-    throw new Error(`${provider.name} chat ${res.status}: ${body.slice(0, 400)}`);
+    const err = new Error(`${provider.name} chat ${res.status}: ${body.slice(0, 400)}`);
+    err.status = res.status; // lets the fallback chain tell transient from fatal
+    throw err;
   }
 
   const reader = res.body.getReader();

@@ -354,6 +354,19 @@ export function registerChatPost(app) {
           });
         } catch { /* ledger best-effort */ }
       };
+      // fallback-chain hops: toast the user + ledger entry (the retried turn
+      // bills under the new model via recordUsage, so no cost rows needed here)
+      const fbNotice = (info) => {
+        if (info?.type !== 'fallback') return;
+        send({ type: 'notice', message: `${info.from} failed (${info.reason}) — falling back to ${info.to}` });
+        if (!remote) return;
+        try {
+          recordEvent({
+            userId: req.user.id, convId: conv.id, modelId: conv.model_id,
+            kind: 'fallback', tokensIn: 0, tokensOut: 0, costUsd: 0, baselineUsd: 0,
+          });
+        } catch { /* ledger best-effort */ }
+      };
       let turnCacheKey = null;
       if (remote) {
         const pressure = promptPressure(promptMessages, conv._settings.ctx_size);
@@ -418,7 +431,7 @@ export function registerChatPost(app) {
         if (constrained) {
           res = await streamChat({
             model: conv.model_id, messages: promptMessages, params,
-            abortSignal: abort.signal, onDelta,
+            abortSignal: abort.signal, onDelta, onEvent: fbNotice,
           });
         } else {
           const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
@@ -433,7 +446,7 @@ export function registerChatPost(app) {
                 : baseTools.filter((t) => t.function.name !== 'generate_image'),
               tool_choice: 'auto',
             },
-            abortSignal: abort.signal, onDelta,
+            abortSignal: abort.signal, onDelta, onEvent: fbNotice,
           });
         }
       } catch (err) {
@@ -442,7 +455,7 @@ export function registerChatPost(app) {
         toolsOn = false;
         res = await streamChat({
           model: conv.model_id, messages: promptMessages, params,
-          abortSignal: abort.signal, onDelta,
+          abortSignal: abort.signal, onDelta, onEvent: fbNotice,
         });
       }
 

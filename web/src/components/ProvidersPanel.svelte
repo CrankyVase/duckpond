@@ -8,6 +8,8 @@
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
+  import ProviderFallback from './ProviderFallback.svelte';
+  import ProviderPresets from './ProviderPresets.svelte';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -242,6 +244,7 @@
   {:else if !providers}
     <div class="empty shimmer">loading…</div>
   {:else}
+    <ProviderPresets {isOwner} onadded={() => load()} />
     {#if isOwner}
       <section class="surface">
         <h2 class="subhead"><Plus size={13} /> Add a provider</h2>
@@ -342,6 +345,21 @@
             </div>
           </div>
 
+          <div class="prow">
+            <div class="cachetog">
+              <span class="ct">Free-only import</span>
+              {#if isOwner}
+                <button class="tog" class:on={!!p.free_only} role="switch" aria-checked={!!p.free_only}
+                  title="Catalog syncs keep only models that are detectably free (both prices 0, or a :free/-free id). Switching on re-syncs immediately."
+                  onclick={() => patchProvider(p, { free_only: !p.free_only }, `Free-only ${p.free_only ? 'off' : 'on — syncing free models…'} for ${p.name}`)}>
+                  <span class="knob"></span>
+                </button>
+              {:else}
+                <span class="statetag" class:on={!!p.free_only}>{p.free_only ? 'on' : 'off'}</span>
+              {/if}
+            </div>
+          </div>
+
           {#if expanded === p.id}
             <div class="mtable">
               {#if modelsByProv[p.id] === 'loading' || modelsByProv[p.id] == null}
@@ -351,6 +369,8 @@
               {:else if !modelsByProv[p.id].length}
                 <div class="empty">No models in the catalog — try Sync now.</div>
               {:else}
+                <ProviderFallback {p} models={modelsByProv[p.id]} {isOwner}
+                  onsave={(body, msg) => patchProvider(p, body, msg)} />
                 <div class="tablewrap">
                   <table>
                     <thead>

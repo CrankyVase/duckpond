@@ -411,6 +411,10 @@ CREATE TABLE IF NOT EXISTS conv_uploads (
 // per-user read-aloud voice (Voxtral voice_id incl. emotion suffix)
 try { db.exec('ALTER TABLE users ADD COLUMN tts_voice TEXT'); } catch { /* exists */ }
 
+// ordered per-provider model fallback chain (feat/remote-providers, stage 12)
+try { db.exec("ALTER TABLE providers ADD COLUMN fallback_json TEXT NOT NULL DEFAULT '[]'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE providers ADD COLUMN free_only INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
+
 // Theme marketplace: user-published themes (full color map + layout + effects
 // + css bundled in theme_json). Seeded by routes/themes.js on first boot.
 db.exec(`CREATE TABLE IF NOT EXISTS community_themes (
@@ -436,6 +440,8 @@ CREATE TABLE IF NOT EXISTS providers (
   kind TEXT NOT NULL DEFAULT 'openai',
   enabled INTEGER NOT NULL DEFAULT 1,
   cache_enabled INTEGER NOT NULL DEFAULT 1,     -- exact response cache for plain turns
+  fallback_json TEXT NOT NULL DEFAULT '[]',     -- ordered model fallback chain (preference order)
+  free_only INTEGER NOT NULL DEFAULT 0,          -- sync imports only models detectably free
   last_sync_at INTEGER,
   last_sync_count INTEGER,
   last_error TEXT,

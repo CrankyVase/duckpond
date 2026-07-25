@@ -8,7 +8,8 @@
 // works on either side without knowing which.
 import { execFile } from 'node:child_process';
 import {
-  estimateTokens, isRemoteId, resolveRemote, streamRemote,
+  estimateTokens, fallbackCandidates, isRemoteId, isRetryableRemoteError,
+  resolveRemote, streamRemote,
 } from './providers.js';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
@@ -21,8 +22,11 @@ const LLAMA_ONLY_PARAMS = [
   'grammar', 'json_schema', 'chat_template_kwargs', 'timings_per_token',
 ];
 const REMOTE_MAX_TOKENS = 4096;
+// total attempts per remote turn, the requested model included — bounds both
+// the wait and the chance of burning through a whole chain on a dead provider
+const REMOTE_FALLBACK_MAX = 3;
 
-function remoteCall({ model, messages, params, onDelta, abortSignal }) {
+async function remoteCall({ model, messages, params, onDelta, abortSignal, onEvent }) {
   const r = resolveRemote(model);
   if (!r) throw new Error(`remote model unavailable (provider deleted or disabled): ${model}`);
   if (r.model && !r.model.enabled) throw new Error(`model disabled in the Providers panel: ${r.modelId}`);
@@ -33,10 +37,35 @@ function remoteCall({ model, messages, params, onDelta, abortSignal }) {
       ? Math.min(Number(r.model.max_output), REMOTE_MAX_TOKENS)
       : REMOTE_MAX_TOKENS;
   }
-  return streamRemote({
-    provider: r.provider, model: r.modelId, messages,
-    params: mapped, onDelta, abortSignal,
-  });
+  // Fallback chain: a transient failure transparently retries on the next
+  // enabled model in the provider's chain (OmniRoute-style). Only while
+  // nothing has streamed yet — a half-delivered reply never restarts.
+  const candidates = [r.modelId, ...fallbackCandidates(r.providerId, r.modelId)]
+    .slice(0, REMOTE_FALLBACK_MAX);
+  let lastErr = null;
+  for (let i = 0; i < candidates.length; i++) {
+    const modelId = candidates[i];
+    let emitted = false;
+    const trackDelta = (chunk, meta) => {
+      if (chunk || meta?.reasoning || meta?.toolFrag) emitted = true;
+      return onDelta?.(chunk, meta);
+    };
+    try {
+      return await streamRemote({
+        provider: r.provider, model: modelId, messages,
+        params: mapped, onDelta: trackDelta, abortSignal,
+      });
+    } catch (err) {
+      lastErr = err;
+      const more = i < candidates.length - 1;
+      if (!more || emitted || abortSignal?.aborted || !isRetryableRemoteError(err)) break;
+      onEvent?.({
+        type: 'fallback', from: modelId, to: candidates[i + 1],
+        reason: String(err.message ?? err).slice(0, 200),
+      });
+    }
+  }
+  throw lastErr;
 }
 
 // Per-model activity for the idle reaper: models unload from VRAM after
@@ -110,8 +139,10 @@ export async function countInputTokens(model, messages) {
 
 // Streaming chat completion. Calls onDelta(textChunk, meta) per SSE chunk and
 // returns { content, timings, usage } when done. abortSignal cancels generation.
-export async function streamChat({ model, messages, params = {}, onDelta, abortSignal }) {
-  if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal });
+// onEvent: optional side-channel ({type:'fallback', from, to, reason}) so
+// callers can toast/log chain hops; every caller gets fallback either way.
+export async function streamChat({ model, messages, params = {}, onDelta, abortSignal, onEvent }) {
+  if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal, onEvent });
   const act = markUse(model);
   act.active++;
   try {
