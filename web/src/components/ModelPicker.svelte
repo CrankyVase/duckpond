@@ -16,8 +16,48 @@
   let unloading = $state(null);   // model id mid-unload
 
   const current = $derived(app.models.find((m) => m.id === app.conv?.model_id));
-  const filtered = $derived(
-    app.models.filter((m) => m.id.toLowerCase().includes(search.toLowerCase())));
+
+  // Remote ids look like `r{providerId}:{model_id}` — show just the model part.
+  const dispName = (m) => (m?.remote ? m.id.slice(m.id.indexOf(':') + 1) : m?.id);
+
+  // USD per 1M tokens, compact: $0.005 / $0.50 / $12.30
+  function perM(p) {
+    if (p == null) return null;
+    const s = p < 0.01 ? p.toPrecision(2) : p.toFixed(2);
+    return `$${String(s).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')}`;
+  }
+  function pricingMeta(m) {
+    const p = m.pricing;
+    if (!p || (p.in == null && p.out == null)) return 'no pricing yet';
+    let s = `${perM(p.in)} in · ${perM(p.out)} out /1M`;
+    if (p.cachedIn != null) s += ` · cached ${perM(p.cachedIn)}`;
+    return s;
+  }
+
+  const filtered = $derived.by(() => {
+    const q = search.trim().toLowerCase();
+    return app.models.filter((m) => !q
+      || m.id.toLowerCase().includes(q)
+      || (m.remote && (m.provider?.name ?? '').toLowerCase().includes(q)));
+  });
+
+  // Local group first (original server order), then one group per provider,
+  // providers + their models alphabetically. Items keep their flat index into
+  // `filtered` so keyboard hover/pick stays correct.
+  const groups = $derived.by(() => {
+    const locals = [];
+    const byProv = new Map();
+    filtered.forEach((m, i) => {
+      if (!m.remote) { locals.push({ m, i }); return; }
+      const key = m.provider?.id ?? '?';
+      if (!byProv.has(key)) byProv.set(key, { label: m.provider?.name ?? 'Remote', items: [] });
+      byProv.get(key).items.push({ m, i });
+    });
+    const provs = [...byProv.values()];
+    for (const g of provs) g.items.sort((a, b) => dispName(a.m).localeCompare(dispName(b.m)));
+    provs.sort((a, b) => a.label.localeCompare(b.label));
+    return locals.length ? [{ label: 'Local', items: locals }, ...provs] : provs;
+  });
 
   $effect(() => {
     if (app.modelPickerOpen && inputEl) { inputEl.focus(); search = ''; hoverIdx = 0; }
@@ -42,6 +82,7 @@
     return status === 'loaded' ? 'var(--green)'
       : status === 'loading' ? 'var(--yellow)'
       : status === 'sleeping' ? 'var(--accent)'
+      : status === 'remote' ? 'var(--accent)'
       : 'var(--text-faint)';
   }
   const resident = (s) => s === 'loaded' || s === 'sleeping' || s === 'loading';
@@ -73,7 +114,7 @@
   <button class="current" onclick={() => (app.modelPickerOpen = !app.modelPickerOpen)}
     title="Switch model (Ctrl+K)">
     <span class="dot" style="background:{dot(current?.status)}"></span>
-    <span class="name">{current?.id ?? app.conv?.model_id ?? 'Pick a model'}</span>
+    <span class="name">{dispName(current) ?? app.conv?.model_id ?? 'Pick a model'}</span>
     <span class="chev" class:flip={app.modelPickerOpen}><ChevronDown size={14} /></span>
   </button>
 
@@ -87,46 +128,60 @@
           autocomplete="off" autocorrect="off" spellcheck="false" onkeydown={keydown} />
       </div>
       <div class="list">
-        {#each filtered as m, i (m.id)}
-          <div class="opt" class:hover={i === hoverIdx} class:sel={m.id === app.conv?.model_id}
-            onclick={() => pick(m)} onmouseenter={() => (hoverIdx = i)}
-            role="option" aria-selected={m.id === app.conv?.model_id} tabindex="-1"
-            onkeydown={(e) => e.key === 'Enter' && pick(m)}>
-            <span class="dot" style="background:{dot(m.status)}"></span>
-            <span class="col">
-              <span class="oname">{m.id}</span>
-              <span class="meta">
-                {unloading === m.id ? 'unloading…' : resident(m.status) ? m.status : 'on disk'}
-                {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1024)}k ctx{/if}
+        {#each groups as g (g.label)}
+          {#if groups.length > 1}
+            <div class="gh">{g.label}</div>
+          {/if}
+          {#each g.items as { m, i } (m.id)}
+            <div class="opt" class:hover={i === hoverIdx} class:sel={m.id === app.conv?.model_id}
+              onclick={() => pick(m)} onmouseenter={() => (hoverIdx = i)}
+              role="option" aria-selected={m.id === app.conv?.model_id} tabindex="-1"
+              onkeydown={(e) => e.key === 'Enter' && pick(m)}>
+              <span class="dot" style="background:{dot(m.status)}"></span>
+              <span class="col">
+                <span class="oname">{dispName(m)}</span>
+                <span class="meta">
+                  {#if m.remote}
+                    remote
+                    {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1000)}k ctx{/if}
+                    &nbsp;·&nbsp;<span class:noprice={!m.pricing || (m.pricing.in == null && m.pricing.out == null)}>{pricingMeta(m)}</span>
+                  {:else}
+                    {unloading === m.id ? 'unloading…' : resident(m.status) ? m.status : 'on disk'}
+                    {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1024)}k ctx{/if}
+                  {/if}
+                </span>
               </span>
-            </span>
-            {#if m.card?.url}
-              <a class="info" href={m.card.url} target="_blank" rel="noreferrer"
-                onclick={(e) => e.stopPropagation()}
-                title="{m.blurb}{'\n\n'}(from {m.card.repo} — click to open the model card)">
-                <Info size={13} />
-              </a>
-            {:else if m.blurb}
-              <button class="info" onclick={(e) => e.stopPropagation()}
-                title={m.blurb}>
-                <Info size={13} />
+              {#if m.remote}
+                <span class="ptag">{m.provider?.name ?? 'remote'}</span>
+              {/if}
+              {#if m.card?.url}
+                <a class="info" href={m.card.url} target="_blank" rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  title="{m.blurb}{'\n\n'}(from {m.card.repo} — click to open the model card)">
+                  <Info size={13} />
+                </a>
+              {:else if m.blurb}
+                <button class="info" onclick={(e) => e.stopPropagation()}
+                  title={m.blurb}>
+                  <Info size={13} />
+                </button>
+              {/if}
+              <button class="star" class:on={app.user?.default_model_id === m.id}
+                onclick={(e) => setDefault(m, e)}
+                title={app.user?.default_model_id === m.id ? 'Default model — click to clear' : 'Make default for new chats'}>
+                <Star size={13} fill={app.user?.default_model_id === m.id ? 'currentColor' : 'none'} />
               </button>
-            {/if}
-            <button class="star" class:on={app.user?.default_model_id === m.id}
-              onclick={(e) => setDefault(m, e)}
-              title={app.user?.default_model_id === m.id ? 'Default model — click to clear' : 'Make default for new chats'}>
-              <Star size={13} fill={app.user?.default_model_id === m.id ? 'currentColor' : 'none'} />
-            </button>
-            {#if resident(m.status)}
-              <button class="eject" onclick={(e) => unload(m, e)} disabled={unloading === m.id}
-                title="Unload from VRAM">
-                <Power size={13} />
-              </button>
-            {/if}
-            {#if m.id === app.conv?.model_id}
-              <span class="check"><Check size={15} /></span>
-            {/if}
-          </div>
+              {#if resident(m.status)}
+                <button class="eject" onclick={(e) => unload(m, e)} disabled={unloading === m.id}
+                  title="Unload from VRAM">
+                  <Power size={13} />
+                </button>
+              {/if}
+              {#if m.id === app.conv?.model_id}
+                <span class="check"><Check size={15} /></span>
+              {/if}
+            </div>
+          {/each}
         {:else}
           <div class="empty">no matches</div>
         {/each}
@@ -191,6 +246,11 @@
   }
   .searchrow input { flex: 1; background: none; border: none; box-shadow: none; padding: 8px 0; }
   .list { overflow-y: auto; }
+  .gh {
+    font-size: 10.5px; color: var(--text-faint); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 10px 10px 4px; user-select: none;
+  }
   .opt {
     display: flex; align-items: center; gap: 10px;
     padding: 8px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer; font-size: 13.5px;
@@ -200,6 +260,15 @@
   .oname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .opt.sel .oname { color: var(--accent); }
   .meta { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
+  .noprice { opacity: 0.6; font-style: italic; }
+  .ptag {
+    flex-shrink: 0;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+    color: var(--accent); background: var(--accent-glow);
+    border: 1px solid var(--accent-dim);
+    border-radius: 999px; padding: 2px 8px;
+    max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .check { color: var(--accent); display: grid; place-items: center; }
   .info {
     all: unset; cursor: help;
