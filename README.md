@@ -23,8 +23,30 @@ node scripts/admin.mjs list-users
 ```
 Owner can also add friends from the UI API: `POST /api/auth/users`.
 
+## Remote providers & cost savings
+Add any OpenAI-compatible provider (name + base URL + API key, e.g.
+`https://nano-gpt.com/api/v1`) in the **Providers** panel. The catalog
+auto-syncs from `/models` with context sizes + pricing, re-syncing lazily every
+24h. Remote models appear in the picker grouped by provider with per-model
+costs; remote ids (`r{providerId}:{model}`) flow through the same chat pipeline
+as local ones (memory, search, widgets, compaction all work).
+
+The cost saver runs automatically on remote turns, tuned for lossless savings:
+- stable-prefix system prompts → provider prompt-cache discounts (cached
+  tokens are priced at the cheaper rate and logged as savings)
+- exact response cache → identical plain turns replay free
+- auto-compaction when the prompt would blow the context budget
+- cheap aux model (cheapest on the same provider) for auto-titles, follow-up
+  chips, memory extraction, and compaction summaries
+
+Every paid call lands in a ledger (actual vs baseline USD). The **Costs** panel
+shows spend vs savings, a breakdown by technique, per-provider/per-model
+tables, a 30-day chart, and recent events. Paid models never drive the
+sandbox/agent tooling (local-only) and skip the GPU queue entirely.
+
 ## Layout
-- `server/` — Fastify 5 + better-sqlite3 + argon2. Routes: auth, models, chat, stats.
+- `server/` — Fastify 5 + better-sqlite3 + argon2. Routes: auth, models, chat,
+  stats, providers, costs.
 - `web/` — Svelte 5 + Vite SPA. Built output served by the server.
 - `notes/` — DESIGN.md (architecture), RESEARCH.md (2026-07 research digest),
   COMPACTION.md (context-compaction tradeoffs, spec §4 doc).
