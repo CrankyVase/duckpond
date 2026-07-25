@@ -146,63 +146,55 @@ export default async function providerRoutes(app) {
     if (!ownerOnly(req, reply)) return;
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    db.prepare('DELETE FROM providers WHERE id = ?').run(p.id); // cascades models + cache
+    db.prepare('DELETE FROM providers WHERE id = ?').run(p.id);
     return { ok: true };
   });
 
-  // Manual "Sync now" — re-pull {base}/models.
   app.post('/api/providers/:id/sync', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
+    try { return await syncProviderModels(Number(req.params.id), req.log); }
+    catch (err) { return reply.code(502).send({ ok: false, error: String(err.message ?? err) }); }
+  });
+
+  app.get('/api/providers/:id/models', async (req, reply) => {
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    try {
-      const r = await syncProviderModels(p.id, req.log);
-      return { ok: true, count: r.count };
-    } catch (err) {
-      return reply.code(502).send({ error: String(err.message ?? err) });
-    }
+    return db.prepare(`
+      SELECT id, provider_id, model_id, context_length, max_output,
+             price_in, price_out, price_cached_in, enabled, fetched_at
+      FROM provider_models WHERE provider_id = ?
+      ORDER BY COALESCE(price_in, 0) + COALESCE(price_out, 0), model_id COLLATE NOCASE`).all(p.id);
   });
 
-  // Catalog rows for the expandable table (owner edits pricing/context/enable).
-  app.get('/api/providers/:id/models', async (req, reply) => {
-    const p = db.prepare('SELECT id FROM providers WHERE id = ?').get(req.params.id);
-    if (!p) return reply.code(404).send({ error: 'not found' });
-    return db.prepare('SELECT * FROM provider_models WHERE provider_id = ? ORDER BY model_id COLLATE NOCASE')
-      .all(p.id);
-  });
-
-  // Per-model overrides: enable/disable, pricing, context. null/'' clears.
+  // Per-model overrides: enable/disable in the picker, fix pricing/context.
   app.patch('/api/providers/:id/models', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
-    const { model_id, enabled, price_in, price_out, price_cached_in, context_length, max_output } = req.body ?? {};
-    if (!model_id) return reply.code(400).send({ error: 'model_id required' });
-    const row = providerModelFor(req.params.id, model_id);
-    if (!row) return reply.code(404).send({ error: 'model not found in catalog' });
-    const numOrNull = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? null : Number(v));
-    db.prepare(`UPDATE provider_models SET
-        enabled = COALESCE(?, enabled),
-        price_in = COALESCE(?, price_in),
-        price_out = COALESCE(?, price_out),
-        price_cached_in = COALESCE(?, price_cached_in),
-        context_length = COALESCE(?, context_length),
-        max_output = COALESCE(?, max_output)
-      WHERE id = ?`).run(
-      enabled == null ? null : (enabled ? 1 : 0),
-      req.body.price_in === undefined ? null : numOrNull(price_in),
-      req.body.price_out === undefined ? null : numOrNull(price_out),
-      req.body.price_cached_in === undefined ? null : numOrNull(price_cached_in),
-      req.body.context_length === undefined ? null : numOrNull(context_length),
-      req.body.max_output === undefined ? null : numOrNull(max_output),
-      row.id);
-    return { ok: true };
+    const pid = Number(req.params.id);
+    const mid = String(req.body?.model_id ?? '');
+    const row = providerModelFor(pid, mid);
+    if (!row) return reply.code(404).send({ error: 'model not found for this provider' });
+    const num = (v) => (v == null || v === '' ? null : Number(v));
+    const sets = [];
+    const vals = [];
+    const put = (col, val) => { sets.push(`${col} = ?`); vals.push(val); };
+    if (req.body.enabled !== undefined) put('enabled', req.body.enabled ? 1 : 0);
+    for (const col of ['price_in', 'price_out', 'price_cached_in']) {
+      if (req.body[col] !== undefined) put(col, num(req.body[col]));
+    }
+    for (const col of ['context_length', 'max_output']) {
+      if (req.body[col] !== undefined) put(col, num(req.body[col]));
+    }
+    if (sets.length) {
+      db.prepare(`UPDATE provider_models SET ${sets.join(', ')} WHERE provider_id = ? AND model_id = ?`)
+        .run(...vals, pid, mid);
+    }
+    return { ok: true, model: providerModelFor(pid, mid) };
   });
 
-  // Forget cached replies for this provider (exact response cache).
+  // Clear this provider's cached replies (e.g. after a model update).
   app.post('/api/providers/:id/cache/clear', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
-    const p = db.prepare('SELECT id FROM providers WHERE id = ?').get(req.params.id);
-    if (!p) return reply.code(404).send({ error: 'not found' });
-    const r = db.prepare('DELETE FROM response_cache WHERE provider_id = ?').run(p.id);
+    const r = db.prepare('DELETE FROM response_cache WHERE provider_id = ?').run(req.params.id);
     return { ok: true, cleared: r.changes };
   });
 }
