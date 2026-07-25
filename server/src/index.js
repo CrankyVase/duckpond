@@ -7,15 +7,18 @@ import { fileURLToPath } from 'node:url';
 import './db.js';
 import { reapIdleModels } from './llama.js';
 import { backfillMissing, pruneMemories } from './memory.js';
+import { syncStaleProviders } from './providers.js';
 import { reapIdleSandboxes } from './sandbox.js';
 import agentRoutes, { reclaimOrphanRuns, reapStaleAgentRuns } from './routes/agent.js';
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
+import costRoutes from './routes/costs.js';
 import imageRoutes from './routes/images.js';
 import modelRoutes from './routes/models.js';
 import docRoutes from './routes/docs.js';
 import exportRoutes from './routes/exports.js';
 import fileRoutes from './routes/files.js';
+import providerRoutes from './routes/providers.js';
 import searchRoutes from './routes/search.js';
 import speechRoutes from './routes/speech.js';
 import statsRoutes from './routes/stats.js';
@@ -50,6 +53,8 @@ await app.register(fileRoutes);
 await app.register(uploadRoutes);
 await app.register(speechRoutes);
 await app.register(themeRoutes);
+await app.register(providerRoutes);
+await app.register(costRoutes);
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(dist)) {
@@ -78,6 +83,10 @@ setTimeout(() => backfillMissing(app.log).catch(() => {}), 5_000).unref();
 setInterval(() => backfillMissing(app.log).catch(() => {}), 10 * 60_000).unref();
 // the forgetting curve: sweep decayed-to-zero memories a few times a day
 setInterval(() => { try { pruneMemories(app.log); } catch { /* next sweep */ } }, 6 * 60 * 60_000).unref();
+// provider catalog refresh: /api/models re-syncs lazily too, this catches
+// quiet periods so pricing/context never goes stale for >24h
+setTimeout(() => syncStaleProviders(app.log), 15_000).unref();
+setInterval(() => syncStaleProviders(app.log), 6 * 60 * 60_000).unref();
 
 // Free any orphan agent runs left by the previous process before accepting traffic
 try {

@@ -3,6 +3,7 @@ import { db } from '../db.js';
 import { gpuVram, listModels, loadModel, unloadModel } from '../llama.js';
 import { ctxBlurb, describeModel } from '../modelDescribe.js';
 import { cardFor, queueCardFetch } from '../modelCards.js';
+import { isRemoteId, parseRemoteId, syncStaleProviders } from '../providers.js';
 import { TOOL_CATALOG } from '../toolCatalog.js';
 
 // Defaults per spec §1; overridable per model, stored in model_settings.
@@ -23,8 +24,56 @@ export const DEFAULT_SETTINGS = {
 };
 
 export function modelSettings(modelId) {
+  const defaults = { ...DEFAULT_SETTINGS };
+  // remote models: the discovered context length beats the local default
+  if (isRemoteId(modelId)) {
+    const p = parseRemoteId(modelId);
+    const row = p && db.prepare(
+      'SELECT context_length FROM provider_models WHERE provider_id = ? AND model_id = ?',
+    ).get(p.providerId, p.modelId);
+    if (row?.context_length) defaults.ctx_size = row.context_length;
+    // llama-only knobs have no effect remotely; keep values but harmless
+  }
   const row = db.prepare('SELECT json FROM model_settings WHERE model_id = ?').get(modelId);
-  return { ...DEFAULT_SETTINGS, ...(row ? JSON.parse(row.json) : {}) };
+  return { ...defaults, ...(row ? JSON.parse(row.json) : {}) };
+}
+
+const fmtPrice = (v) => (v == null ? null : `$${Number(v).toFixed(2)}/1M`);
+
+// Remote catalog rows → /api/models entries shaped like local ones, plus
+// provider + pricing so the picker can group and show costs.
+function remoteModels() {
+  const rows = db.prepare(`
+    SELECT pm.*, p.name AS provider_name, p.enabled AS provider_enabled
+    FROM provider_models pm JOIN providers p ON p.id = pm.provider_id
+    WHERE p.enabled = 1 AND pm.enabled = 1
+    ORDER BY p.name COLLATE NOCASE, pm.model_id COLLATE NOCASE`).all();
+  return rows.map((r) => {
+    const id = `r${r.provider_id}:${r.model_id}`;
+    const h = describeModel(r.model_id, r.context_length);
+    const priceBits = [
+      r.price_in != null ? `${fmtPrice(r.price_in)} in` : null,
+      r.price_out != null ? `${fmtPrice(r.price_out)} out` : null,
+      r.price_cached_in != null ? `${fmtPrice(r.price_cached_in)} cached` : null,
+    ].filter(Boolean);
+    return {
+      id,
+      remote: true,
+      status: 'remote',
+      args: [],
+      ctxSize: r.context_length,
+      provider: { id: r.provider_id, name: r.provider_name },
+      pricing: { in: r.price_in, out: r.price_out, cachedIn: r.price_cached_in },
+      maxOutput: r.max_output,
+      settings: modelSettings(id),
+      ...h,
+      blurb: [
+        h.blurb,
+        priceBits.length ? `Costs ${priceBits.join(' · ')} of tokens.` : 'No pricing reported by the provider yet — add it in the Providers panel to see costs.',
+        ctxBlurb(r.context_length),
+      ].filter(Boolean).join(' '),
+    };
+  });
 }
 
 export default async function modelRoutes(app) {
@@ -34,7 +83,9 @@ export default async function modelRoutes(app) {
     const models = await listModels();
     // background: fill/refresh Hugging Face card blurbs (never blocks this reply)
     queueCardFetch(models.map((m) => m.id), req.log);
-    return models.map((m) => {
+    // lazy 24h catalog refresh for providers (OmniRoute-style auto-sync)
+    syncStaleProviders(req.log);
+    const local = models.map((m) => {
       const h = describeModel(m.id, m.ctxSize);
       const card = cardFor(m.id);
       if (card) {
@@ -45,19 +96,26 @@ export default async function modelRoutes(app) {
       }
       return { ...m, settings: modelSettings(m.id), ...h };
     });
+    let remote = [];
+    try { remote = remoteModels(); } catch (err) { req.log.warn({ err }, 'remote catalog read failed'); }
+    return [...local, ...remote];
   });
 
-  app.post('/api/models/:id/load', async (req) => {
+  app.post('/api/models/:id/load', async (req, reply) => {
+    if (isRemoteId(req.params.id)) return reply.code(400).send({ error: 'remote models run on the provider — nothing to load' });
     await loadModel(req.params.id);
     return { ok: true };
   });
 
-  app.post('/api/models/:id/unload', async (req) => {
+  app.post('/api/models/:id/unload', async (req, reply) => {
+    if (isRemoteId(req.params.id)) return reply.code(400).send({ error: 'remote models run on the provider — nothing to unload' });
     await unloadModel(req.params.id);
     return { ok: true };
   });
 
-  app.put('/api/models/:id/settings', async (req) => {
+  // wildcard: remote ids can contain slashes (e.g. r1:anthropic/claude-3.5)
+  app.put('/api/models/*/settings', async (req) => {
+    const modelId = req.params['*'];
     const clean = {};
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
       if (req.body?.[k] === undefined) continue;
@@ -70,7 +128,7 @@ export default async function modelRoutes(app) {
     }
     db.prepare(`INSERT INTO model_settings (model_id, json) VALUES (?, ?)
                 ON CONFLICT(model_id) DO UPDATE SET json = excluded.json`)
-      .run(req.params.id, JSON.stringify(clean));
+      .run(modelId, JSON.stringify(clean));
     return { ok: true, settings: { ...DEFAULT_SETTINGS, ...clean } };
   });
 
