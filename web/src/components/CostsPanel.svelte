@@ -34,11 +34,11 @@
 
   $effect(() => { load(); });
 
-  // $0.0042 under a cent, $0.42 under a dollar, $12.34 above
+  // 4 decimals under a dollar ($0.0042 / $0.4200), 2 above ($12.34)
   function usd(n) {
     if (n == null) return '—';
     const a = Math.abs(n);
-    if (a > 0 && a < 0.01) return `$${n.toFixed(4)}`;
+    if (a > 0 && a < 1) return `$${n.toFixed(4)}`;
     return `$${n.toFixed(2)}`;
   }
   const fmtFull = (n) => (n == null ? '—' : new Intl.NumberFormat('en').format(n));
@@ -111,7 +111,7 @@
   {:else if !summary}
     <div class="empty shimmer">loading…</div>
   {:else if isEmpty}
-    <div class="empty">No paid-provider usage yet — add a provider to start saving.</div>
+    <div class="empty">No paid API usage yet — savings show up here once you chat with a remote model.</div>
   {:else}
     <div class="totals">
       <div class="card hero">
