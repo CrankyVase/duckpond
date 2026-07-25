@@ -7,12 +7,14 @@
   } from '../lib/state.svelte.js';
   import Duck from './Duck.svelte';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
+  import Cloud from '@lucide/svelte/icons/cloud';
   import Files from '@lucide/svelte/icons/files';
   import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Palette from '@lucide/svelte/icons/palette';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
+  import PiggyBank from '@lucide/svelte/icons/piggy-bank';
   import Search from '@lucide/svelte/icons/search';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
@@ -221,8 +223,20 @@
         class:active={app.view === 'stats'}>
         <BarChart3 size={14} /> Stats
       </a>
+      <a class="page"
+        href={app.user?.id != null ? userSubpath(app.user.id, 'providers') : '/providers'}
+        onclick={(e) => { e.preventDefault(); goView('providers'); }}
+        class:active={app.view === 'providers'}>
+        <Cloud size={14} /> Providers
+      </a>
+      <a class="page"
+        href={app.user?.id != null ? userSubpath(app.user.id, 'costs') : '/costs'}
+        onclick={(e) => { e.preventDefault(); goView('costs'); }}
+        class:active={app.view === 'costs'}>
+        <PiggyBank size={14} /> Costs
+      </a>
       {#if app.user?.role === 'owner'}
-        <a class="page" href={controlUrl()} title="Duck Pond Control — owner/admin only"
+        <a class="page control" href={controlUrl()} title="Duck Pond Control — owner/admin only"
           rel="noopener">
           <Gauge size={14} /> Control
         </a>
@@ -381,10 +395,13 @@
   }
 
   .pages {
-    display: flex; gap: 6px; padding: 10px 12px 8px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 6px; padding: 10px 12px 8px;
     border-top: 1px solid var(--border-soft);
     flex-shrink: 0;
   }
+  /* owner Control link spans its own full-width row */
+  .page.control { grid-column: 1 / -1; }
   .page {
     all: unset; cursor: pointer; flex: 1 1 0; min-width: 0;
     display: flex; align-items: center; justify-content: center; gap: 7px;
@@ -524,7 +541,7 @@
     .item .del { opacity: 0.75; }
     .del:active { opacity: 1; background: rgba(192, 96, 79, 0.18); color: var(--red); }
 
-    /* equal Files | Stats tiles */
+    /* 2×2 page tiles (Control spans its own row via .page.control) */
     .pages {
       display: grid !important;
       grid-template-columns: 1fr 1fr;
@@ -539,10 +556,6 @@
       padding: 10px 8px;
       font-size: 13px;
       gap: 6px;
-    }
-    /* owner Control: full-width third row */
-    .pages > :nth-child(3) {
-      grid-column: 1 / -1;
     }
 
     .bottom {
