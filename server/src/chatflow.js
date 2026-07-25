@@ -415,6 +415,7 @@ export async function runAgentTurn({
 // (local models only — remote/paid models never drive the sandbox)
 let loopMessages = promptMessages;
 let firstResult = res;
+let runId = null;
 // gate call: start_project(name, plan) creates the workspace; the
 // rest of the gate step is recorded AFTER the subscription below so
 // the chips/diff show up live, not just in the replay
