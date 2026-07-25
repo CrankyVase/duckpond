@@ -1,11 +1,13 @@
 <script>
   import Chat from './components/Chat.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
+  import CostsPanel from './components/CostsPanel.svelte';
   import Duck from './components/Duck.svelte';
   import DuckGallery from './components/DuckGallery.svelte';
   import FilesPanel from './components/FilesPanel.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
+  import ProvidersPanel from './components/ProvidersPanel.svelte';
   import SettingsPanel from './components/SettingsPanel.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import SpeechPanel from './components/SpeechPanel.svelte';
@@ -65,6 +67,10 @@
         app.view = 'speech';
       } else if (route.kind === 'files') {
         app.view = 'files';
+      } else if (route.kind === 'providers') {
+        app.view = 'providers';
+      } else if (route.kind === 'costs') {
+        app.view = 'costs';
       } else if (route.kind === 'settings') {
         app.view = 'chat';
         app.settingsOpen = true;
@@ -256,6 +262,10 @@
           <div class="panel-enter view-panel"><SpeechPanel /></div>
         {:else if app.view === 'files'}
           <div class="panel-enter view-panel"><FilesPanel /></div>
+        {:else if app.view === 'providers'}
+          <div class="panel-enter view-panel"><ProvidersPanel /></div>
+        {:else if app.view === 'costs'}
+          <div class="panel-enter view-panel"><CostsPanel /></div>
         {:else}
           <div class="view-panel"><Chat /></div>
         {/if}

@@ -2,7 +2,7 @@
 //
 // URL shape (per-user namespace):
 //   /u/{userId}/{chat-slug}+{chatId}   e.g. /u/3/pond-ideas+42
-//   /u/{userId}/stats | /speech | /files | /settings | /themes
+//   /u/{userId}/stats | /speech | /files | /settings | /themes | /providers | /costs
 //   /u/{userId}                        home for that user
 //   /login                             public
 //   /invite/<token>                    public
@@ -71,6 +71,8 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
     if (rest === 'files' || rest === 'images') return { kind: 'files', userId, foreign };
     if (rest === 'settings') return { kind: 'settings', userId, foreign };
     if (rest === 'themes' || rest === 'theme') return { kind: 'themes', userId, foreign };
+    if (rest === 'providers') return { kind: 'providers', userId, foreign };
+    if (rest === 'costs') return { kind: 'costs', userId, foreign };
 
     // slug+chatId  or  +chatId  or  bare chatId
     const chat = rest.match(/^(?:(.+)\+)?(\d+)$/);
@@ -92,6 +94,8 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
   if (p === '/files' || p === '/images') return { kind: 'files', legacy: true };
   if (p === '/settings') return { kind: 'settings', legacy: true };
   if (p === '/themes' || p === '/theme') return { kind: 'themes', legacy: true };
+  if (p === '/providers') return { kind: 'providers', legacy: true };
+  if (p === '/costs') return { kind: 'costs', legacy: true };
 
   const legacyChat = p.match(/^\/(?:([^/]+)\+)?(\d+)$/);
   if (legacyChat) {
@@ -122,6 +126,8 @@ export function pathForState({
   if (view === 'stats') return userSubpath(uid, 'stats');
   if (view === 'speech') return userSubpath(uid, 'speech');
   if (view === 'files') return userSubpath(uid, 'files');
+  if (view === 'providers') return userSubpath(uid, 'providers');
+  if (view === 'costs') return userSubpath(uid, 'costs');
   if (conv?.id != null) return chatPath(uid, conv.title, conv.id);
   return userHome(uid);
 }

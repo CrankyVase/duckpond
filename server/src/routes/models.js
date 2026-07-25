@@ -113,9 +113,14 @@ export default async function modelRoutes(app) {
     return { ok: true };
   });
 
-  // wildcard: remote ids can contain slashes (e.g. r1:anthropic/claude-3.5)
-  app.put('/api/models/*/settings', async (req) => {
-    const modelId = req.params['*'];
+  // Remote ids can contain slashes (e.g. r1:anthropic/claude-3.5), and
+  // find-my-way only allows '*' as the LAST character of the path — so match
+  // the whole tail here and strip the /settings suffix ourselves. (A mid-path
+  // wildcard '/api/models/*/settings' crashes the router at boot, issue #5.)
+  app.put('/api/models/*', async (req, reply) => {
+    const wild = String(req.params['*'] ?? '');
+    if (!wild.endsWith('/settings')) return reply.code(404).send({ error: 'not found' });
+    const modelId = wild.slice(0, -'/settings'.length);
     const clean = {};
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
       if (req.body?.[k] === undefined) continue;
