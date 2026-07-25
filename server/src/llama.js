@@ -1,9 +1,43 @@
 // Client for llama-server ROUTER mode (b9625) on 127.0.0.1:8081.
 // Endpoints verified against the running build: /v1/models (per-model status),
 // /models/load, /models/unload, /v1/chat/completions (+/input_tokens), /slots.
+//
+// streamChat / countInputTokens double as the dispatcher for REMOTE models
+// (ids like "r3:claude-sonnet-4.5" — see providers.js): every caller (chat
+// turns, memory extraction, compaction, follow-ups, agent loop) transparently
+// works on either side without knowing which.
 import { execFile } from 'node:child_process';
+import {
+  estimateTokens, isRemoteId, resolveRemote, streamRemote,
+} from './providers.js';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
+
+// llama.cpp-only knobs that OpenAI-compatible APIs reject or ignore, and the
+// output cap for paid models (llama's max_tokens -1 = unlimited is a bill
+// waiting to happen on a metered endpoint).
+const LLAMA_ONLY_PARAMS = [
+  'top_k', 'repeat_penalty', 'mirostat', 'mirostat_tau', 'mirostat_eta',
+  'grammar', 'json_schema', 'chat_template_kwargs', 'timings_per_token',
+];
+const REMOTE_MAX_TOKENS = 4096;
+
+function remoteCall({ model, messages, params, onDelta, abortSignal }) {
+  const r = resolveRemote(model);
+  if (!r) throw new Error(`remote model unavailable (provider deleted or disabled): ${model}`);
+  if (r.model && !r.model.enabled) throw new Error(`model disabled in the Providers panel: ${r.modelId}`);
+  const mapped = { ...params };
+  for (const k of LLAMA_ONLY_PARAMS) delete mapped[k];
+  if (mapped.max_tokens == null || Number(mapped.max_tokens) < 0) {
+    mapped.max_tokens = Number(r.model?.max_output) > 0
+      ? Math.min(Number(r.model.max_output), REMOTE_MAX_TOKENS)
+      : REMOTE_MAX_TOKENS;
+  }
+  return streamRemote({
+    provider: r.provider, model: r.modelId, messages,
+    params: mapped, onDelta, abortSignal,
+  });
+}
 
 // Per-model activity for the idle reaper: models unload from VRAM after
 // IDLE_UNLOAD_MS without a request (never mid-generation).
@@ -62,6 +96,9 @@ export const unloadModel = (model) =>
   jfetch('/models/unload', { method: 'POST', body: JSON.stringify({ model }) });
 
 export async function countInputTokens(model, messages) {
+  // remote endpoints have no token counter — chars/4 estimate is all we need
+  // for the context bar and auto-compaction pressure check
+  if (isRemoteId(model)) return estimateTokens(messages);
   markUse(model);
   const r = await jfetch('/v1/chat/completions/input_tokens', {
     method: 'POST',
@@ -74,6 +111,7 @@ export async function countInputTokens(model, messages) {
 // Streaming chat completion. Calls onDelta(textChunk, meta) per SSE chunk and
 // returns { content, timings, usage } when done. abortSignal cancels generation.
 export async function streamChat({ model, messages, params = {}, onDelta, abortSignal }) {
+  if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal });
   const act = markUse(model);
   act.active++;
   try {
