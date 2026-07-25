@@ -3,7 +3,7 @@
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import {
-  providerModelFor, syncProviderModels, testProvider,
+  PROVIDER_PRESETS, providerModelFor, syncProviderModels, testProvider,
 } from '../providers.js';
 
 const ownerOnly = (req, reply) => {
@@ -21,6 +21,8 @@ const mask = (p) => ({
   kind: p.kind,
   enabled: !!p.enabled,
   cache_enabled: !!p.cache_enabled,
+  fallback: JSON.parse(p.fallback_json ?? '[]'),
+  free_only: !!p.free_only,
   has_key: !!p.api_key,
   key_hint: p.api_key ? `…${p.api_key.slice(-4)}` : null,
   last_sync_at: p.last_sync_at,
@@ -49,6 +51,14 @@ export default async function providerRoutes(app) {
   app.get('/api/providers', async () =>
     db.prepare('SELECT * FROM providers ORDER BY name COLLATE NOCASE').all().map(mask));
 
+  // Starter presets: curated OpenAI-compatible providers with free models —
+  // the user only pastes an API key. `added` = a provider with the same base
+  // URL already exists (so the UI can skip it).
+  app.get('/api/providers/presets', async () => {
+    const bases = new Set(db.prepare('SELECT base_url FROM providers').all().map((r) => r.base_url));
+    return PROVIDER_PRESETS.map((pr) => ({ ...pr, added: bases.has(pr.baseUrl) }));
+  });
+
   // Dry-run a base URL + key before saving (the add-form "Test" button).
   app.post('/api/providers/test', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
@@ -65,18 +75,25 @@ export default async function providerRoutes(app) {
 
   app.post('/api/providers', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
+    // preset add: only the API key is required, everything else comes from the
+    // curated preset (and can still be overridden explicitly)
+    const preset = req.body?.preset
+      ? PROVIDER_PRESETS.find((pr) => pr.key === String(req.body.preset))
+      : null;
+    if (req.body?.preset && !preset) return reply.code(400).send({ error: 'unknown preset' });
     let base;
-    try { base = cleanBase(req.body?.base_url); }
+    try { base = cleanBase(req.body?.base_url ?? preset?.baseUrl); }
     catch (err) { return reply.code(400).send({ error: err.message }); }
     const key = String(req.body?.api_key ?? '').trim();
-    const name = String(req.body?.name ?? '').trim() || suggestName(base);
+    const name = String(req.body?.name ?? '').trim() || preset?.name || suggestName(base);
+    const freeOnly = req.body?.free_only !== undefined ? !!req.body.free_only : !!preset?.freeOnly;
     // verify before saving so typos never leave a dead row behind
     try { await testProvider(base, key); }
     catch (err) {
       return reply.code(400).send({ error: `couldn't reach the provider: ${String(err.message ?? err)}` });
     }
-    const r = db.prepare('INSERT INTO providers (name, base_url, api_key) VALUES (?, ?, ?)')
-      .run(name, base, key);
+    const r = db.prepare('INSERT INTO providers (name, base_url, api_key, free_only) VALUES (?, ?, ?, ?)')
+      .run(name, base, key, freeOnly ? 1 : 0);
     const id = Number(r.lastInsertRowid);
     let sync = { ok: false, count: 0 };
     try { sync = await syncProviderModels(id, req.log); }
@@ -89,7 +106,7 @@ export default async function providerRoutes(app) {
     if (!ownerOnly(req, reply)) return;
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    const { name, base_url, api_key, enabled, cache_enabled } = req.body ?? {};
+    const { name, base_url, api_key, enabled, cache_enabled, fallback, free_only } = req.body ?? {};
     if (name !== undefined) db.prepare('UPDATE providers SET name = ? WHERE id = ?')
       .run(String(name).trim().slice(0, 80) || p.name, p.id);
     if (base_url !== undefined) {
@@ -103,6 +120,25 @@ export default async function providerRoutes(app) {
       .run(enabled ? 1 : 0, p.id);
     if (cache_enabled !== undefined) db.prepare('UPDATE providers SET cache_enabled = ? WHERE id = ?')
       .run(cache_enabled ? 1 : 0, p.id);
+    if (free_only !== undefined) {
+      db.prepare('UPDATE providers SET free_only = ? WHERE id = ?').run(free_only ? 1 : 0, p.id);
+      // turning it on only takes effect at the next sync — re-sync now so the
+      // catalog matches the toggle the user just flipped
+      if (free_only) {
+        syncProviderModels(p.id, req.log).catch((err) =>
+          req.log.warn({ err: String(err.message ?? err) }, 'free-only re-sync failed'));
+      }
+    }
+    if (fallback !== undefined) {
+      // ordered chain of this provider's own model ids (preference order);
+      // unknown ids are dropped, capped at 12 entries
+      const known = new Set(
+        db.prepare('SELECT model_id FROM provider_models WHERE provider_id = ?').all(p.id)
+          .map((r) => r.model_id));
+      const ids = (Array.isArray(fallback) ? fallback : [])
+        .map(String).filter((m) => known.has(m)).slice(0, 12);
+      db.prepare('UPDATE providers SET fallback_json = ? WHERE id = ?').run(JSON.stringify(ids), p.id);
+    }
     return { ok: true, provider: mask(db.prepare('SELECT * FROM providers WHERE id = ?').get(p.id)) };
   });
 
@@ -110,55 +146,63 @@ export default async function providerRoutes(app) {
     if (!ownerOnly(req, reply)) return;
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    db.prepare('DELETE FROM providers WHERE id = ?').run(p.id);
+    db.prepare('DELETE FROM providers WHERE id = ?').run(p.id); // cascades models + cache
     return { ok: true };
   });
 
+  // Manual "Sync now" — re-pull {base}/models.
   app.post('/api/providers/:id/sync', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
-    try { return await syncProviderModels(Number(req.params.id), req.log); }
-    catch (err) { return reply.code(502).send({ ok: false, error: String(err.message ?? err) }); }
-  });
-
-  app.get('/api/providers/:id/models', async (req, reply) => {
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    return db.prepare(`
-      SELECT id, provider_id, model_id, context_length, max_output,
-             price_in, price_out, price_cached_in, enabled, fetched_at
-      FROM provider_models WHERE provider_id = ?
-      ORDER BY COALESCE(price_in, 0) + COALESCE(price_out, 0), model_id COLLATE NOCASE`).all(p.id);
+    try {
+      const r = await syncProviderModels(p.id, req.log);
+      return { ok: true, count: r.count };
+    } catch (err) {
+      return reply.code(502).send({ error: String(err.message ?? err) });
+    }
   });
 
-  // Per-model overrides: enable/disable in the picker, fix pricing/context.
+  // Catalog rows for the expandable table (owner edits pricing/context/enable).
+  app.get('/api/providers/:id/models', async (req, reply) => {
+    const p = db.prepare('SELECT id FROM providers WHERE id = ?').get(req.params.id);
+    if (!p) return reply.code(404).send({ error: 'not found' });
+    return db.prepare('SELECT * FROM provider_models WHERE provider_id = ? ORDER BY model_id COLLATE NOCASE')
+      .all(p.id);
+  });
+
+  // Per-model overrides: enable/disable, pricing, context. null/'' clears.
   app.patch('/api/providers/:id/models', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
-    const pid = Number(req.params.id);
-    const mid = String(req.body?.model_id ?? '');
-    const row = providerModelFor(pid, mid);
-    if (!row) return reply.code(404).send({ error: 'model not found for this provider' });
-    const num = (v) => (v == null || v === '' ? null : Number(v));
-    const sets = [];
-    const vals = [];
-    const put = (col, val) => { sets.push(`${col} = ?`); vals.push(val); };
-    if (req.body.enabled !== undefined) put('enabled', req.body.enabled ? 1 : 0);
-    for (const col of ['price_in', 'price_out', 'price_cached_in']) {
-      if (req.body[col] !== undefined) put(col, num(req.body[col]));
-    }
-    for (const col of ['context_length', 'max_output']) {
-      if (req.body[col] !== undefined) put(col, num(req.body[col]));
-    }
-    if (sets.length) {
-      db.prepare(`UPDATE provider_models SET ${sets.join(', ')} WHERE provider_id = ? AND model_id = ?`)
-        .run(...vals, pid, mid);
-    }
-    return { ok: true, model: providerModelFor(pid, mid) };
+    const { model_id, enabled, price_in, price_out, price_cached_in, context_length, max_output } = req.body ?? {};
+    if (!model_id) return reply.code(400).send({ error: 'model_id required' });
+    const row = providerModelFor(req.params.id, model_id);
+    if (!row) return reply.code(404).send({ error: 'model not found in catalog' });
+    const numOrNull = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? null : Number(v));
+    db.prepare(`UPDATE provider_models SET
+        enabled = COALESCE(?, enabled),
+        price_in = COALESCE(?, price_in),
+        price_out = COALESCE(?, price_out),
+        price_cached_in = COALESCE(?, price_cached_in),
+        context_length = COALESCE(?, context_length),
+        max_output = COALESCE(?, max_output)
+      WHERE id = ?`).run(
+      enabled == null ? null : (enabled ? 1 : 0),
+      req.body.price_in === undefined ? null : numOrNull(price_in),
+      req.body.price_out === undefined ? null : numOrNull(price_out),
+      req.body.price_cached_in === undefined ? null : numOrNull(price_cached_in),
+      req.body.context_length === undefined ? null : numOrNull(context_length),
+      req.body.max_output === undefined ? null : numOrNull(max_output),
+      row.id);
+    return { ok: true };
   });
 
-  // Clear this provider's cached replies (e.g. after a model update).
+  // Forget cached replies for this provider (exact response cache).
   app.post('/api/providers/:id/cache/clear', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
-    const r = db.prepare('DELETE FROM response_cache WHERE provider_id = ?').run(req.params.id);
+    const p = db.prepare('SELECT id FROM providers WHERE id = ?').get(req.params.id);
+    if (!p) return reply.code(404).send({ error: 'not found' });
+    const r = db.prepare('DELETE FROM response_cache WHERE provider_id = ?').run(p.id);
     return { ok: true, cleared: r.changes };
   });
 }
