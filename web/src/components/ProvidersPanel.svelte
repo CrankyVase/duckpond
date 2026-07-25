@@ -304,7 +304,7 @@
             <span>{p.models ?? 0} models</span>
             <span>·</span>
             <span>synced {fmtWhen(p.last_sync_at)}{#if p.last_sync_count != null} ({p.last_sync_count}){/if}</span>
-            {#if p.has_key && p.key_hint}<span>·</span><span>key {p.key_hint}</span>{/if}
+            {#if p.has_key && p.key_hint}<span>·</span><span>key {p.key_hint}</span>{:else if !p.has_key}<span>·</span><span>no key</span>{/if}
           </div>
           {#if p.last_error}
             <div class="perr">last error: {p.last_error}</div>
@@ -355,7 +355,7 @@
                   <table>
                     <thead>
                       <tr>
-                        <th>Model</th><th class="num">Ctx</th><th class="num">$ in /1M</th>
+                        <th>Model</th><th class="num">Ctx</th><th class="num">Max out</th><th class="num">$ in /1M</th>
                         <th class="num">$ out /1M</th><th class="num">$ cached /1M</th><th class="num">On</th>
                       </tr>
                     </thead>
@@ -372,6 +372,17 @@
                                 onchange={(e) => saveModelField(p, m, 'context_length', e.target.value)} />
                             {:else}
                               {fmtCtx(m.context_length)}
+                            {/if}
+                          </td>
+                          <td class="num">
+                            {#if isOwner}
+                              <input class="numin" type="number" min="0" step="1024"
+                                value={m.max_output ?? ''} placeholder="—"
+                                title="{fmtCtx(m.max_output)} tokens"
+                                disabled={rowSaving[`${p.id}:${m.model_id}`]}
+                                onchange={(e) => saveModelField(p, m, 'max_output', e.target.value)} />
+                            {:else}
+                              {fmtCtx(m.max_output)}
                             {/if}
                           </td>
                           {#each ['price_in', 'price_out', 'price_cached_in'] as f (f)}
