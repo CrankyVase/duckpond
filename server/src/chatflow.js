@@ -76,6 +76,17 @@ export function makeTurnDelta({ send, abort, log, thinkTimeoutMs, spec }) {
   return { onDelta, disarmThink, clearTimer: disarmThink };
 }
 
+// Surface fallback-chain hops as a chat notice. chatPost wires the ledger for
+// the first attempt via its own onEvent; these cover the later streamChat
+// rounds inside search/image turns.
+export function fallbackNotice(send) {
+  return (info) => {
+    if (info?.type === 'fallback') {
+      send({ type: 'notice', message: `${info.from} failed (${info.reason}) — falling back to ${info.to}` });
+    }
+  };
+}
+
 // ---------- cost saver: cached-turn replay ----------
 // Stream a saved reply back for free and log the full price as saved.
 export function replayCacheHit({ hit, conv, promptLeaf, req, send, insertTitle }) {
@@ -297,7 +308,7 @@ export async function runInlineSearch({
     res = await streamChat({
       model: conv.model_id, messages,
       params: capped ? params : { ...params, tools: searchTools, tool_choice: 'auto' },
-      abortSignal: abort.signal, onDelta,
+      abortSignal: abort.signal, onDelta, onEvent: fallbackNotice(send),
     });
     if (capped) { finalText = res.content ?? ''; if (res.reasoning) reasons.push(res.reasoning); break; }
   }
@@ -564,7 +575,7 @@ let fin = { content: '' };
 try {
   fin = await streamChat({
     model: conv.model_id, messages: followup, params,
-    abortSignal: abort.signal, onDelta,
+    abortSignal: abort.signal, onDelta, onEvent: fallbackNotice(send),
   });
 } catch (err) {
   if (!mdImgs.length) throw err;
