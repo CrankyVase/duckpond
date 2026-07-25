@@ -24,7 +24,7 @@ import { convDocs, docFullText, retrieveChunks } from '../docs.js';
 // remote providers + cost saver (feat/remote-providers)
 import { auxModelFor, isRemoteId } from '../chatBackend.js';
 import {
-  auxBaselineCost, costFor, modelRowForRemoteId, recordEvent,
+  auxBaselineCost, costFor, modelRowForRemoteId, providerMonthSpend, recordEvent,
 } from '../costs.js';
 import {
   cacheKey, cacheLookup, cacheStore, estimateTokens, resolveRemote,
@@ -337,6 +337,17 @@ export function registerChatPost(app) {
       // 3) exact response cache for identical plain turns
       // 4) cheap-aux model for titles/followups/memory below
       const remoteInfo = remote ? resolveRemote(conv.model_id) : null;
+      // monthly spend cap: refuse the turn before anything bills (cache replays
+      // are free, but a capped provider means "stop using this key" — the owner
+      // raises or clears the cap in Providers to resume)
+      if (remoteInfo?.provider?.spend_cap_usd > 0) {
+        const cap = remoteInfo.provider.spend_cap_usd;
+        const spent = providerMonthSpend(remoteInfo.providerId);
+        if (spent >= cap) {
+          send({ type: 'error', message: `${remoteInfo.provider.name} hit its monthly spend cap ($${spent.toFixed(2)} of $${cap}) — raise or clear it in Providers.` });
+          return; // finally{} closes the stream
+        }
+      }
       if (remote) promptMessages = orderSystemForPrefixCache(promptMessages);
       const auxModel = remote ? await auxModelFor(conv.model_id, req.log) : conv.model_id;
       // ledger helper for background jobs: actual cost on the aux model vs
@@ -523,6 +534,18 @@ export function registerChatPost(app) {
       });
       setLeaf(conv.id, asst.id);
       recordUsage(conv.model_id, usage, timings, { userId: req.user.id, convId: conv.id });
+      // cap early-warning: one toast as this turn's spend crosses 80% of the cap
+      if (remoteInfo?.provider?.spend_cap_usd > 0) {
+        try {
+          const cap = remoteInfo.provider.spend_cap_usd;
+          const spent = providerMonthSpend(remoteInfo.providerId);
+          const turnCost = costFor(modelRowForRemoteId(conv.model_id),
+            usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0, usage?.cached_tokens ?? 0);
+          if (spent >= 0.8 * cap && spent - turnCost < 0.8 * cap && spent < cap) {
+            send({ type: 'notice', message: `${remoteInfo.provider.name} is at ${Math.round((spent / cap) * 100)}% of its $${cap} monthly cap` });
+          }
+        } catch { /* alert best-effort */ }
+      }
       send({ type: 'done', msg: asst });
 
       // saver: stash plain remote replies so an identical later turn replays free

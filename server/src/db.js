@@ -414,6 +414,7 @@ try { db.exec('ALTER TABLE users ADD COLUMN tts_voice TEXT'); } catch { /* exist
 // ordered per-provider model fallback chain (feat/remote-providers, stage 12)
 try { db.exec("ALTER TABLE providers ADD COLUMN fallback_json TEXT NOT NULL DEFAULT '[]'"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE providers ADD COLUMN free_only INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE providers ADD COLUMN spend_cap_usd REAL'); } catch { /* exists */ }
 
 // Theme marketplace: user-published themes (full color map + layout + effects
 // + css bundled in theme_json). Seeded by routes/themes.js on first boot.
@@ -442,6 +443,7 @@ CREATE TABLE IF NOT EXISTS providers (
   cache_enabled INTEGER NOT NULL DEFAULT 1,     -- exact response cache for plain turns
   fallback_json TEXT NOT NULL DEFAULT '[]',     -- ordered model fallback chain (preference order)
   free_only INTEGER NOT NULL DEFAULT 0,          -- sync imports only models detectably free
+  spend_cap_usd REAL,                            -- monthly spend cap in USD (NULL = unlimited)
   last_sync_at INTEGER,
   last_sync_count INTEGER,
   last_error TEXT,

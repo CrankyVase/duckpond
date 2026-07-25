@@ -223,6 +223,7 @@
   }
 
   const fmtCtx = (n) => (n == null ? '—' : `${Math.round(n / 1000)}k`);
+  const usd2 = (n) => `$${(n ?? 0).toFixed(2)}`;
 </script>
 
 <div class="prov">
@@ -357,6 +358,23 @@
               {:else}
                 <span class="statetag" class:on={!!p.free_only}>{p.free_only ? 'on' : 'off'}</span>
               {/if}
+            </div>
+          </div>
+
+          <div class="prow">
+            <div class="cachetog">
+              <span class="ct">Monthly cap</span>
+              {#if isOwner}
+                <input class="numin capin" type="number" min="0" step="1" placeholder="no cap"
+                  value={p.spend_cap_usd ?? ''}
+                  title="Max USD per calendar month for this provider — turns are refused once the ledger crosses it (blank = unlimited)"
+                  onchange={(e) => patchProvider(p,
+                    { spend_cap_usd: e.target.value === '' ? null : Number(e.target.value) },
+                    e.target.value === '' ? `Cap cleared for ${p.name}` : `Cap set to $${e.target.value} for ${p.name}`)} />
+              {:else}
+                <span class="statetag" class:on={p.spend_cap_usd > 0}>{p.spend_cap_usd > 0 ? `$${p.spend_cap_usd}` : 'none'}</span>
+              {/if}
+              <span class="capspend mono">spent {usd2(p.month_spend)} this month</span>
             </div>
           </div>
 
@@ -530,6 +548,8 @@
   }
   .cachetog { display: flex; align-items: center; gap: 10px; }
   .ct { font-size: 12.5px; color: var(--text-dim); }
+  .capin { width: 90px; text-align: left; }
+  .capspend { font-size: 11.5px; color: var(--text-faint); }
   .pbtns { display: flex; gap: 4px; flex-wrap: wrap; }
   .pbtns .sm {
     display: flex; align-items: center; gap: 6px;
