@@ -16,7 +16,7 @@ deploys from `main` (auto-deploy timer + `deploy.sh`, or manual
 
 ## 1. Current state: SHIPPED ✅
 
-Stages 1–12 are merged to `main`:
+Stages 1–13 are merged to `main`:
 
 | PR | Content | Merge commit |
 |---|---|---|
@@ -24,6 +24,7 @@ Stages 1–12 are merged to `main`:
 | #6 | Hotfix: wildcard route startup crash (issue #5) | `83d272a` |
 | #7 | Web UI: stages 7–9 + README resolution | `9530f3f` |
 | #9 | Stage 12: fallback chains, free-only import mode, provider presets | `ccba8c1` |
+| #11 | Stage 13: per-provider monthly spend caps + 80% alerts | `68cd1fa` |
 
 Known-good rollback points: before the feature = PR #3 merge (`921e640a5`);
 server-only with hotfix = `83d272a`.
@@ -57,7 +58,8 @@ server-only with hotfix = `83d272a`.
   fallback-chain helpers (`isRetryableRemoteError`, `fallbackCandidates` — typed
   errors carry `.status`), `PROVIDER_PRESETS` (8 key-only starters).
 - `costs.js` — pricing (`costFor`, `priceRemoteTurn`, `auxBaselineCost`), ledger
-  (`recordEvent`), dashboard queries (`costsSummary/costsDaily/costsEvents`),
+  (`recordEvent`), `providerMonthSpend` (per-provider calendar-month spend; backs
+  the spend cap), dashboard queries (`costsSummary/costsDaily/costsEvents`),
   `modelRowForRemoteId`.
 - `tokenSaver.js` — `orderSystemForPrefixCache` (volatile date/memory block moved to
   END of system message for remote), `promptPressure` (chars/4 estimate vs ctx budget),
@@ -93,7 +95,8 @@ server-only with hotfix = `83d272a`.
   `lib/state.svelte.js` (view values), `App.svelte`, `Sidebar.svelte`, `Topbar.svelte`.
 
 ### DB (auto-migrated in `db.js`)
-`providers` (+ `fallback_json` chain, `free_only` import filter), `provider_models`
+`providers` (+ `fallback_json` chain, `free_only` import filter, `spend_cap_usd`
+monthly cap), `provider_models`
 (catalog + pricing + per-model enable), `response_cache` (exact-turn cache),
 `usage_events` (cost ledger: cost/baseline/saved USD, kind, cache_hit).
 
@@ -133,8 +136,8 @@ remote `max_tokens` capped at 4096.
   looks noisy, change the threshold line in `CostsPanel.svelte` `usd()`.
 - OmniRoute ideas deliberately NOT ported: per-model quirky compressors
   (prompts-to-images etc.), multi-user key pools/rate-limit routing. Fallback
-  chains shipped in stage 12; candidate next port: per-model/provider spend
-  caps + alerts.
+  chains shipped in stage 12; per-provider monthly spend caps + 80% alerts
+  shipped in stage 13.
 - Frontend was verified per-file with the Svelte 5 compiler; a full
   `npm run build` on the server is the real gate — run it before restarting prod.
 
@@ -142,7 +145,7 @@ remote `max_tokens` capped at 4096.
 
 - Server won't boot → check `journalctl --user -u duckpond -n 100`; route-syntax
   crashes name the file:line (that was issue #5; fixed pattern: `*` only at path end).
-- Quick rollback: `git revert -m 1 ccba8c1` (stage-12 merge) or redeploy from `9530f3f`.
+- Quick rollback: `git revert -m 1 68cd1fa` (stage-13 merge) or redeploy from `ccba8c1`.
 - Provider sync fails → the provider card shows `last_error`; catalog keeps the last
   good sync; models stay usable.
 - Remote turn fails mid-stream → the interrupted reply is parked in the tree like
@@ -151,8 +154,8 @@ remote `max_tokens` capped at 4096.
 ## 7. Continuing this work (paste into a new agent session)
 
 > Repo `CrankyVase/duckpond` (public). Read `NEXT-STEPS.md` at the repo root first.
-> The remote-providers + cost-saver feature is fully merged to main (PRs #4/#6/#7/#9,
-> stages 1–12); verify the checklist in §2. Then pick items from §5. Rules: push every
+> The remote-providers + cost-saver feature is fully merged to main (PRs
+> #4/#6/#7/#9/#11, stages 1–13); verify the checklist in §2. Then pick items from §5. Rules: push every
 > file to the branch immediately after writing it (commit per file, `stage X: …`
 > messages), verify pushes byte-for-byte (curl the file back and prefix-compare),
 > never merge to main until verified, and find-my-way wildcards only at path end.
