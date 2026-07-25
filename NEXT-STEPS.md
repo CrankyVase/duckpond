@@ -16,13 +16,14 @@ deploys from `main` (auto-deploy timer + `deploy.sh`, or manual
 
 ## 1. Current state: SHIPPED ✅
 
-All 10 stages are merged to `main`:
+Stages 1–12 are merged to `main`:
 
 | PR | Content | Merge commit |
 |---|---|---|
 | #4 | Server: stages 1–6 (providers, costs engine, token saver, dispatcher, chat refactor) | `adaad08` |
 | #6 | Hotfix: wildcard route startup crash (issue #5) | `83d272a` |
 | #7 | Web UI: stages 7–9 + README resolution | `9530f3f` |
+| #9 | Stage 12: fallback chains, free-only import mode, provider presets | `ccba8c1` |
 
 Known-good rollback points: before the feature = PR #3 merge (`921e640a5`);
 server-only with hotfix = `83d272a`.
@@ -50,8 +51,11 @@ server-only with hotfix = `83d272a`.
 
 ### Server (`server/src/`)
 - `providers.js` — provider CRUD helpers, OpenAI-compatible streaming client
-  (`streamRemote`), catalog sync (`syncProviderModels`, lazy 24h `syncStaleProviders`),
-  response-cache helpers (`cacheKey/cacheLookup/cacheStore`), `isRemoteId/parseRemoteId/resolveRemote`.
+  (`streamRemote`), catalog sync (`syncProviderModels`, lazy 24h `syncStaleProviders`,
+  free-only filter when `providers.free_only`), response-cache helpers
+  (`cacheKey/cacheLookup/cacheStore`), `isRemoteId/parseRemoteId/resolveRemote`,
+  fallback-chain helpers (`isRetryableRemoteError`, `fallbackCandidates` — typed
+  errors carry `.status`), `PROVIDER_PRESETS` (8 key-only starters).
 - `costs.js` — pricing (`costFor`, `priceRemoteTurn`, `auxBaselineCost`), ledger
   (`recordEvent`), dashboard queries (`costsSummary/costsDaily/costsEvents`),
   `modelRowForRemoteId`.
@@ -61,7 +65,12 @@ server-only with hotfix = `83d272a`.
 - `chatBackend.js` — `auxModelFor` (cheapest enabled model on same provider, else local).
 - `llama.js` — dispatcher: `streamChat`/`countInputTokens` route `r{id}:{model}` ids to
   the provider; llama-only params stripped; remote `max_tokens` capped at 4096.
-- `routes/providers.js` — provider REST API (owner-only mutations).
+  `remoteCall` runs the fallback chain: up to 3 attempts, only before any content
+  has streamed, only on retryable errors; hops reported via the optional `onEvent`
+  callback (`{ type: 'fallback', from, to, reason }`).
+- `routes/providers.js` — provider REST API (owner-only mutations): CRUD, test,
+  sync, cache clear, per-model PATCH, `GET /api/providers/presets`, preset quick-add
+  (`POST { preset, api_key }`), `fallback` + `free_only` PATCH fields.
 - `routes/costs.js` — `/api/costs/summary|daily|events`.
 - `routes/models.js` — `/api/models` merges local + remote entries; remote ctx size
   seeds `modelSettings`; `PUT /api/models/*` handles slash-containing remote ids
@@ -74,15 +83,19 @@ server-only with hotfix = `83d272a`.
 
 ### Web (`web/src/`)
 - `components/ModelPicker.svelte` — provider grouping + cost/context lines.
-- `components/ProvidersPanel.svelte` — the settings UI (add/test/sync/toggles/catalog).
+- `components/ProvidersPanel.svelte` — the settings UI (add/test/sync/toggles/catalog,
+  free-only toggle) + `ProviderPresets.svelte` (key-only quick-add grid) and
+  `ProviderFallback.svelte` (fallback-chain chip editor) in the catalog view.
 - `components/CostsPanel.svelte` — savings dashboard.
+- `components/Chat.svelte` — `notice` SSE events render as toasts (fallback hops,
+  auto-compaction).
 - Wiring: `lib/router.js` (`/u/:id/providers|costs` + legacy paths),
   `lib/state.svelte.js` (view values), `App.svelte`, `Sidebar.svelte`, `Topbar.svelte`.
 
 ### DB (auto-migrated in `db.js`)
-`providers`, `provider_models` (catalog + pricing + per-model enable),
-`response_cache` (exact-turn cache), `usage_events` (cost ledger: cost/baseline/saved
-USD, kind, cache_hit).
+`providers` (+ `fallback_json` chain, `free_only` import filter), `provider_models`
+(catalog + pricing + per-model enable), `response_cache` (exact-turn cache),
+`usage_events` (cost ledger: cost/baseline/saved USD, kind, cache_hit).
 
 ## 4. How the saver works (all automatic, lossless)
 
@@ -99,6 +112,10 @@ USD, kind, cache_hit).
 4. **Cheap aux routing** — auto-titles, follow-up chips, memory extraction, and
    compaction run on the cheapest model of the same provider; baseline = what the
    conversation's model would have charged (kinds `aux_title/aux_followup/aux_memory/aux_compact`).
+5. **Fallback chains** — a provider can name backup models (`fallback_json`); when a
+   remote call dies before streaming with a retryable error, the turn transparently
+   retries on the next model in the chain (toast + `fallback` ledger event). Edit
+   the chain in the provider's catalog view.
 
 Safety rails: paid models skip the GPU queue and warm-up probe, never drive the
 sandbox/agent tooling (`start_project` disabled remotely, `wsRow` forced null),
@@ -115,8 +132,9 @@ remote `max_tokens` capped at 4096.
 - CostsPanel USD rule: amounts < $1 render with 4 decimals (spec-literal); if that
   looks noisy, change the threshold line in `CostsPanel.svelte` `usd()`.
 - OmniRoute ideas deliberately NOT ported: per-model quirky compressors
-  (prompts-to-images etc.), multi-user key pools/rate-limit routing. Candidate
-  next ports: model fallback chains, per-model spend caps/alerts.
+  (prompts-to-images etc.), multi-user key pools/rate-limit routing. Fallback
+  chains shipped in stage 12; candidate next port: per-model/provider spend
+  caps + alerts.
 - Frontend was verified per-file with the Svelte 5 compiler; a full
   `npm run build` on the server is the real gate — run it before restarting prod.
 
@@ -124,7 +142,7 @@ remote `max_tokens` capped at 4096.
 
 - Server won't boot → check `journalctl --user -u duckpond -n 100`; route-syntax
   crashes name the file:line (that was issue #5; fixed pattern: `*` only at path end).
-- Quick rollback: `git revert -m 1 9530f3f` (UI merge) or redeploy from `83d272a`.
+- Quick rollback: `git revert -m 1 ccba8c1` (stage-12 merge) or redeploy from `9530f3f`.
 - Provider sync fails → the provider card shows `last_error`; catalog keeps the last
   good sync; models stay usable.
 - Remote turn fails mid-stream → the interrupted reply is parked in the tree like
@@ -133,12 +151,19 @@ remote `max_tokens` capped at 4096.
 ## 7. Continuing this work (paste into a new agent session)
 
 > Repo `CrankyVase/duckpond` (public). Read `NEXT-STEPS.md` at the repo root first.
-> The remote-providers + cost-saver feature is fully merged to main (PRs #4/#6/#7);
-> verify the checklist in §2. Then pick items from §5. Rules: push every file to the
-> branch immediately after writing it (commit per file, `stage X: …` messages), verify
-> pushes byte-for-byte (curl the file back and prefix-compare), never merge to main
-> until verified, and find-my-way wildcards only at path end. Branch:
-> `feat/remote-providers` or cut a fresh one from main.
+> The remote-providers + cost-saver feature is fully merged to main (PRs #4/#6/#7/#9,
+> stages 1–12); verify the checklist in §2. Then pick items from §5. Rules: push every
+> file to the branch immediately after writing it (commit per file, `stage X: …`
+> messages), verify pushes byte-for-byte (curl the file back and prefix-compare),
+> never merge to main until verified, and find-my-way wildcards only at path end.
+> Branch: `feat/remote-providers` or cut a fresh one from main.
+>
+> Push discipline (learned the hard way): NEVER hand-reconstruct a file's content
+> inside a push call from memory — dump the local verified file and copy it
+> verbatim. A from-memory push once corrupted db.js (wrong DB path → the site
+> would have looked data-wiped) and providers.js (CJS require in ESM). Very large
+> files (30KB+) occasionally truncate mid-push — just retry the same verbatim push;
+> always byte-verify afterwards.
 
 ## 8. Test plan for future changes
 
