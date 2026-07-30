@@ -159,6 +159,11 @@
         // transient server info worth a toast (auto-compaction, model fallback)
         if (here && ev.message) toast(ev.message, 'ok', 4000);
         break;
+      case 'routed':
+        // the Auto router resolved this turn to a concrete model — say which,
+        // otherwise "why did it answer like that?" has no answer
+        if (here && ev.message) toast(ev.message, 'ok', 3500);
+        break;
       case 'loading': if (s) s.loading = true; break;
       case 'thinking': if (s) { s.loading = false; pendThink += ev.text; scheduleFlush(); } break;
       case 'delta':

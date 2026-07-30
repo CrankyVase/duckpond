@@ -10,6 +10,7 @@
   import Duck from './Duck.svelte';
   import ProviderFallback from './ProviderFallback.svelte';
   import ProviderPresets from './ProviderPresets.svelte';
+  import RoutingHealth from './RoutingHealth.svelte';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -224,6 +225,81 @@
 
   const fmtCtx = (n) => (n == null ? '—' : `${Math.round(n / 1000)}k`);
   const usd2 = (n) => `$${(n ?? 0).toFixed(2)}`;
+  // quota amounts span $0.0004 to $500 — keep small balances legible without
+  // printing four decimals on a round number
+  const usd = (n) => {
+    const v = Number(n ?? 0);
+    if (v === 0) return '$0';
+    if (Math.abs(v) < 0.01) return `$${v.toFixed(4)}`;
+    if (Math.abs(v) < 1) return `$${v.toFixed(3)}`;
+    return `$${v.toFixed(2)}`;
+  };
+
+  // ---- price limit slider ----
+  // A range input needs evenly spaced stops, but price is meaningful on a log
+  // scale: the interesting decisions all live under $5, and the top stop is
+  // "no limit at all" rather than a number. Hence discrete stops, with `null`
+  // (unlimited) as the last one.
+  const CEILING_STOPS = [0, 0.1, 0.25, 0.5, 1, 2, 3, 5, 10, 20, 50, null];
+
+  let ceilPreview = $state({});   // id -> value while the thumb is being dragged
+  let ceilBusy = $state({});      // id -> bool (re-sync in flight)
+  let qBusy = $state({});         // id -> bool (quota probe in flight)
+
+  const ceilingOf = (p) => (p.id in ceilPreview ? ceilPreview[p.id] : p.price_ceiling ?? null);
+
+  function stopIndex(v) {
+    if (v == null) return CEILING_STOPS.length - 1;
+    let best = 0;
+    for (let i = 0; i < CEILING_STOPS.length - 1; i++) {
+      if (Math.abs(CEILING_STOPS[i] - v) < Math.abs(CEILING_STOPS[best] - v)) best = i;
+    }
+    return best;
+  }
+
+  const ceilingLabel = (v) => {
+    if (v == null) return 'any price';
+    if (v === 0) return 'free only';
+    return `≤ $${v}/1M`;
+  };
+
+  async function saveCeiling(p, value) {
+    ceilBusy = { ...ceilBusy, [p.id]: true };
+    try {
+      // the server re-imports the catalog before replying, so the counts and
+      // the picker are already correct by the time this resolves
+      const r = await api(`/api/providers/${p.id}`, {
+        method: 'PATCH',
+        body: { price_ceiling: value },
+      });
+      Object.assign(p, r.provider);
+      if (r.sync?.ok) {
+        toast(`${ceilingLabel(value)} — ${r.sync.count} models imported${r.sync.dropped ? `, ${r.sync.dropped} filtered out` : ''}`, 'ok', 4000);
+      } else if (r.sync) {
+        toast(`Limit saved, but the re-import failed: ${r.sync.error}`, 'error', 5000);
+      }
+      loadModels();
+      if (expanded === p.id) await loadModelsFor(p, true);
+    } catch (e) {
+      toast(String(e.error ?? e.message ?? e), 'error');
+      await load();
+    }
+    // drop the drag preview so the row shows the server's truth again
+    const { [p.id]: _drop, ...rest } = ceilPreview;
+    ceilPreview = rest;
+    ceilBusy = { ...ceilBusy, [p.id]: false };
+  }
+
+  async function refreshQuota(p) {
+    qBusy = { ...qBusy, [p.id]: true };
+    try {
+      p.quota = await api(`/api/providers/${p.id}/quota?refresh=1`);
+      if (p.quota?.error) toast(`Quota check failed: ${p.quota.error}`, 'error', 4200);
+    } catch (e) {
+      toast(String(e.error ?? e.message ?? e), 'error');
+    }
+    qBusy = { ...qBusy, [p.id]: false };
+  }
 </script>
 
 <div class="prov">
@@ -245,6 +321,9 @@
   {:else if !providers}
     <div class="empty shimmer">loading…</div>
   {:else}
+    {#if providers.length}
+      <RoutingHealth {isOwner} />
+    {/if}
     <ProviderPresets {isOwner} onadded={() => load()} />
     {#if isOwner}
       <section class="surface">
@@ -346,20 +425,88 @@
             </div>
           </div>
 
-          <div class="prow">
-            <div class="cachetog">
-              <span class="ct">Free-only import</span>
-              {#if isOwner}
-                <button class="tog" class:on={!!p.free_only} role="switch" aria-checked={!!p.free_only}
-                  title="Catalog syncs keep only models that are detectably free (both prices 0, or a :free/-free id). Switching on re-syncs immediately."
-                  onclick={() => patchProvider(p, { free_only: !p.free_only }, `Free-only ${p.free_only ? 'off' : 'on — syncing free models…'} for ${p.name}`)}>
-                  <span class="knob"></span>
-                </button>
+          <div class="prow ceilrow">
+            <div class="ceilhead">
+              <span class="ct">Price limit</span>
+              <span class="ceilval mono" class:free={ceilingOf(p) === 0}>{ceilingLabel(ceilingOf(p))}</span>
+            </div>
+            {#if isOwner}
+              <input class="ceilslider" type="range"
+                min="0" max={CEILING_STOPS.length - 1} step="1"
+                value={stopIndex(ceilingOf(p))}
+                disabled={ceilBusy[p.id]}
+                aria-label="Maximum price per million tokens"
+                title="Only import models at or under this price. Drag all the way left for free models only, all the way right for no limit."
+                oninput={(e) => { ceilPreview = { ...ceilPreview, [p.id]: CEILING_STOPS[+e.target.value] }; }}
+                onchange={(e) => saveCeiling(p, CEILING_STOPS[+e.target.value])} />
+              <div class="ceilscale mono">
+                <span>free</span><span>$1</span><span>$10</span><span>any price</span>
+              </div>
+              <div class="ceilnote">
+                {#if ceilBusy[p.id]}
+                  re-importing the catalog…
+                {:else if ceilingOf(p) === 0}
+                  Free models only — {p.models} in the picker{#if p.models_filtered}, {p.models_filtered} hidden as paid{/if}.
+                {:else if ceilingOf(p) == null}
+                  No limit — all {p.models} models are importable.
+                {:else}
+                  Up to ${ceilingOf(p)} per 1M tokens — {p.models} in the picker{#if p.models_filtered}, {p.models_filtered} above the limit{/if}.
+                {/if}
+              </div>
+            {:else}
+              <span class="statetag" class:on={ceilingOf(p) === 0}>{ceilingLabel(ceilingOf(p))}</span>
+            {/if}
+          </div>
+
+          {#if p.quota_supported || p.quota}
+            <div class="prow qrow">
+              <div class="qhead">
+                <span class="ct">Quota</span>
+                {#if isOwner}
+                  <button class="ghost xs" onclick={() => refreshQuota(p)} disabled={qBusy[p.id]}
+                    title="Ask the provider what's left on this key">
+                    <RefreshCw size={12} />{qBusy[p.id] ? 'Checking…' : 'Check now'}
+                  </button>
+                {/if}
+              </div>
+              {#if p.quota?.error}
+                <div class="perr">couldn't read quota: {p.quota.error}</div>
+              {:else if p.quota?.unsupported}
+                <div class="qnote">{p.quota.note}</div>
+              {:else if p.quota}
+                <div class="qgrid mono">
+                  {#if p.quota.balance_usd != null}
+                    <div class="qcell"><span class="qk">left</span><span class="qv big">{usd(p.quota.balance_usd)}</span></div>
+                  {/if}
+                  {#if p.quota.limit_usd != null}
+                    <div class="qcell"><span class="qk">key limit</span><span class="qv">{usd(p.quota.limit_usd)}</span></div>
+                  {/if}
+                  {#if p.quota.used_month_usd != null}
+                    <div class="qcell"><span class="qk">this month</span><span class="qv">{usd(p.quota.used_month_usd)}</span></div>
+                  {/if}
+                  {#if p.quota.used_day_usd != null}
+                    <div class="qcell"><span class="qk">today</span><span class="qv">{usd(p.quota.used_day_usd)}</span></div>
+                  {/if}
+                  {#if p.quota.used_usd != null}
+                    <div class="qcell"><span class="qk">all time</span><span class="qv">{usd(p.quota.used_usd)}</span></div>
+                  {/if}
+                  {#if p.quota.free_tier != null}
+                    <div class="qcell"><span class="qk">tier</span><span class="qv">{p.quota.free_tier ? 'free' : 'paid'}</span></div>
+                  {/if}
+                </div>
+                {#if p.quota.limit_usd > 0 && p.quota.balance_usd != null}
+                  <div class="qbar" title="{Math.round((1 - p.quota.balance_usd / p.quota.limit_usd) * 100)}% of this key's credit used">
+                    <span style="width:{Math.min(100, Math.max(0, (1 - p.quota.balance_usd / p.quota.limit_usd) * 100))}%"
+                      class:low={p.quota.balance_usd / p.quota.limit_usd < 0.15}></span>
+                  </div>
+                {/if}
+                {#if p.quota.note}<div class="qnote">{p.quota.note}</div>{/if}
+                <div class="qwhen">read {fmtWhen(p.quota.at)}</div>
               {:else}
-                <span class="statetag" class:on={!!p.free_only}>{p.free_only ? 'on' : 'off'}</span>
+                <div class="qnote">Not checked yet{#if isOwner} — hit “Check now”{/if}.</div>
               {/if}
             </div>
-          </div>
+          {/if}
 
           <div class="prow">
             <div class="cachetog">
@@ -399,8 +546,13 @@
                     </thead>
                     <tbody>
                       {#each modelsByProv[p.id] as m (m.model_id)}
-                        <tr class:muted={!m.enabled}>
-                          <td class="mono mid" title={m.model_id}>{m.model_id}</td>
+                        <tr class:muted={!m.enabled} class:filtered={!!m.filtered_out}>
+                          <td class="mono mid" title={m.model_id}>
+                            {m.model_id}
+                            {#if m.filtered_out}
+                              <span class="filteredtag" title="Above this provider's price limit, or no longer listed by the provider. Raise the price limit to bring it back.">over limit</span>
+                            {/if}
+                          </td>
                           <td class="num">
                             {#if isOwner}
                               <input class="numin" type="number" min="0" step="1024"
@@ -445,7 +597,7 @@
                     </tbody>
                   </table>
                 </div>
-                <div class="tblhint">Edits save on blur · prices are USD per 1M tokens · leave blank for “unknown”</div>
+                <div class="tblhint">Edits save on blur · prices are USD per 1M tokens · leave blank for “unknown” · rows marked “over limit” are hidden from the picker until the price limit is raised</div>
               {/if}
             </div>
           {/if}
@@ -548,6 +700,49 @@
   }
   .cachetog { display: flex; align-items: center; gap: 10px; }
   .ct { font-size: 12.5px; color: var(--text-dim); }
+
+  /* price limit slider */
+  .ceilrow, .qrow { flex-direction: column; align-items: stretch; gap: 6px; }
+  .ceilhead, .qhead {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .ceilval { font-size: 12px; color: var(--text); }
+  .ceilval.free { color: var(--green); }
+  .ceilslider { width: 100%; accent-color: var(--accent); margin: 2px 0 0; }
+  .ceilscale {
+    display: flex; justify-content: space-between;
+    font-size: 10px; color: var(--text-faint);
+  }
+  .ceilnote { font-size: 11.5px; color: var(--text-faint); }
+
+  /* quota */
+  .qgrid { display: flex; flex-wrap: wrap; gap: 6px 22px; }
+  .qcell { display: flex; flex-direction: column; gap: 1px; }
+  .qk {
+    font-size: 10px; color: var(--text-faint);
+    text-transform: uppercase; letter-spacing: 0.07em;
+  }
+  .qv { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .qv.big { font-size: 17px; font-weight: 600; color: var(--green); }
+  .qbar {
+    height: 5px; border-radius: 999px; background: var(--bg-hover);
+    overflow: hidden; margin-top: 2px;
+  }
+  .qbar span { display: block; height: 100%; background: var(--accent); }
+  .qbar span.low { background: var(--red); }
+  .qnote { font-size: 11.5px; color: var(--text-faint); line-height: 1.45; }
+  .qwhen { font-size: 10.5px; color: var(--text-faint); }
+  .xs {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 8px; font-size: 11px; border-radius: calc(7px * var(--rf));
+    border: 1px solid var(--border-soft);
+  }
+  .filteredtag {
+    font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-faint); border: 1px solid var(--border-soft);
+    border-radius: 999px; padding: 1px 6px; margin-left: 6px; white-space: nowrap;
+  }
+  tr.filtered td { opacity: 0.42; }
   .capin { width: 90px; text-align: left; }
   .capspend { font-size: 11.5px; color: var(--text-faint); }
   .pbtns { display: flex; gap: 4px; flex-wrap: wrap; }

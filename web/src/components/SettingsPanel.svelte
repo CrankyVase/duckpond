@@ -10,6 +10,7 @@
   import KeyRound from '@lucide/svelte/icons/key-round';
   import LinkIcon from '@lucide/svelte/icons/link';
   import Palette from '@lucide/svelte/icons/palette';
+  import DesktopAccess from './DesktopAccess.svelte';
   import ScrollText from '@lucide/svelte/icons/scroll-text';
   import Plug from '@lucide/svelte/icons/plug';
   import PlugZap from '@lucide/svelte/icons/plug-zap';
@@ -562,6 +563,11 @@
         {pwBusy ? 'Changing…' : 'Change password'}
       </button>
     </section>
+
+    <!-- owner: desktop access (real folders on this machine) -->
+    {#if app.user?.role === 'owner'}
+      <DesktopAccess />
+    {/if}
 
     <!-- owner: users & access -->
     {#if app.user?.role === 'owner'}

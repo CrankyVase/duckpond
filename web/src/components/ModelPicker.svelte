@@ -45,9 +45,11 @@
   // providers + their models alphabetically. Items keep their flat index into
   // `filtered` so keyboard hover/pick stays correct.
   const groups = $derived.by(() => {
+    const autos = [];
     const locals = [];
     const byProv = new Map();
     filtered.forEach((m, i) => {
+      if (m.auto) { autos.push({ m, i }); return; }
       if (!m.remote) { locals.push({ m, i }); return; }
       const key = m.provider?.id ?? '?';
       if (!byProv.has(key)) byProv.set(key, { label: m.provider?.name ?? 'Remote', items: [] });
@@ -56,7 +58,13 @@
     const provs = [...byProv.values()];
     for (const g of provs) g.items.sort((a, b) => dispName(a.m).localeCompare(dispName(b.m)));
     provs.sort((a, b) => a.label.localeCompare(b.label));
-    return locals.length ? [{ label: 'Local', items: locals }, ...provs] : provs;
+    // Auto strategies lead: they're the "just pick something good" answer, and
+    // the server only lists them when they can actually resolve.
+    return [
+      ...(autos.length ? [{ label: 'Auto router', items: autos }] : []),
+      ...(locals.length ? [{ label: 'Local', items: locals }] : []),
+      ...provs,
+    ];
   });
 
   $effect(() => {
@@ -139,9 +147,11 @@
               onkeydown={(e) => e.key === 'Enter' && pick(m)}>
               <span class="dot" style="background:{dot(m.status)}"></span>
               <span class="col">
-                <span class="oname">{dispName(m)}</span>
+                <span class="oname">{m.auto ? m.label : dispName(m)}</span>
                 <span class="meta">
-                  {#if m.remote}
+                  {#if m.auto}
+                    picks a model per turn
+                  {:else if m.remote}
                     remote
                     {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1000)}k ctx{/if}
                     &nbsp;·&nbsp;<span class:noprice={!m.pricing || (m.pricing.in == null && m.pricing.out == null)}>{pricingMeta(m)}</span>
@@ -151,7 +161,9 @@
                   {/if}
                 </span>
               </span>
-              {#if m.remote}
+              {#if m.auto}
+                <span class="ptag">auto</span>
+              {:else if m.remote}
                 <span class="ptag">{m.provider?.name ?? 'remote'}</span>
               {/if}
               {#if m.card?.url}

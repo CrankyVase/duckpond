@@ -52,7 +52,7 @@
         <div class="preset">
           <div class="ptop">
             <span class="pname">{pr.name}</span>
-            {#if pr.freeOnly}<span class="freebadge">free-only import</span>{/if}
+            {#if pr.freeOnly}<span class="freebadge">starts on free-only</span>{/if}
             <a class="keylink" href={pr.keyUrl} target="_blank" rel="noreferrer">
               get a key <ExternalLink size={11} />
             </a>

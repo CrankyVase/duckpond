@@ -178,14 +178,24 @@
     seed = String(Math.floor(1 + Math.random() * (2 ** 31 - 2)));
   }
 
-  async function remove(kind, id) {
-    const ok = await confirmDialog({
-      title: 'Delete this permanently?',
-      message: 'This action cannot be undone.',
-      confirmLabel: 'Delete',
-      cancelLabel: 'Cancel',
-      danger: true,
-    });
+  async function remove(kind, id, opts = {}) {
+    // Detaching a desktop project deletes nothing on disk — saying "this cannot
+    // be undone" there would be a frightening lie.
+    const ok = await confirmDialog(opts.detach
+      ? {
+        title: 'Stop working on this folder?',
+        message: `Detaches ${opts.path} from DuckPond. Every file stays exactly where it is on your computer — nothing is deleted.`,
+        confirmLabel: 'Detach',
+        cancelLabel: 'Keep',
+        danger: false,
+      }
+      : {
+        title: 'Delete this permanently?',
+        message: 'This action cannot be undone.',
+        confirmLabel: 'Delete',
+        cancelLabel: 'Cancel',
+        danger: true,
+      });
     if (!ok) return;
     try {
       if (kind === 'image') await api(`/api/images/${id}`, { method: 'DELETE' });
@@ -193,7 +203,7 @@
       else if (kind === 'doc') await api(`/api/docs/${id}`, { method: 'DELETE' });
       else if (kind === 'export') await api(`/api/files/exports/${encodeURIComponent(id)}`, { method: 'DELETE' });
       else if (kind === 'workspace') await api(`/api/files/workspaces/${id}`, { method: 'DELETE' });
-      toast('Deleted', 'ok');
+      toast(opts.detach ? 'Detached — your files are untouched' : 'Deleted', 'ok');
       await load();
     } catch (err) {
       toast(err.message ?? 'delete failed', 'error');
@@ -508,10 +518,21 @@
         <div class="row">
           <span class="ico"><Folder size={16} /></span>
           <div class="info">
-            <div class="name">{w.name}</div>
-            <div class="meta">{w.files} files · {w.size_label} · {w.status}</div>
+            <div class="name">
+              {w.name}
+              {#if w.host_path}<span class="hosttag">on this computer</span>{/if}
+            </div>
+            {#if w.host_path}
+              <div class="meta mono" title={w.host_path}>{w.host_path} · {w.status}</div>
+            {:else}
+              <div class="meta">{w.files} files · {w.size_label} · {w.status}</div>
+            {/if}
           </div>
-          <button class="del" onclick={() => remove('workspace', w.id)} title="Delete project files">
+          <button class="del"
+            onclick={() => remove('workspace', w.id, { detach: !!w.host_path, path: w.host_path })}
+            title={w.host_path
+              ? 'Detach this folder — your files are left exactly where they are'
+              : 'Delete project files'}>
             <Trash2 size={13} />
           </button>
         </div>
@@ -772,6 +793,14 @@
     display: block; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .meta { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
+  .meta.mono { font-size: 11px; }
+  /* desktop project: make it unmistakable that these are the user's real files */
+  .hosttag {
+    font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--accent); border: 1px solid var(--accent-dim);
+    border-radius: 999px; padding: 1px 7px; margin-left: 7px; vertical-align: 1px;
+    white-space: nowrap;
+  }
   .card .del {
     position: absolute; top: 6px; right: 6px;
     padding: 5px; border-radius: 8px;
