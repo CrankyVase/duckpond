@@ -10,6 +10,7 @@ import {
   cachedQuota, hasQuotaAdapter, providerKind, providerQuota,
 } from '../providerQuota.js';
 import { resetRouting, routerHealth } from '../omniroute.js';
+import { getSetting, setSetting } from '../settings.js';
 
 const ownerOnly = (req, reply) => {
   if (req.user?.role !== 'owner') {
@@ -64,8 +65,18 @@ const suggestName = (base) => {
 export default async function providerRoutes(app) {
   app.addHook('preHandler', requireAuth);
 
-  app.get('/api/providers', async () =>
-    db.prepare('SELECT * FROM providers ORDER BY name COLLATE NOCASE').all().map(mask));
+  app.get('/api/providers', async (req) => {
+    const rows = db.prepare('SELECT * FROM providers ORDER BY name COLLATE NOCASE').all();
+    // Warm the quota cache in the background (same pattern as the lazy catalog
+    // re-sync in /api/models): this reply carries whatever is already cached,
+    // and the next render has fresh numbers without anyone pressing a button.
+    for (const p of rows) {
+      if (!p.enabled || !p.api_key || !hasQuotaAdapter(p.base_url)) continue;
+      if (p.quota_at && p.quota_at > Math.floor(Date.now() / 1000) - 300) continue;
+      providerQuota(p.id, { log: req.log }).catch(() => { /* cached as an error */ });
+    }
+    return rows.map(mask);
+  });
 
   // Starter presets: curated OpenAI-compatible providers with free models —
   // the user only pastes an API key. `added` = a provider with the same base
@@ -274,6 +285,20 @@ export default async function providerRoutes(app) {
         .run(...vals, pid, mid);
     }
     return { ok: true, model: providerModelFor(pid, mid) };
+  });
+
+  // Global remote-provider behaviour (owner-only to change, readable by all so
+  // the UI can explain why a paid model isn't offering project tools).
+  app.get('/api/providers/settings', async () => ({
+    remote_agent: getSetting('remote_agent') !== '0',
+  }));
+
+  app.patch('/api/providers/settings', async (req, reply) => {
+    if (!ownerOnly(req, reply)) return;
+    if (req.body?.remote_agent !== undefined) {
+      setSetting('remote_agent', req.body.remote_agent ? '1' : '0');
+    }
+    return { ok: true, remote_agent: getSetting('remote_agent') !== '0' };
   });
 
   // Provider-routing dashboard: breaker/cooldown/lockout state and what each

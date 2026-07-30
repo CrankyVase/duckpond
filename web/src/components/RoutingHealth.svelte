@@ -16,11 +16,33 @@
   let busy = $state(false);
   let open = $state(false);
 
+  let remoteAgent = $state(true);
+  let setBusy = $state(false);
+
   async function load() {
     try { h = await api('/api/routing/health'); err = null; }
     catch (e) { err = e.error ?? e.message; }
+    try { remoteAgent = (await api('/api/providers/settings')).remote_agent; }
+    catch { /* leave the default; the toggle just shows "on" */ }
   }
   $effect(() => { if (open) load(); });
+
+  async function toggleRemoteAgent() {
+    setBusy = true;
+    try {
+      const r = await api('/api/providers/settings', {
+        method: 'PATCH',
+        body: { remote_agent: !remoteAgent },
+      });
+      remoteAgent = r.remote_agent;
+      toast(remoteAgent
+        ? 'Paid models can build projects again'
+        : 'Paid models are back to chat-only — project mode is local-model only', 'ok', 4000);
+    } catch (e) {
+      toast(String(e.error ?? e.message ?? e), 'error');
+    }
+    setBusy = false;
+  }
 
   async function reset() {
     busy = true;
@@ -123,6 +145,20 @@
         <div class="note">No remote calls yet this session — stats appear as you chat.</div>
       {/if}
 
+      <div class="sub">Behaviour</div>
+      <div class="row">
+        <span class="rowlabel">
+          Let paid models build projects
+          <em>Remote models can open the coding panel and edit files. Costs stay bounded by each provider's monthly cap.</em>
+        </span>
+        {#if isOwner}
+          <button class="tog" class:on={remoteAgent} role="switch" aria-checked={remoteAgent}
+            disabled={setBusy} onclick={toggleRemoteAgent}><span class="knob"></span></button>
+        {:else}
+          <span class="badge" class:ok={remoteAgent}>{remoteAgent ? 'on' : 'off'}</span>
+        {/if}
+      </div>
+
       <div class="acts">
         <button class="ghost sm" onclick={load}><RefreshCw size={13} />Refresh</button>
         {#if isOwner}
@@ -205,6 +241,30 @@
   td.bad { color: var(--red); }
   tbody tr:not(:last-child) td { border-bottom: 1px solid var(--border-soft); }
   .mid { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+
+  .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .rowlabel { font-size: 12.5px; display: flex; flex-direction: column; gap: 2px; }
+  .rowlabel em {
+    font-style: normal; font-size: 11px; color: var(--text-faint); line-height: 1.45;
+  }
+  .tog {
+    all: unset; cursor: pointer; flex-shrink: 0;
+    width: 38px; height: 22px; border-radius: 999px;
+    background: var(--bg-hover); border: 1px solid var(--border);
+    position: relative; transition: background 180ms ease, border-color 180ms ease;
+    box-sizing: border-box;
+  }
+  .tog .knob {
+    position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--text-dim);
+    transition: transform 180ms cubic-bezier(0.25, 1, 0.35, 1), background 180ms ease;
+  }
+  .tog.on { background: var(--accent-deep); border-color: transparent; }
+  .tog.on .knob { transform: translateX(16px); background: #16110a; }
+  .tog:disabled { opacity: 0.6; cursor: default; }
 
   .acts { display: flex; gap: 6px; margin-top: 14px; flex-wrap: wrap; }
   .acts .sm {

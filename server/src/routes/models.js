@@ -109,7 +109,15 @@ export default async function modelRoutes(app) {
   app.addHook('preHandler', requireAuth);
 
   app.get('/api/models', async (req) => {
-    const models = await listModels();
+    // A down/absent local llama router must not blank the whole picker: with
+    // providers configured, remote and auto models are still perfectly usable,
+    // and someone running DuckPond purely on APIs may have no local router at
+    // all. Local models just drop out until it answers again.
+    let models = [];
+    try { models = await listModels(); }
+    catch (err) {
+      req.log.warn({ err: String(err.message ?? err) }, 'local router unreachable — serving remote models only');
+    }
     // background: fill/refresh Hugging Face card blurbs (never blocks this reply)
     queueCardFetch(models.map((m) => m.id), req.log);
     // lazy 24h catalog refresh for providers (OmniRoute-style auto-sync)

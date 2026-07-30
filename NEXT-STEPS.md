@@ -26,6 +26,11 @@ Stages 1–13 are merged to `main`:
 | #9 | Stage 12: fallback chains, free-only import mode, provider presets | `ccba8c1` |
 | #11 | Stage 13: per-provider monthly spend caps + 80% alerts | `68cd1fa` |
 
+**Stage 14 is on `claude/api-integration-desktop-access-8syred`, not yet merged.**
+Price-limit slider (replaces free-only), provider quota probes, the OmniRoute
+resilience + auto-routing port, owner-only desktop access, and the coding-panel
+system-prompt block. See §9 for what it changed and §10 for what it did not.
+
 Known-good rollback points: before the feature = PR #3 merge (`921e640a5`);
 server-only with hotfix = `83d272a`.
 
@@ -53,7 +58,8 @@ server-only with hotfix = `83d272a`.
 ### Server (`server/src/`)
 - `providers.js` — provider CRUD helpers, OpenAI-compatible streaming client
   (`streamRemote`), catalog sync (`syncProviderModels`, lazy 24h `syncStaleProviders`,
-  free-only filter when `providers.free_only`), response-cache helpers
+  price-ceiling filter via `withinCeiling` — stage 14; `free_only` is now just a
+  ceiling of 0), response-cache helpers
   (`cacheKey/cacheLookup/cacheStore`), `isRemoteId/parseRemoteId/resolveRemote`,
   fallback-chain helpers (`isRetryableRemoteError`, `fallbackCandidates` — typed
   errors carry `.status`), `PROVIDER_PRESETS` (8 key-only starters).
@@ -74,6 +80,13 @@ server-only with hotfix = `83d272a`.
   sync, cache clear, per-model PATCH, `GET /api/providers/presets`, preset quick-add
   (`POST { preset, api_key }`), `fallback` + `free_only` PATCH fields.
 - `routes/costs.js` — `/api/costs/summary|daily|events`.
+- **Stage 14 additions:** `omniroute.js` (breaker/cooldown/lockout + `auto*`
+  routing), `providerQuota.js` (per-provider credit adapters), `hostfs.js`
+  (desktop allowlist + denylist + symlink-safe path resolution).
+  New routes: `/api/routing/health|reset`, `/api/providers/:id/quota`,
+  `/api/providers/settings`, `/api/desktop/config|browse|attach`.
+  NB provider routing is `/api/routing/*` — `/api/router/health` already belongs
+  to the local llama.cpp router probe in `routes/models.js`.
 - `routes/models.js` — `/api/models` merges local + remote entries; remote ctx size
   seeds `modelSettings`; `PUT /api/models/*` handles slash-containing remote ids
   (find-my-way wildcard must be LAST path char — see issue #5).
@@ -86,8 +99,11 @@ server-only with hotfix = `83d272a`.
 ### Web (`web/src/`)
 - `components/ModelPicker.svelte` — provider grouping + cost/context lines.
 - `components/ProvidersPanel.svelte` — the settings UI (add/test/sync/toggles/catalog,
-  free-only toggle) + `ProviderPresets.svelte` (key-only quick-add grid) and
-  `ProviderFallback.svelte` (fallback-chain chip editor) in the catalog view.
+  price-limit slider, quota block) + `ProviderPresets.svelte` (key-only quick-add grid),
+  `ProviderFallback.svelte` (fallback-chain chip editor) and `RoutingHealth.svelte`
+  (breaker/latency dashboard + the "paid models may build projects" toggle).
+- `components/DesktopAccess.svelte` — owner-only folder allowlist + directory
+  picker, mounted in `SettingsPanel.svelte`.
 - `components/CostsPanel.svelte` — savings dashboard.
 - `components/Chat.svelte` — `notice` SSE events render as toasts (fallback hops,
   auto-compaction).
@@ -96,9 +112,12 @@ server-only with hotfix = `83d272a`.
 
 ### DB (auto-migrated in `db.js`)
 `providers` (+ `fallback_json` chain, `free_only` import filter, `spend_cap_usd`
-monthly cap), `provider_models`
-(catalog + pricing + per-model enable), `response_cache` (exact-turn cache),
-`usage_events` (cost ledger: cost/baseline/saved USD, kind, cache_hit).
+monthly cap, and stage 14: `price_ceiling`, `quota_json`, `quota_at`),
+`provider_models` (catalog + pricing + per-model `enabled`, plus stage 14
+`filtered_out` — set by the price ceiling, deliberately separate from `enabled`),
+`response_cache` (exact-turn cache), `usage_events` (cost ledger:
+cost/baseline/saved USD, kind, cache_hit), `workspaces.host_path` (stage 14:
+non-null means the workspace IS that real host directory).
 
 ## 4. How the saver works (all automatic, lossless)
 
@@ -176,3 +195,144 @@ remote `max_tokens` capped at 4096.
    boot the server) — lint alone missed issue #5.
 4. curl the pushed file back and prefix-compare bytes before merging.
 5. Merge → rebuild web → restart → smoke-test chat with both a local and a remote model.
+
+## 9. Stage 14 — API integration, quota, auto routing, desktop access
+
+Branch `claude/api-integration-desktop-access-8syred`. Written 2026-07-30.
+
+### 9.1 Why the free slider never worked (three separate bugs)
+
+1. **Zero prices were thrown away.** `normalizeModelMeta`'s number parser
+   required `n > 0`, so a provider reporting a price of exactly `0` — every
+   OpenRouter `:free` variant, the whole OpenCode Zen free tier — was read as
+   "nothing reported" and then handed a *guessed* price from the `KNOWN` table.
+   `deepseek-r1:free` came out priced at $0.55/1M. Free-only import compared
+   against `=== 0` and so could never match anything. Prices now keep a reported
+   zero, and the meta carries `reported` (the provider told us) separately from
+   `free` (both sides reported as 0). Half-reported models are deliberately not
+   treated as free.
+2. **Excluded models were never removed from the catalog.** The sync only ever
+   upserted, so switching free-only on re-imported the free models but left
+   every paid row in `provider_models` — still in the picker, still chargeable.
+   Rows that fail the filter now get `filtered_out = 1` (flagged, not deleted,
+   so hand-tuned prices survive). `filtered_out` is deliberately a different
+   column from `enabled`, which is the user's own per-model toggle: a re-sync
+   must never resurrect a model someone switched off by hand.
+3. **The re-sync was fire-and-forget.** `PATCH /api/providers/:id` kicked the
+   sync off in the background and replied immediately, so the panel re-rendered
+   against the old catalog and the toggle looked inert. It now awaits the sync
+   and returns the counts.
+
+Free-only generalised to `providers.price_ceiling`: `NULL` = no limit, `0` =
+free only, `n` = only models at or under $n per 1M tokens. `free_only` is kept
+in lockstep for anything still reading it. The UI is a slider with discrete
+stops (free · $0.10 … $50 · any price) because price decisions cluster under $5
+and the top stop is "no limit", not a number.
+
+Also fixed while in here: a reported price now *overwrites* the stored one
+(`COALESCE` used to prefer the old value, so a model that went from free to
+paid kept its stale `0` forever).
+
+### 9.2 Quota (`providerQuota.js`)
+
+Per-provider adapters returning one normalized shape:
+- **OpenRouter** — `GET {base}/key`: `limit`, `limit_remaining`, `usage`,
+  `usage_daily/weekly/monthly`, `is_free_tier`, `limit_reset`.
+- **NanoGPT** — `POST {base without /v1}/check-balance` with `x-api-key`:
+  `usdBalance` / `nanoBalance` (several spellings read).
+- Everything else reports `unsupported` with an honest one-liner about where
+  that provider's limits actually live, rather than an empty panel.
+
+Cached 5 min in `providers.quota_json/quota_at`, invalidated when the key or
+base URL changes, warmed in the background by `GET /api/providers`. Forced
+re-probes are owner-only (a probe spends a request against the key).
+
+### 9.3 OmniRoute port (`omniroute.js`)
+
+From `diegosouzapw/OmniRoute` (MIT), cut to what this app lacked:
+- **Three-layer resilience.** Provider circuit breaker (5 consecutive failures,
+  half-open probes at 15/30/60s, auth failures trip instantly), per-key cooldown
+  with exponential backoff that honours `Retry-After` plus jitter, and per-MODEL
+  lockout so one rate-limited model no longer benches its whole provider. Wired
+  into `llama.js remoteCall`, which also now measures time-to-first-token.
+- **Auto routing.** `auto`, `auto/cheap`, `auto/free`, `auto/fast`,
+  `auto/coding`, `auto/smart` appear in the picker as their own group and
+  resolve per turn by scoring every candidate across all providers on price,
+  measured latency, success rate, context and capability. `auto/cheap` sorts by
+  actual price first — scoring alone let a $0.05 model beat a free one on a
+  latency guess. Resolution happens at the top of the turn in `chatPost.js`, so
+  pricing/cache/spend-caps all see the real model, and the client gets a
+  `routed` SSE event naming the pick.
+- A concrete model id now also falls back **across** providers, not just down
+  its own provider's chain.
+
+State is in-process and forgotten on restart, so a tripped breaker never
+outlives a deploy that may have fixed the cause.
+
+### 9.4 Desktop access (`hostfs.js`)
+
+Real folders on the host, as workspaces. `workspaces.host_path` set means the
+workspace *is* that directory; `wsRoot(ws)` is the single source of truth and
+everything destructive checks `host_path` first. Rules:
+- Owner only, every route and the tool.
+- Allowlisted roots; `$HOME` and `/` are refused as too broad (they hold `.ssh`,
+  browser profiles, keyrings). Defaults are the discovered project dirs.
+- Credential denylist enforced *inside* the allowlist, in both `hostfs.js` and
+  `agent.js safePath` (`.env`, `.ssh`, `*.pem`, `.aws`, `id_rsa`, …).
+- Symlinks are realpath'd **before** the containment check, so a symlink parked
+  in an allowed root can't reach outside it.
+- Execution stays in podman with only that folder mounted at `/workspace`
+  (`:z`, not `:Z` — `:Z` would relabel the user's files for exclusive
+  container use).
+- `destroyWorkspace` and `DELETE /api/files/workspaces/:id` **detach** a desktop
+  workspace; they never `rm -rf` a real directory. The confirm dialog says so
+  instead of claiming the action can't be undone.
+
+Chat entry point is the `open_desktop_project` gate tool. There is no browse
+tool: the allowed folders and their subdirectories go into the system prompt, so
+the model always has real paths instead of guesses.
+
+### 9.5 System prompt
+
+`CODING_PANEL_POLICY` now describes the Files rail, the in-canvas preview and
+the live diffs on every turn that has any project capability. Models had been
+inventing this UI — offering localhost URLs, telling users to copy-paste code
+into an editor, pasting whole files back after writing them.
+
+Remote models may now drive project mode (`remote_agent` setting reverts it).
+They are the strongest coders available, and cost is already bounded by the
+per-provider monthly caps, the remote `max_tokens` cap and the agent step limit.
+
+### 9.6 Verification
+
+`node --input-type=module --check` on every server file, a real boot test
+(which caught a duplicate `/api/router/health` — the local llama router already
+owned that path, so provider routing lives at `/api/routing/*`), `npm run build`
+for the web, and four scripted suites: pricing/ceiling against real OpenRouter
+and per-1M payload shapes, a stub-provider sync proving the slider moves models
+in and out, the breaker/cooldown/lockout/ranking behaviour, host-path
+containment including symlink escapes, and 41 authenticated HTTP assertions
+including that a non-owner is refused desktop access and the price slider.
+
+Not verified: no live provider key was available, so the OpenRouter and NanoGPT
+quota adapters are written from their docs and exercised only against the
+normalizer — worth one real check per provider after deploy. Nothing was run
+against a real podman host, so the desktop bind-mount (`:z` labelling in
+particular) needs a smoke test on the box.
+
+## 10. Stage 14 — deliberately not done
+
+- **Host shell execution.** The agent runs commands in the sandbox with the
+  folder mounted, never directly on the host. A host shell would turn a prompt
+  injection in a README into arbitrary code execution as the user. The approval
+  flow in `agent.js` (`requestApproval`) is the hook to build on if this is ever
+  wanted; it would need a per-command approval channel for chat turns, not just
+  agent runs.
+- **OmniRoute's lossy compressors** (Caveman, LLMLingua-2, OmniGlyph, …). They
+  change what the model actually sees; `tokenSaver.js` covers the lossless
+  subset. Also skipped: OAuth/subscription providers, multi-user quota-share
+  routing, TPROXY MITM, the 104-tool MCP surface.
+- **Per-user provider keys.** Still global, owner-managed (was already §5).
+- Desktop access is per-*install*, not per-conversation: any owner chat can open
+  any allowed folder. A per-conversation opt-in would be a small addition if it
+  ever feels too loose.
