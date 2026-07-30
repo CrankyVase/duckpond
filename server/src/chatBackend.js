@@ -78,7 +78,8 @@ export async function auxModelFor(convModelId, log) {
     const rows = db.prepare(`
       SELECT pm.model_id, pm.provider_id, pm.price_in, pm.price_out
       FROM provider_models pm JOIN providers p ON p.id = pm.provider_id
-      WHERE p.enabled = 1 AND pm.enabled = 1 AND pm.price_in IS NOT NULL AND pm.price_out IS NOT NULL
+      WHERE p.enabled = 1 AND pm.enabled = 1 AND pm.filtered_out = 0
+        AND pm.price_in IS NOT NULL AND pm.price_out IS NOT NULL
       ORDER BY pm.price_in + pm.price_out ASC LIMIT 1`).all();
     if (rows.length) return `r${rows[0].provider_id}:${rows[0].model_id}`;
   } catch (err) { log?.warn({ err }, 'aux model pick failed'); }

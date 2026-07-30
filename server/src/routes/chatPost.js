@@ -29,10 +29,14 @@ import {
 import {
   cacheKey, cacheLookup, cacheStore, estimateTokens, resolveRemote,
 } from '../providers.js';
+import { isAutoId, resolveAuto } from '../omniroute.js';
+import { modelSettings } from './models.js';
+import { hostAccessEnabled, hostRoots } from '../hostfs.js';
+import { getSetting } from '../settings.js';
 import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tokenSaver.js';
 import {
-  GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
-  WIDGET_TOOLS, WIDGET_TOOL_NAMES,
+  GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, OPEN_DESKTOP_TOOL,
+  START_PROJECT_TOOL, WIDGET_TOOLS, WIDGET_TOOL_NAMES,
   buildPrompt, convForUser, dashboardCapable, filterTools, insertMessage,
   persistInterruptedReply, recordUsage, setLeaf, stripFakeImages,
 } from '../chatkit.js';
@@ -58,6 +62,25 @@ export function registerChatPost(app) {
     }
 
     const { content, parentId, regenerateFrom } = req.body ?? {};
+    // `auto*` router ids resolve to a real provider model here, at the top of
+    // the turn, so everything downstream (pricing, cache key, spend caps, the
+    // saved message's model_id) sees the model that actually ran. The
+    // conversation itself stays on `auto` and re-picks next turn.
+    let autoPick = null;
+    if (isAutoId(conv.model_id)) {
+      autoPick = resolveAuto(conv.model_id);
+      if (!autoPick) {
+        return reply.code(400).send({
+          error: conv.model_id === 'auto/free'
+            ? 'No free remote models are available. Add a provider, or raise its price limit in Settings → Providers.'
+            : 'No remote models are available. Add a provider in Settings → Providers.',
+        });
+      }
+      conv.model_id = autoPick.picked;
+      // settings follow the resolved model (its real context length matters for
+      // the context bar and auto-compaction), conversation overrides still win
+      conv._settings = { ...modelSettings(conv.model_id), ...JSON.parse(conv.settings_json) };
+    }
     // remote (paid API) models take a different path for GPU queueing, warm-up
     // probes and agent tooling — and get the cost-saver pipeline on top
     const remote = isRemoteId(conv.model_id);
@@ -105,6 +128,15 @@ export function registerChatPost(app) {
       job.listeners.delete(writePrimary);
       // intentionally no abort.abort() — generation keeps going server-side
     });
+
+    // tell the client what Auto chose, so "why did it use that model?" is
+    // answerable without opening the router dashboard
+    if (autoPick) {
+      send({
+        type: 'routed', strategy: autoPick.strategy, model: autoPick.picked,
+        message: `Auto picked ${autoPick.reason}`,
+      });
+    }
 
     let releaseGpu = null;
     let turnDelta = null;       // per-turn stream wiring (timer cleared in finally)
@@ -195,13 +227,24 @@ export function registerChatPost(app) {
         : null;
       const imgPrefs = getUserImagePrefs(req.user.id);
       const disabledTools = new Set(conv._settings.disabledTools ?? []);
-      // remote models: sandbox/agent tooling stays local-only (a paid API
-      // model driving shell loops would be a bill and a half). Inline tools —
-      // web search, widgets, memory, image gen — work fine remotely.
-      if (remote) {
+      // Remote models CAN drive project mode (stage 14). They are usually the
+      // strongest coders available, and refusing to let them touch the coding
+      // panel was the single biggest gap in the feature. The cost risk is
+      // handled where cost belongs — per-provider monthly spend caps, the
+      // remote max_tokens cap, and the agent step limit — not by hiding the
+      // tools. `remote_agent` = '0' puts the old local-only rail back.
+      const remoteAgentOk = getSetting('remote_agent') !== '0';
+      if (remote && !remoteAgentOk) {
         wsRow = null;
         disabledTools.add('start_project');
+        disabledTools.add('open_desktop_project');
       }
+      // Desktop access: owner only, feature switched on, allowlist non-empty.
+      const desktopAllowed = req.user.role === 'owner'
+        && hostAccessEnabled()
+        && hostRoots().length > 0
+        && (!remote || remoteAgentOk)
+        && !disabledTools.has('open_desktop_project');
       // capability gate (generative UI): small models fumble the nested
       // tool-call JSON a dashboard needs — don't offer or describe it to them
       if (!dashboardCapable(conv.model_id)) disabledTools.add('show_dashboard');
@@ -215,7 +258,8 @@ export function registerChatPost(app) {
       let promptMessages = constrained
         ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
         : withToolsPolicy(
-          buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
+          buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed,
+          userLoc, disabledTools, { desktopAllowed });
       // deep-research mode: prepend the directive to the leading system message
       if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
@@ -446,8 +490,9 @@ export function registerChatPost(app) {
           });
         } else {
           const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
+          const desktopTools = desktopAllowed ? [OPEN_DESKTOP_TOOL] : [];
           const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS, ...memTools]
-            : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS, ...memTools], disabledTools);
+            : [START_PROJECT_TOOL, ...desktopTools, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS, ...memTools], disabledTools);
           res = await streamChat({
             model: conv.model_id, messages: promptMessages,
             params: {
@@ -476,10 +521,12 @@ export function registerChatPost(app) {
       let searchData = null;
 
       const callNames = new Set((res.toolCalls ?? []).map((t) => t.function.name));
+      // Both gate tools belong to the agent branch, never the inline loop.
+      const wantsGate = callNames.has('start_project') || callNames.has('open_desktop_project');
       const wantsInlineTools = callNames.has('web_search') || callNames.has('fetch_page')
         || [...WIDGET_TOOL_NAMES].some((n) => callNames.has(n))
         || [...MEMORY_TOOL_NAMES].some((n) => callNames.has(n));
-      if (toolsOn && res.toolCalls?.length && wantsInlineTools && !callNames.has('start_project')) {
+      if (toolsOn && res.toolCalls?.length && wantsInlineTools && !wantsGate) {
         // inline-tools turn: web search (with live trace + citations),
         // interactive widgets, and/or memory ops, in one batched loop;
         // the model answers at the end.
@@ -507,12 +554,11 @@ export function registerChatPost(app) {
         reasoning = r.reasoning ?? reasoning;
         timings = r.timings ?? timings;
         usage = r.usage ?? usage;
-      } else if (toolsOn && !remote && res.toolCalls?.length) {
-        // the model reached for file/shell tools → this turn becomes an agent
-        // run (local models only — remote/paid models never drive the sandbox)
+      } else if (toolsOn && (!remote || remoteAgentOk) && res.toolCalls?.length) {
+        // the model reached for file/shell tools → this turn becomes an agent run
         const r = await runAgentTurn({
           conv, req, res, promptMessages, promptLeaf, wsRow, imgPrefs, disabledTools,
-          params, userLoc, send, abort, log: req.log,
+          params, userLoc, send, abort, log: req.log, desktopAllowed,
         });
         text = r.text;
         reasoning = r.reasoning ?? reasoning;

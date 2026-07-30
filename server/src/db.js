@@ -486,6 +486,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_uevents_user ON usage_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uevents_prov ON usage_events(provider_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_uevents_day ON usage_events(created_at);
 
 -- exact-match reply cache: hash(provider, model, messages, gen params) → the
@@ -504,5 +505,26 @@ CREATE TABLE IF NOT EXISTS response_cache (
   last_hit INTEGER
 );
 `);
+
+// stage 14 — API integration & desktop access
+// price_ceiling: max USD/1M output tokens a catalog sync will import.
+//   NULL = no limit (import everything), 0 = free models only. Supersedes the
+//   free_only flag, which is kept in sync so older rows keep working.
+try { db.exec('ALTER TABLE providers ADD COLUMN price_ceiling REAL'); } catch { /* exists */ }
+// last quota/credits probe for this provider (adapter-normalized JSON)
+try { db.exec('ALTER TABLE providers ADD COLUMN quota_json TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE providers ADD COLUMN quota_at INTEGER'); } catch { /* exists */ }
+// existing rows: free_only = 1 means "free models only" = a ceiling of 0
+try { db.exec('UPDATE providers SET price_ceiling = 0 WHERE free_only = 1 AND price_ceiling IS NULL'); } catch { /* new table */ }
+
+// Catalog rows the price ceiling excluded (or the provider stopped listing).
+// Distinct from `enabled` (the user's own per-model toggle) so a re-sync never
+// resurrects a model the user switched off by hand.
+try { db.exec('ALTER TABLE provider_models ADD COLUMN filtered_out INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+
+// Desktop workspaces: when host_path is set, the workspace's files ARE that
+// real host directory (bind-mounted into the sandbox) instead of a scratch dir
+// under data/workspaces. Owner-only; see hostfs.js for the allowlist.
+try { db.exec('ALTER TABLE workspaces ADD COLUMN host_path TEXT'); } catch { /* exists */ }
 
 export function nowSec() { return Math.floor(Date.now() / 1000); }

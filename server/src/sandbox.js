@@ -3,7 +3,7 @@
 // keep-id userns, read-only rootfs, dropped caps, memory/pids limits, SELinux :Z.
 // The agent writes ONLY inside /workspace (bind-mounted host dir) and its home volume.
 import { execFile } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, nowSec } from './db.js';
@@ -19,6 +19,15 @@ const PORT_BLOCK_START = 42000;
 export const PORTS_PER_WS = 10;
 
 export const wsDir = (id) => join(WS_ROOT, String(id));
+
+/**
+ * Where a workspace's files really live. A desktop workspace (host_path set,
+ * see hostfs.js) IS a real directory on the machine — everything downstream
+ * must go through here rather than assuming data/workspaces/<id>, and anything
+ * destructive must check `isHostWorkspace` first.
+ */
+export const wsRoot = (ws) => (ws?.host_path ? String(ws.host_path) : wsDir(ws.id));
+export const isHostWorkspace = (ws) => !!ws?.host_path;
 export const containerName = (id) => `duckpond-ws-${id}`;
 export const portBase = (id) => PORT_BLOCK_START + id * PORTS_PER_WS;
 
@@ -62,14 +71,27 @@ export async function ensureRunning(ws) {
     return touch(ws.id, 'running');
   }
 
-  mkdirSync(wsDir(ws.id), { recursive: true });
+  // A desktop workspace must already exist — creating it would mean we resolved
+  // the wrong path, and silently making an empty directory where the user's
+  // project was supposed to be is the worst possible failure here.
+  if (isHostWorkspace(ws)) {
+    if (!existsSync(ws.host_path)) {
+      throw new Error(`desktop folder no longer exists: ${ws.host_path}`);
+    }
+  } else {
+    mkdirSync(wsDir(ws.id), { recursive: true });
+  }
   const base = ws.port_base ?? portBase(ws.id);
   const args = [
     'run', '-d', '--name', name,
     '--userns=keep-id:uid=1000,gid=1000',
     '--read-only', '--read-only-tmpfs=false',
     '--tmpfs', '/tmp:size=256m',
-    '-v', `${wsDir(ws.id)}:/workspace:Z,rw`,
+    // desktop workspaces bind-mount the REAL directory: the agent edits the
+    // user's files, but still only ever sees this one directory as /workspace.
+    // :z (shared label) not :Z (private) for host dirs — :Z would relabel the
+    // user's own files for exclusive container use.
+    '-v', `${wsRoot(ws)}:/workspace:${isHostWorkspace(ws) ? 'z' : 'Z'},rw`,
     '-v', `${name}-home:/home/pn`,
     '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges',
@@ -131,11 +153,18 @@ export async function stopWorkspace(id) {
   db.prepare("UPDATE workspaces SET status = 'stopped' WHERE id = ?").run(id);
 }
 
-// Full teardown: container, home volume, and the host directory.
+// Full teardown: container, home volume, and the scratch directory.
+//
+// A DESKTOP workspace's directory belongs to the user, not to us: deleting the
+// workspace detaches it and must leave every file on disk untouched. The check
+// reads the row directly rather than trusting a caller-supplied flag, because
+// getting this wrong deletes someone's real project.
 export async function destroyWorkspace(id) {
   const name = containerName(id);
   await podman(['rm', '-f', '-t', '5', name], { timeout: 30_000 });
   await podman(['volume', 'rm', '-f', `${name}-home`]);
+  const row = db.prepare('SELECT host_path FROM workspaces WHERE id = ?').get(id);
+  if (row?.host_path) return; // detach only — never rm a real user directory
   rmSync(wsDir(id), { recursive: true, force: true });
 }
 

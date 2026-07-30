@@ -5,6 +5,7 @@
 // panel, not the LLM-facing tool descriptions.
 export const TOOL_CATALOG = [
   { id: 'start_project', label: 'Start project', category: 'Coding', description: 'Lets the model spin up a sandboxed workspace to build real, multi-file software instead of just answering in chat.' },
+  { id: 'open_desktop_project', label: 'Open a folder from this computer', category: 'Coding', description: 'Lets the model work on your real files — "fix my app on the desktop" edits the actual project. Owner only, limited to the folders you allow in Settings → Desktop access, and credential files are always refused.' },
   { id: 'list_files', label: 'List files', category: 'Coding', description: 'Lets the model see what files exist in a project workspace.' },
   { id: 'read_file', label: 'Read file', category: 'Coding', description: 'Lets the model open and read a file in a project workspace.' },
   { id: 'write_file', label: 'Write file', category: 'Coding', description: 'Lets the model create or edit a file in a project workspace.' },

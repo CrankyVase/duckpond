@@ -5,6 +5,7 @@ import { ctxBlurb, describeModel } from '../modelDescribe.js';
 import { cardFor, queueCardFetch } from '../modelCards.js';
 import { isRemoteId, parseRemoteId, syncStaleProviders } from '../providers.js';
 import { TOOL_CATALOG } from '../toolCatalog.js';
+import { AUTO_IDS, AUTO_STRATEGIES, routerHealth } from '../omniroute.js';
 
 // Defaults per spec §1; overridable per model, stored in model_settings.
 export const DEFAULT_SETTINGS = {
@@ -46,7 +47,7 @@ function remoteModels() {
   const rows = db.prepare(`
     SELECT pm.*, p.name AS provider_name, p.enabled AS provider_enabled
     FROM provider_models pm JOIN providers p ON p.id = pm.provider_id
-    WHERE p.enabled = 1 AND pm.enabled = 1
+    WHERE p.enabled = 1 AND pm.enabled = 1 AND pm.filtered_out = 0
     ORDER BY p.name COLLATE NOCASE, pm.model_id COLLATE NOCASE`).all();
   return rows.map((r) => {
     const id = `r${r.provider_id}:${r.model_id}`;
@@ -76,6 +77,34 @@ function remoteModels() {
   });
 }
 
+// The `auto*` router strategies, shaped like models so the picker can list them
+// in their own group. They only appear once there is at least one remote model
+// to route to — an Auto entry that can't resolve is worse than no entry.
+function autoModels() {
+  const health = routerHealth();
+  const byId = new Map(health.strategies.map((s) => [s.id, s]));
+  return AUTO_IDS.flatMap((id) => {
+    const s = byId.get(id);
+    if (!s?.resolves_to) return [];
+    return [{
+      id,
+      auto: true,
+      remote: true,
+      status: 'remote',
+      args: [],
+      ctxSize: modelSettings(s.resolves_to).ctx_size ?? null,
+      provider: { id: null, name: 'Auto router' },
+      pricing: null,
+      settings: modelSettings(id),
+      label: AUTO_STRATEGIES[id].label,
+      family: 'auto',
+      tags: ['router'],
+      blurb: `${AUTO_STRATEGIES[id].blurb} Right now: ${s.reason}. Picked fresh every turn, `
+        + 'and it fails over automatically if a provider rate-limits you.',
+    }];
+  });
+}
+
 export default async function modelRoutes(app) {
   app.addHook('preHandler', requireAuth);
 
@@ -98,7 +127,9 @@ export default async function modelRoutes(app) {
     });
     let remote = [];
     try { remote = remoteModels(); } catch (err) { req.log.warn({ err }, 'remote catalog read failed'); }
-    return [...local, ...remote];
+    let auto = [];
+    try { auto = autoModels(); } catch (err) { req.log.warn({ err }, 'auto router read failed'); }
+    return [...auto, ...local, ...remote];
   });
 
   app.post('/api/models/:id/load', async (req, reply) => {

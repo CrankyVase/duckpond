@@ -5,9 +5,11 @@
 import { db } from './db.js';
 import { listModels, streamChat } from './llama.js';
 import {
-  AGENT_TOOLS, agentLoop, bindRunAbort, createRun, createWorkspaceRow,
-  emit as emitRunEvent, execTool, finishRun, releaseRunAbort, subscribeRun,
+  AGENT_TOOLS, agentLoop, attachHostWorkspace, bindRunAbort, createRun,
+  createWorkspaceRow, emit as emitRunEvent, execTool, finishRun, listTree,
+  releaseRunAbort, subscribeRun,
 } from './routes/agent.js';
+import { projectHint } from './hostfs.js';
 import { checkUserContent } from './contentFilter.js';
 import { generateViaBridge, stepsForQuality } from './imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from './websearch.js';
@@ -172,7 +174,8 @@ export async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
 // stream a live "searching the web" trace, collect the pages it actually read
 // as citation sources, and let it write the final answer with inline links.
 export async function runInlineSearch({
-  conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, caps, send, abort, onDelta, log, spec,
+  conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, caps,
+  send, abort, onDelta, log, spec,
 }) {
   const MAX_READS = caps?.reads ?? 200;      // hard cap on fetch_page calls
   const MAX_SEARCHES = caps?.searches ?? 40; // and on web_search calls
@@ -419,7 +422,7 @@ export async function autoCompactMessages(messages, auxModel, abortSignal, log) 
 // models out). Returns { text, reasoning, timings, usage, runId }.
 export async function runAgentTurn({
   conv, req, res, promptMessages, promptLeaf, wsRow, imgPrefs, disabledTools,
-  params, userLoc, send, abort, log,
+  params, userLoc, send, abort, log, desktopAllowed = false,
 }) {
   let { reasoning, timings, usage } = res;
 // the model reached for tools → this turn becomes an agent run
@@ -430,12 +433,34 @@ let runId = null;
 // gate call: start_project(name, plan) creates the workspace; the
 // rest of the gate step is recorded AFTER the subscription below so
 // the chips/diff show up live, not just in the replay
+const GATE_NAMES = new Set(['start_project', 'open_desktop_project']);
 const gateCall = wsRow ? null
-  : (res.toolCalls.find((t) => t.function.name === 'start_project') ?? res.toolCalls[0]);
+  : (res.toolCalls.find((t) => GATE_NAMES.has(t.function.name)) ?? res.toolCalls[0]);
+const gateName = gateCall?.function?.name === 'open_desktop_project'
+  ? 'open_desktop_project' : 'start_project';
 let gargs = {};
+let desktopHint = null;
 if (gateCall) {
   try { gargs = JSON.parse(gateCall.function.arguments || '{}'); } catch { /* bad JSON from model */ }
-  wsRow = createWorkspaceRow(req.user.id, slugify(gargs.name) || wsNameFrom(promptLeaf.content));
+  if (gateName === 'open_desktop_project') {
+    // Desktop projects are owner-only and path-vetted. A refusal is normal (bad
+    // path, folder outside the allowlist) and must come back as an answer the
+    // user can act on — not a failed turn.
+    if (req.user.role !== 'owner') {
+      return { text: 'Opening folders from this machine is limited to the pond owner. I can build this in a sandboxed workspace instead — say the word.' };
+    }
+    try {
+      wsRow = attachHostWorkspace(req.user.id, gargs.path, gargs.name);
+      desktopHint = projectHint(wsRow.host_path);
+    } catch (err) {
+      return {
+        text: `I couldn't open that folder: ${String(err.message ?? err)}\n\n`
+          + 'Check the path, or add its parent under Settings → Desktop access.',
+      };
+    }
+  } else {
+    wsRow = createWorkspaceRow(req.user.id, slugify(gargs.name) || wsNameFrom(promptLeaf.content));
+  }
   db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(wsRow.id, conv.id);
 }
 const run = createRun(wsRow.id, req.user.id, conv.model_id, promptLeaf.content);
@@ -462,16 +487,38 @@ if (gateCall) {
   // rebuild the transcript under the active-project policy
   emitRunEvent(run.id, 'assistant', {
     content: res.content, thinking: res.reasoning || null,
-    tool_calls: [{ id: gateCall.id, name: 'start_project', arguments: gateCall.function.arguments }],
+    tool_calls: [{ id: gateCall.id, name: gateName, arguments: gateCall.function.arguments }],
     step: -1,
   });
-  emitRunEvent(run.id, 'tool_call', { call_id: gateCall.id, name: 'start_project', args: { name: wsRow.name }, step: -1 });
+  emitRunEvent(run.id, 'tool_call', {
+    call_id: gateCall.id, name: gateName, step: -1,
+    args: gateName === 'open_desktop_project'
+      ? { path: wsRow.host_path } : { name: wsRow.name },
+  });
+  // A desktop project is someone's existing work: only drop a PLAN.md in if
+  // there isn't one, and never for an empty plan.
+  let planWritten = false;
   if (gargs.plan?.trim()) {
-    await execTool(run, wsRow, 'write_file', { path: 'PLAN.md', content: gargs.plan.trim() + '\n' });
+    const planExists = gateName === 'open_desktop_project'
+      && listTree(wsRow).some((f) => f.path === 'PLAN.md');
+    if (!planExists) {
+      await execTool(run, wsRow, 'write_file', { path: 'PLAN.md', content: gargs.plan.trim() + '\n' });
+      planWritten = true;
+    }
   }
-  const gateResult = `Project workspace "${wsRow.name}" created${gargs.plan?.trim() ? ' and your plan saved as PLAN.md' : ''}. You now have list_files, read_file, write_file and run_command — implement the plan, then verify it by running it.`;
-  emitRunEvent(run.id, 'tool_result', { call_id: gateCall.id, name: 'start_project', step: -1, result: gateResult });
-  loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
+  const gateResult = gateName === 'open_desktop_project'
+    ? `Opened the user's real folder ${wsRow.host_path} as this conversation's project`
+      + `${desktopHint?.git ? ' (a git repo' : ''}${desktopHint?.kinds?.length
+        ? `${desktopHint.git ? ', ' : ' ('}${desktopHint.kinds.join('/')} project)` : desktopHint?.git ? ')' : ''}`
+      + `${planWritten ? '. Your plan was saved as PLAN.md' : ''}. `
+      + 'These are REAL files the user cares about: read before you edit, prefer edit_file over rewriting, '
+      + 'and do not delete or restructure anything they did not ask you to. '
+      + 'You now have list_files, read_file, write_file, edit_file and run_command (the shell runs in a container '
+      + 'with this folder mounted at /workspace, so builds and tests work).'
+    : `Project workspace "${wsRow.name}" created${planWritten ? ' and your plan saved as PLAN.md' : ''}. You now have list_files, read_file, write_file and run_command — implement the plan, then verify it by running it.`;
+  emitRunEvent(run.id, 'tool_result', { call_id: gateCall.id, name: gateName, step: -1, result: gateResult });
+  loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed,
+    userLoc, disabledTools, { desktopAllowed });
   loopMessages.push({ role: 'assistant', content: res.content ?? '', tool_calls: [gateCall] });
   loopMessages.push({ role: 'tool', tool_call_id: gateCall.id, content: gateResult });
   firstResult = null; // the loop streams fresh with the full toolset

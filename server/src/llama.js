@@ -9,8 +9,11 @@
 import { execFile } from 'node:child_process';
 import {
   estimateTokens, fallbackCandidates, isRemoteId, isRetryableRemoteError,
-  resolveRemote, streamRemote,
+  parseRemoteId, remoteId, resolveRemote, streamRemote,
 } from './providers.js';
+import {
+  isAutoId, modelAvailable, noteFailure, noteSuccess, rankCandidates, resolveAuto,
+} from './omniroute.js';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
 
@@ -26,46 +29,111 @@ const REMOTE_MAX_TOKENS = 4096;
 // the wait and the chance of burning through a whole chain on a dead provider
 const REMOTE_FALLBACK_MAX = 3;
 
-async function remoteCall({ model, messages, params, onDelta, abortSignal, onEvent }) {
-  const r = resolveRemote(model);
-  if (!r) throw new Error(`remote model unavailable (provider deleted or disabled): ${model}`);
-  if (r.model && !r.model.enabled) throw new Error(`model disabled in the Providers panel: ${r.modelId}`);
-  const mapped = { ...params };
-  for (const k of LLAMA_ONLY_PARAMS) delete mapped[k];
-  if (mapped.max_tokens == null || Number(mapped.max_tokens) < 0) {
-    mapped.max_tokens = Number(r.model?.max_output) > 0
-      ? Math.min(Number(r.model.max_output), REMOTE_MAX_TOKENS)
-      : REMOTE_MAX_TOKENS;
+/**
+ * The ordered list of remote model ids to try for this turn.
+ *  - an `auto*` id is resolved by the router's scoring (across ALL providers)
+ *  - a concrete id leads its own provider's hand-written fallback chain, then
+ *    picks up router-ranked models from other providers so a fully cooling-down
+ *    provider can still hand the turn off instead of failing
+ */
+function remoteChainFor(model) {
+  if (isAutoId(model)) {
+    const pick = resolveAuto(model, { max: REMOTE_FALLBACK_MAX });
+    if (!pick) {
+      throw new Error(model === 'auto/free'
+        ? 'no free remote models available — add a provider or drag its price slider up'
+        : 'no remote models available — add a provider in Settings → Providers');
+    }
+    return { ids: pick.chain, auto: pick };
   }
-  // Fallback chain: a transient failure transparently retries on the next
-  // enabled model in the provider's chain (OmniRoute-style). Only while
-  // nothing has streamed yet — a half-delivered reply never restarts.
-  const candidates = [r.modelId, ...fallbackCandidates(r.providerId, r.modelId)]
-    .slice(0, REMOTE_FALLBACK_MAX);
+  const r = parseRemoteId(model);
+  if (!r) return { ids: [model], auto: null };
+  const own = [model, ...fallbackCandidates(r.providerId, r.modelId).map((m) => remoteId(r.providerId, m))];
+  // cross-provider tail: healthy alternatives the router likes, minus anything
+  // already in the chain
+  const seen = new Set(own);
+  const tail = rankCandidates('auto')
+    .filter((c) => c.available && !seen.has(c.id))
+    .map((c) => c.id);
+  return { ids: [...own, ...tail].slice(0, REMOTE_FALLBACK_MAX), auto: null };
+}
+
+async function remoteCall({ model, messages, params, onDelta, abortSignal, onEvent }) {
+  const { ids, auto } = remoteChainFor(model);
+  if (auto) {
+    onEvent?.({ type: 'routed', strategy: auto.strategy, to: ids[0], reason: auto.reason });
+  }
   let lastErr = null;
-  for (let i = 0; i < candidates.length; i++) {
-    const modelId = candidates[i];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    const r = resolveRemote(id);
+    if (!r) {
+      lastErr = new Error(`remote model unavailable (provider deleted or disabled): ${id}`);
+      continue;
+    }
+    if (r.model && !r.model.enabled) {
+      lastErr = new Error(`model disabled in the Providers panel: ${r.modelId}`);
+      continue;
+    }
+    if (r.model?.filtered_out) {
+      lastErr = new Error(`model is above this provider's price limit: ${r.modelId}`);
+      continue;
+    }
+    // resilience layer: skip a model whose provider breaker is open, whose key
+    // is cooling down, or that is itself rate-limited — unless it's the only
+    // thing left to try, in which case attempt it anyway rather than refuse.
+    const health = modelAvailable(r.providerId, r.modelId);
+    const lastResort = i === ids.length - 1 && lastErr == null;
+    if (!health.ok && !lastResort) {
+      lastErr = new Error(`${r.provider.name}/${r.modelId}: ${health.reason}`
+        + (health.retryInMs ? ` (retry in ${Math.ceil(health.retryInMs / 1000)}s)` : ''));
+      lastErr.status = 429;
+      if (i < ids.length - 1) {
+        onEvent?.({ type: 'fallback', from: id, to: ids[i + 1], reason: health.reason });
+      }
+      continue;
+    }
+
+    const mapped = { ...params };
+    for (const k of LLAMA_ONLY_PARAMS) delete mapped[k];
+    if (mapped.max_tokens == null || Number(mapped.max_tokens) < 0) {
+      mapped.max_tokens = Number(r.model?.max_output) > 0
+        ? Math.min(Number(r.model.max_output), REMOTE_MAX_TOKENS)
+        : REMOTE_MAX_TOKENS;
+    }
+    // Only retry while nothing has streamed yet — a half-delivered reply never
+    // restarts on another model.
     let emitted = false;
+    let firstByteAt = null;
     const trackDelta = (chunk, meta) => {
-      if (chunk || meta?.reasoning || meta?.toolFrag) emitted = true;
+      if (chunk || meta?.reasoning || meta?.toolFrag) {
+        emitted = true;
+        firstByteAt ??= Date.now();
+      }
       return onDelta?.(chunk, meta);
     };
+    const started = Date.now();
     try {
-      return await streamRemote({
-        provider: r.provider, model: modelId, messages,
+      const out = await streamRemote({
+        provider: r.provider, model: r.modelId, messages,
         params: mapped, onDelta: trackDelta, abortSignal,
       });
+      // time to first token is the latency users feel and the only figure that
+      // compares fairly across models with different reply lengths
+      noteSuccess(r.providerId, r.modelId, (firstByteAt ?? Date.now()) - started);
+      return out;
     } catch (err) {
       lastErr = err;
-      const more = i < candidates.length - 1;
+      if (!abortSignal?.aborted) noteFailure(r.providerId, r.modelId, err);
+      const more = i < ids.length - 1;
       if (!more || emitted || abortSignal?.aborted || !isRetryableRemoteError(err)) break;
       onEvent?.({
-        type: 'fallback', from: modelId, to: candidates[i + 1],
+        type: 'fallback', from: id, to: ids[i + 1],
         reason: String(err.message ?? err).slice(0, 200),
       });
     }
   }
-  throw lastErr;
+  throw lastErr ?? new Error(`no usable remote model for ${model}`);
 }
 
 // Per-model activity for the idle reaper: models unload from VRAM after
@@ -127,7 +195,7 @@ export const unloadModel = (model) =>
 export async function countInputTokens(model, messages) {
   // remote endpoints have no token counter — chars/4 estimate is all we need
   // for the context bar and auto-compaction pressure check
-  if (isRemoteId(model)) return estimateTokens(messages);
+  if (isRemoteId(model) || isAutoId(model)) return estimateTokens(messages);
   markUse(model);
   const r = await jfetch('/v1/chat/completions/input_tokens', {
     method: 'POST',
@@ -142,7 +210,10 @@ export async function countInputTokens(model, messages) {
 // onEvent: optional side-channel ({type:'fallback', from, to, reason}) so
 // callers can toast/log chain hops; every caller gets fallback either way.
 export async function streamChat({ model, messages, params = {}, onDelta, abortSignal, onEvent }) {
-  if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal, onEvent });
+  // `auto*` ids are remote too — the router picks the concrete model per turn
+  if (isRemoteId(model) || isAutoId(model)) {
+    return remoteCall({ model, messages, params, onDelta, abortSignal, onEvent });
+  }
   const act = markUse(model);
   act.active++;
   try {

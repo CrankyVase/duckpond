@@ -35,7 +35,11 @@ function listExportFiles(userId) {
     .sort((a, b) => b.created_at - a.created_at);
 }
 
-function workspaceTreeBytes(wsId) {
+function workspaceTreeBytes(wsId, hostPath = null) {
+  // Desktop workspaces are not ours to measure: their bytes are the user's own
+  // files, already on their disk, and walking a big repo on every Files render
+  // would be slow for a number that shouldn't count against the pond quota.
+  if (hostPath) return { bytes: 0, files: 0, host: true };
   const root = join(WS_ROOT, String(wsId));
   if (!existsSync(root)) return { bytes: 0, files: 0 };
   let bytes = 0;
@@ -118,17 +122,18 @@ export default async function fileRoutes(app) {
     const exports = listExportFiles(uid);
 
     const workspaces = db.prepare(`
-      SELECT id, name, status, created_at, last_used FROM workspaces
+      SELECT id, name, status, host_path, created_at, last_used FROM workspaces
       WHERE user_id = ? ORDER BY last_used DESC`).all(uid)
       .map((w) => {
-        const { bytes, files } = workspaceTreeBytes(w.id);
+        const { bytes, files } = workspaceTreeBytes(w.id, w.host_path);
         return {
           kind: 'workspace',
           id: w.id,
           name: w.name,
           status: w.status,
+          host_path: w.host_path ?? null,
           bytes,
-          size_label: fmtBytes(bytes),
+          size_label: w.host_path ? 'on your disk' : fmtBytes(bytes),
           files,
           created_at: w.created_at,
           last_used: w.last_used,
@@ -158,6 +163,9 @@ export default async function fileRoutes(app) {
     // drop container soft-state; files on disk go next
     db.prepare('UPDATE conversations SET workspace_id = NULL WHERE workspace_id = ?').run(id);
     db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
+    // A desktop workspace points at the user's own directory — deleting the
+    // workspace detaches it and leaves every file exactly where it was.
+    if (ws.host_path) return { ok: true, detached: ws.host_path };
     try { rmSync(join(WS_ROOT, String(id)), { recursive: true, force: true }); } catch { /* */ }
     return { ok: true };
   });

@@ -63,7 +63,7 @@ export function fallbackCandidates(providerId, modelId) {
     .filter((id) => id && id !== modelId);
   return ordered.filter((id) => {
     const row = providerModelFor(providerId, id);
-    return row && row.enabled;
+    return row && row.enabled && !row.filtered_out;
   });
 }
 
@@ -77,10 +77,13 @@ export const isFreeModelId = (id) => /(:|-)free$/i.test(String(id ?? ''));
 export const PROVIDER_PRESETS = [
   { key: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1',
     freeOnly: false, keyUrl: 'https://openrouter.ai/keys',
-    blurb: 'One key for 400+ models. Lots of :free variants — flip on Free-only import to get just those.' },
+    blurb: 'One key for 400+ models, with real per-token pricing in the catalog and live credit/quota reporting. Drag the price slider to Free to import just the :free variants.' },
+  { key: 'nano-gpt', name: 'NanoGPT', baseUrl: 'https://nano-gpt.com/api/v1',
+    freeOnly: false, keyUrl: 'https://nano-gpt.com/api',
+    blurb: 'Pay-as-you-go access to 1,000+ models, no subscription. Balance shows up in the quota line.' },
   { key: 'opencode-zen', name: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/v1',
     freeOnly: true, keyUrl: 'https://opencode.ai/zen',
-    blurb: 'Curated coding models with several genuinely free ones (all chat/completions-compatible). Free-only import defaults on.' },
+    blurb: 'Curated coding models, several of them free. Price slider defaults to Free.' },
   { key: 'nvidia', name: 'NVIDIA Build', baseUrl: 'https://integrate.api.nvidia.com/v1',
     freeOnly: false, keyUrl: 'https://build.nvidia.com/',
     blurb: '100+ models on NVIDIA-hosted endpoints, many free with one key.' },
@@ -149,52 +152,73 @@ export function knownMeta(modelId) {
   return { price_in: null, price_out: null, price_cached_in: null, context_length: null };
 }
 
-/** Pull context/pricing out of the many /models response shapes in the wild. */
+// A reported price of exactly 0 is REAL information ("this model is free") and
+// must never be confused with "the provider told us nothing". Sizes still want
+// a positive number — a 0-token context window is nonsense.
+const posNum = (...vals) => {
+  for (const v of vals) {
+    if (v === null || v === undefined || v === '') continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+};
+const priceNum = (...vals) => {
+  for (const v of vals) {
+    if (v === null || v === undefined || v === '') continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
+};
+// Per-token USD (OpenRouter: "0.0000003") vs already-per-1M ("0.3"). Below a
+// tenth of a cent per token nothing real is priced per 1M, so that's per-token.
+// Zero is unit-agnostic and passes through untouched.
+const per1m = (v) => (v == null || v === 0 ? v : (v < 0.001 ? v * 1e6 : v));
+
+/**
+ * Pull context/pricing out of the many /models response shapes in the wild.
+ * Returns the normalized row plus two facts the free filter needs:
+ *   reported  — the provider gave us real pricing for this model
+ *   free      — the provider reported both prices as exactly 0
+ */
 export function normalizeModelMeta(modelId, raw) {
   const m = raw ?? {};
-  const num = (...vals) => {
-    for (const v of vals) {
-      const n = Number(v);
-      if (Number.isFinite(n) && n > 0) return n;
-    }
-    return null;
-  };
   // context length: OpenRouter, nano-gpt-ish, Azure-ish, generic
-  let context = num(
+  const context = posNum(
     m.context_length, m.context_window, m.contextWindow, m.max_context_tokens,
     m.max_context_length, m.limits?.context, m.limits?.context_window,
     m.top_provider?.context_length, m.n_ctx, m.ctx, m.max_input_tokens,
   );
-  const maxOutput = num(
+  const maxOutput = posNum(
     m.max_output_tokens, m.max_completion_tokens, m.maxOutputTokens,
     m.top_provider?.max_completion_tokens, m.limits?.output,
   );
   // pricing: OpenRouter-style per-token USD strings; per-1M shapes; nano-gpt-ish
-  let priceIn = null;
-  let priceOut = null;
-  let priceCached = null;
-  const perToken = num(m.pricing?.prompt, m.pricing?.input);
-  const perTokenOut = num(m.pricing?.completion, m.pricing?.output);
-  if (perToken != null && perToken < 0.001) {           // clearly per-token USD
-    priceIn = perToken * 1e6;
-  } else if (perToken != null) {
-    priceIn = perToken;                                  // already per-1M
-  }
-  if (perTokenOut != null && perTokenOut < 0.001) priceOut = perTokenOut * 1e6;
-  else if (perTokenOut != null) priceOut = perTokenOut;
-  const per1mIn = num(
+  let priceIn = per1m(priceNum(m.pricing?.prompt, m.pricing?.input, m.pricing?.input_tokens));
+  let priceOut = per1m(priceNum(m.pricing?.completion, m.pricing?.output, m.pricing?.output_tokens));
+  const per1mIn = priceNum(
     m.input_cost_per_1m, m.prompt_cost_per_1m, m.price_in,
     m.pricing?.input_per_1m, m.pricing?.prompt_per_1m, m.cost?.input,
+    m.cost_per_million_input_tokens,
   );
-  const per1mOut = num(
+  const per1mOut = priceNum(
     m.output_cost_per_1m, m.completion_cost_per_1m, m.price_out,
     m.pricing?.output_per_1m, m.pricing?.completion_per_1m, m.cost?.output,
+    m.cost_per_million_output_tokens,
   );
   if (per1mIn != null) priceIn = per1mIn;
   if (per1mOut != null) priceOut = per1mOut;
-  const cachedTok = num(m.pricing?.prompt_cached, m.pricing?.cached_input, m.cached_cost_per_1m);
-  if (cachedTok != null) priceCached = cachedTok < 0.001 ? cachedTok * 1e6 : cachedTok;
+  const priceCached = per1m(priceNum(
+    m.pricing?.prompt_cached, m.pricing?.cached_input, m.pricing?.input_cache_read,
+    m.cached_cost_per_1m,
+  ));
 
+  const reported = priceIn != null || priceOut != null;
+  // "free" needs BOTH sides at zero. A model with a reported 0 input price and
+  // an unreported output price is not known-free — assuming otherwise is how
+  // you accidentally import a paid model into a free-only catalog.
+  const free = priceIn === 0 && priceOut === 0;
   const known = knownMeta(modelId);
   return {
     context_length: context ?? known.context_length,
@@ -202,12 +226,53 @@ export function normalizeModelMeta(modelId, raw) {
     price_in: priceIn ?? known.price_in,
     price_out: priceOut ?? known.price_out,
     price_cached_in: priceCached ?? known.price_cached_in,
+    reported,
+    free,
   };
+}
+
+// ---------- price ceiling (the "free ←→ any price" slider) ----------
+
+/**
+ * Does this model fit under `ceiling` USD per 1M output tokens?
+ *   null  → no limit, everything passes
+ *   0     → free only: a `:free`/`-free` id, or both prices reported as 0
+ *   n > 0 → the dearer of in/out must be ≤ n; unpriced models are let through
+ *           (they'd otherwise vanish from providers that publish no pricing)
+ */
+export function withinCeiling(modelId, meta, ceiling) {
+  if (ceiling == null) return true;
+  const limit = Number(ceiling);
+  if (!Number.isFinite(limit) || limit < 0) return true;
+  if (limit === 0) return isFreeModelId(modelId) || meta.free === true;
+  if (isFreeModelId(modelId) || meta.free === true) return true;
+  const pin = meta.price_in == null ? null : Number(meta.price_in);
+  const pout = meta.price_out == null ? null : Number(meta.price_out);
+  if (pin == null && pout == null) return true; // price entirely unknown — don't hide it
+  return Math.max(pin ?? 0, pout ?? 0) <= limit;
 }
 
 // ---------- HTTP helpers ----------
 
 const stripSlash = (u) => String(u ?? '').trim().replace(/\/+$/, '');
+
+/**
+ * How long the provider asked us to wait, from the response headers or the
+ * error body. Kept on the thrown error so omniroute.js can honour it instead of
+ * guessing a backoff. Header spellings differ per provider; the JSON body
+ * variants show up on OpenAI-compatible gateways that proxy someone else's 429.
+ */
+function retryAfterFrom(res, bodyText) {
+  const h = res.headers;
+  const header = h?.get?.('retry-after') ?? h?.get?.('x-ratelimit-reset-after')
+    ?? h?.get?.('x-ratelimit-reset-requests') ?? null;
+  if (header) return header;
+  if (!bodyText) return null;
+  try {
+    const j = JSON.parse(bodyText);
+    return j?.error?.retry_after ?? j?.retry_after ?? j?.error?.metadata?.retry_after ?? null;
+  } catch { return null; }
+}
 
 async function jfetch(base, path, apiKey, { method = 'GET', body, timeoutMs = 20_000 } = {}) {
   const res = await fetch(stripSlash(base) + path, {
@@ -223,6 +288,7 @@ async function jfetch(base, path, apiKey, { method = 'GET', body, timeoutMs = 20
     const text = await res.text().catch(() => '');
     const err = new Error(`HTTP ${res.status} from ${stripSlash(base)}${path}: ${text.slice(0, 300)}`);
     err.status = res.status; // lets the fallback chain tell transient from fatal
+    err.retryAfter = retryAfterFrom(res, text);
     throw err;
   }
   return res;
@@ -253,30 +319,35 @@ export async function syncProviderModels(providerId, log) {
     let list = (Array.isArray(j?.data) ? j.data : Array.isArray(j) ? j : [])
       .filter((m) => m && typeof m.id === 'string');
 
-    // Free-only import mode: keep just models we can tell are free — a
-    // :free/-free id suffix always counts (OpenRouter variants, Zen's free
-    // tier), otherwise both prices must be reported as exactly 0. When the
-    // provider reports no pricing at all we can only go by the id suffix.
-    if (provider.free_only) {
-      const metas = list.map((m) => [m, normalizeModelMeta(m.id, m)]);
-      const anyPriced = metas.some(([, meta]) => meta.price_in != null || meta.price_out != null);
-      list = metas
-        .filter(([m, meta]) => isFreeModelId(m.id)
-          || (anyPriced && Number(meta.price_in) === 0 && Number(meta.price_out) === 0))
-        .map(([m]) => m);
+    // Price ceiling (the slider): drop models dearer than the limit before they
+    // ever reach the catalog. NULL keeps everything, 0 is free-only. free_only
+    // is the legacy spelling of a 0 ceiling.
+    const ceiling = provider.price_ceiling != null ? Number(provider.price_ceiling)
+      : (provider.free_only ? 0 : null);
+    const totalSeen = list.length;
+    if (ceiling != null) {
+      list = list.filter((m) => withinCeiling(m.id, normalizeModelMeta(m.id, m), ceiling));
     }
+    const dropped = totalSeen - list.length;
 
+    // A reported price ALWAYS wins over what the row already holds — otherwise
+    // a model that turned paid keeps its stale 0 forever (COALESCE would prefer
+    // the old value). Only unreported fields fall back to what we already knew.
     const upsert = db.prepare(`
       INSERT INTO provider_models
-        (provider_id, model_id, context_length, max_output, price_in, price_out, price_cached_in, raw_json, fetched_at)
-      VALUES (@pid, @mid, @ctx, @maxOut, @pin, @pout, @pcache, @raw, unixepoch())
+        (provider_id, model_id, context_length, max_output, price_in, price_out,
+         price_cached_in, raw_json, filtered_out, fetched_at)
+      VALUES (@pid, @mid, @ctx, @maxOut, @pin, @pout, @pcache, @raw, 0, unixepoch())
       ON CONFLICT(provider_id, model_id) DO UPDATE SET
         context_length = COALESCE(excluded.context_length, provider_models.context_length),
         max_output = COALESCE(excluded.max_output, provider_models.max_output),
-        price_in = COALESCE(excluded.price_in, provider_models.price_in),
-        price_out = COALESCE(excluded.price_out, provider_models.price_out),
+        price_in = CASE WHEN @reported THEN excluded.price_in
+                        ELSE COALESCE(provider_models.price_in, excluded.price_in) END,
+        price_out = CASE WHEN @reported THEN excluded.price_out
+                         ELSE COALESCE(provider_models.price_out, excluded.price_out) END,
         price_cached_in = COALESCE(excluded.price_cached_in, provider_models.price_cached_in),
         raw_json = excluded.raw_json,
+        filtered_out = 0,
         fetched_at = unixepoch()`);
     const seen = [];
     const tx = db.transaction(() => {
@@ -286,17 +357,29 @@ export async function syncProviderModels(providerId, log) {
           pid: providerId, mid: m.id,
           ctx: meta.context_length, maxOut: meta.max_output,
           pin: meta.price_in, pout: meta.price_out, pcache: meta.price_cached_in,
+          reported: meta.reported ? 1 : 0,
           raw: JSON.stringify(m).slice(0, 8000),
         });
         seen.push(m.id);
+      }
+      // Anything the ceiling excluded (or the provider stopped listing) is
+      // flagged rather than deleted: hand-tuned prices and the enable/disable
+      // choice survive, but the model leaves the picker until it qualifies
+      // again. `filtered_out` is deliberately separate from `enabled` so
+      // re-syncing never silently re-enables what the user turned off.
+      const keep = new Set(seen);
+      for (const row of db.prepare('SELECT model_id FROM provider_models WHERE provider_id = ?').all(providerId)) {
+        if (keep.has(row.model_id)) continue;
+        db.prepare('UPDATE provider_models SET filtered_out = 1 WHERE provider_id = ? AND model_id = ?')
+          .run(providerId, row.model_id);
       }
     });
     tx();
     db.prepare(
       'UPDATE providers SET last_sync_at = unixepoch(), last_sync_count = ?, last_error = NULL WHERE id = ?',
     ).run(seen.length, providerId);
-    log?.info({ provider: provider.name, models: seen.length }, 'provider catalog synced');
-    return { ok: true, count: seen.length };
+    log?.info({ provider: provider.name, models: seen.length, dropped }, 'provider catalog synced');
+    return { ok: true, count: seen.length, dropped, seen: totalSeen };
   } catch (err) {
     db.prepare('UPDATE providers SET last_error = ? WHERE id = ?')
       .run(String(err.message ?? err).slice(0, 500), providerId);
@@ -367,6 +450,7 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
     const body = await res.text().catch(() => '');
     const err = new Error(`${provider.name} chat ${res.status}: ${body.slice(0, 400)}`);
     err.status = res.status; // lets the fallback chain tell transient from fatal
+    err.retryAfter = retryAfterFrom(res, body);
     throw err;
   }
 

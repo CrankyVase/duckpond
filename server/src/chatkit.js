@@ -214,6 +214,22 @@ export const START_PROJECT_TOOL = { type: 'function', function: {
   }, required: ['name', 'plan'] },
 } };
 
+// The second way into project mode: attach a REAL folder from the machine
+// DuckPond runs on, so "fix the bug in my app on my desktop" works on the
+// actual files. Owner-only and allowlisted — see hostfs.js. Never offered to
+// other users, so a model that can see this tool is already cleared to use it.
+// It needs no companion "browse" tool: the allowed folders and their contents
+// are listed in the system prompt (chatpolicy.js DESKTOP_POLICY), so the model
+// always has real paths to work from instead of guesses.
+export const OPEN_DESKTOP_TOOL = { type: 'function', function: {
+  name: 'open_desktop_project',
+  description: "Open one of the user's REAL folders on this machine as the project for this conversation, then work on those actual files with the file and shell tools. Use this when the user refers to something that already exists on their computer (\"my app on the desktop\", \"the project in ~/code/foo\", \"fix my website\"). The folder must be inside an allowed directory; if the call is refused, tell the user what the tool said instead of guessing another path. Prefer list_desktop first when you are not certain of the exact path — do NOT invent one.",
+  parameters: { type: 'object', properties: {
+    path: { type: 'string', description: 'absolute path to the folder, taken from the list in your system prompt (~ is allowed)' },
+    plan: { type: 'string', description: 'optional short plan for what you are about to change. Written to PLAN.md only if the folder has no PLAN.md already — never overwrite the user\'s own file.' },
+  }, required: ['path'] },
+} };
+
 // Widget tools: each returns a typed object we render as an interactive card in
 // the chat and persist as a ```duckwidget``` block. More types come in later phases.
 const SHOW_WEATHER_TOOL = { type: 'function', function: {

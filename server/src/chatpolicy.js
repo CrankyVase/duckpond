@@ -1,8 +1,10 @@
 // Turn policies + speculative tool calling: the system-prompt blocks that
 // describe tools to the model, and the stream watcher that pre-fires search /
 // fetch calls as soon as their argument finishes streaming.
+import { readdirSync } from 'node:fs';
 import { listTree } from './routes/agent.js';
 import { fetchPageStructured, searchWebStructured } from './websearch.js';
+import { hostRoots } from './hostfs.js';
 
 // ---------- speculative tool calling ----------
 // Tool-call JSON streams token by token, and for the latency-bound tools the
@@ -91,6 +93,20 @@ function widgetPolicyFor(disabled) {
   return `## Widgets\nYou can drop interactive cards right into the chat:\n${lines.join('\n')}\nBe proactive with these — don't wait to be asked for "the widget". The moment you're about to state a fact one of these covers, call the tool instead of just typing the number: a temperature or forecast → show_weather; a coin price → show_crypto; an exchange rate → show_currency; a package version/downloads → show_npm; a repo's stars/language → show_github_repo; a word's definition → show_dictionary; a place, address, or business → show_map; a date you're counting down to → show_countdown; a set of hex colors → show_color_palette; a small table of numbers or comparisons → show_table; a y=f(x) relationship → show_math_plot. Recommending a restaurant, landmark, or repo also earns its card the same way. The card renders for the user automatically, so don't paste a link, id, or coordinates in your text — just call the tool, then add one short sentence around it. You may use more than one in a reply, and it's fine to lead with the tool call before you've written anything.`;
 }
 
+// The coding panel itself. Models kept describing DuckPond's project mode
+// wrongly — promising hosted preview URLs, telling users to "download the zip
+// and run npm start", or claiming they couldn't show code at all — because
+// nothing in the prompt ever described the UI the user is actually looking at.
+// This block is included on EVERY turn that has any project capability, so the
+// model can talk about the panel accurately even before entering project mode.
+const CODING_PANEL_POLICY = `## The coding panel (what the user sees)
+DuckPond has a real coding UI, not just chat. When a conversation is in project mode the user gets a Files rail beside the thread:
+- a file tree of the project, with every file clickable and editable by them directly
+- an in-canvas preview for HTML/CSS/JS and images — they see the page render inside DuckPond, with no server and no URL
+- a live run feed: each of your tool calls appears as a step, shell output is shown, and every file you write or edit renders as a real before/after diff they can read
+- a download button per file, and the whole project stays put between turns and between chats
+Talk about it accurately: the user can already see the files, the diffs, and the preview — so do not paste an entire file back into chat after writing it, do not tell them to copy-paste code into an editor, and never offer a hosted link or a localhost URL, because there is no server and no port. "Open the preview in the Files rail" is the right instruction; "run npm start and visit localhost:3000" is not.`;
+
 const GATE_POLICY = `## Project mode
 You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git), saves your plan as PLAN.md, and unlocks file and shell tools.
 
@@ -120,6 +136,44 @@ Rules:
 - NEVER start long-running servers or bind ports. No dev servers. Write static HTML/CSS/JS for UIs; the user previews them in-canvas and can download files. Verify with one-shot commands that exit (node, python, test runners, build tools that finish).
 - Package installs pause for the user's approval and may be denied; if denied, adapt.
 - After tool work, finish with a short plain-text summary: what you built, how you verified it, what could come next. No tool calls in that final message.`;
+
+/**
+ * Desktop access, for the owner only. The model gets the REAL allowed folders
+ * and their immediate contents inline, which is why no browse tool is needed:
+ * it can name an exact path on the first try instead of guessing one and being
+ * refused. Two readdir calls' worth of work, once per turn.
+ */
+function desktopPolicy() {
+  let roots = [];
+  try { roots = hostRoots(); } catch { return null; }
+  if (!roots.length) return null;
+  const lines = [];
+  for (const root of roots.slice(0, 8)) {
+    let kids = [];
+    try {
+      kids = readdirSync(root, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .map((e) => e.name)
+        .sort()
+        .slice(0, 25);
+    } catch { continue; } // root was removed or is unreadable — skip it silently
+    lines.push(`- ${root}${kids.length ? `\n    contains: ${kids.join(', ')}` : ' (no subfolders)'}`);
+  }
+  if (!lines.length) return null;
+  return `## The user's own files on this machine
+DuckPond runs on the user's own computer, and you can work directly on these real folders:
+${lines.join('\n')}
+
+When the user talks about something that already exists on their machine — "my app on the desktop", "the site in ~/code/foo", "fix the bug in my project" — call open_desktop_project with the exact absolute path from the list above, then use the normal file and shell tools on it. Nothing outside those folders is reachable, and credential files (.env, .ssh, keys, tokens) are refused even inside them; if a path is refused, tell the user what the error said instead of trying variations.
+
+These are REAL files that the user cares about and has not backed up for you:
+- Read before you edit. Always.
+- Use edit_file with exact search/replace blocks. Do NOT rewrite a whole file to change a few lines, and never replace a file you have not read.
+- Change only what they asked for. No opportunistic refactors, no reformatting, no renaming, no deleting files, no reorganising directories.
+- Never run destructive shell commands (rm -rf, git reset --hard, git clean, checkout over uncommitted work, force pushes). If the job genuinely needs one, stop and ask first.
+- If the folder is a git repo, say so and suggest they commit before you start on anything large.
+The shell runs inside a container with just this folder mounted at /workspace, so builds and tests work normally, and nothing else on their computer is reachable from it.`;
+}
 
 const SEARCH_POLICY = `## Web search
 You can search the web with web_search and read pages with fetch_page. Use them for current events, prices, versions, library docs, or any fact you are not confident about — never guess when you can check.
@@ -163,15 +217,26 @@ export function slugify(name) {
     .replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-export function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, userLoc = null, disabled = EMPTY_DISABLED) {
+export function withToolsPolicy(
+  promptMessages, wsRow, imageAllowed = true, userLoc = null, disabled = EMPTY_DISABLED,
+  { desktopAllowed = false } = {},
+) {
   const locPolicy = userLoc
     ? `## User location\nAn approximate location is available for the user (lat ${userLoc.lat}, lon ${userLoc.lon}, near ${userLoc.label ?? 'their area'}). You may omit place/query in show_weather or show_map to use it — do not ask them where they are.`
     : `## User location\nNo location is available for the user right now. Never omit place/query in show_weather or show_map expecting it to fall back to "where they are" — it will fail. Ask what place they mean.`;
   const showGate = !wsRow && !disabled.has('start_project');
   const showImage = imageAllowed && !disabled.has('generate_image');
   const showSearch = !disabled.has('web_search');
+  // The panel description goes in whenever this turn has ANY project
+  // capability — in an active project, at the gate, or with desktop access —
+  // so the model never has to invent what the coding UI looks like.
+  const showPanel = !!wsRow || showGate || desktopAllowed;
   const parts = [
     wsRow ? ACTIVE_POLICY : (showGate ? GATE_POLICY : null),
+    showPanel ? CODING_PANEL_POLICY : null,
+    // once a desktop folder is open, ACTIVE_POLICY plus the desktop rules below
+    // both apply; before that, this is what tells the model the folders exist
+    desktopAllowed || wsRow?.host_path ? desktopPolicy() : null,
     showImage ? IMAGE_POLICY : null,
     showSearch ? SEARCH_POLICY : null,
     widgetPolicyFor(disabled),
@@ -180,7 +245,9 @@ export function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, user
   if (wsRow) {
     const files = listTree(wsRow).slice(0, 60)
       .map((f) => (f.dir ? `${f.path}/` : f.path)).join('\n');
-    parts.push(`Current workspace files:\n${files || '(empty)'}`);
+    parts.push(wsRow.host_path
+      ? `This project IS the user's real folder ${wsRow.host_path}. Every path you use is relative to it.\nFiles:\n${files || '(empty)'}`
+      : `Current workspace files:\n${files || '(empty)'}`);
   }
   const policy = parts.join('\n\n');
   if (promptMessages[0]?.role === 'system') {

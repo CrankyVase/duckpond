@@ -12,8 +12,12 @@ import { fetchPage, searchWeb } from '../websearch.js';
 import { acquireGpu } from '../gpuqueue.js';
 import {
   destroyWorkspace, ensureRunning, execCmd, portBase,
-  stopWorkspace, truncateOutput, wsDir,
+  stopWorkspace, truncateOutput, wsDir, wsRoot,
 } from '../sandbox.js';
+import {
+  browseHost, deniedReason, hostAccessEnabled, hostRoots, projectHint,
+  resolveHostPath, setHostAccessEnabled, setHostRoots,
+} from '../hostfs.js';
 
 export const DEFAULT_AGENT_MODEL = process.env.AGENT_MODEL ?? 'qwen3-coder-next-q4-k-m';
 // Bigger projects (games, multi-file app) routinely need more than 30 tool steps.
@@ -65,11 +69,26 @@ const MAX_TREE_ENTRIES = 600;
 const MAX_FILE_BYTES = 256 * 1024;
 
 function safePath(ws, rel) {
-  const root = resolve(wsDir(ws.id));
+  // desktop workspaces resolve against the real host directory (wsRoot); the
+  // containment check below is what keeps the agent inside it either way
+  const root = resolve(wsRoot(ws));
   // models often pass container-absolute paths like /workspace/foo.py — accept them
-  const cleaned = String(rel ?? '.').replace(/^\/?workspace\/?/, '').replace(/^\/+/, '') || '.';
+  let cleaned = String(rel ?? '.').replace(/^\/?workspace\/?/, '').replace(/^\/+/, '') || '.';
+  // ...and on a desktop workspace they sometimes pass the real host path they
+  // saw in the system prompt. Accept that too rather than resolving it into a
+  // nonsense nested path like /home/me/app/home/me/app/src.
+  if (ws.host_path) {
+    const abs = resolve(String(rel ?? ''));
+    if (abs === root || abs.startsWith(root + '/')) cleaned = abs.slice(root.length + 1) || '.';
+  }
   const p = resolve(root, cleaned);
   if (p !== root && !p.startsWith(root + '/')) throw new Error('path escapes workspace');
+  // Inside a desktop directory the credential denylist still applies — the
+  // allowlist got us into the folder, this keeps the agent out of its secrets.
+  if (ws.host_path) {
+    const denied = deniedReason(p);
+    if (denied) throw new Error(`refused: ${denied}`);
+  }
   return p;
 }
 
@@ -200,6 +219,14 @@ function agentSystemPrompt(ws) {
     'You are Dumpling, a coding agent inside DuckPond, working in a sandboxed Linux container.',
     'The project lives at /workspace — every file path you use is relative to it.',
     'Environment: Debian, Node 24 + npm, Python 3.13 + pip, git, bash. No GUI.',
+    ...(ws?.host_path ? [
+      '',
+      `IMPORTANT: /workspace is the user's REAL folder ${ws.host_path} on their own computer, bind-mounted here. These are files they care about and have not backed up for you.`,
+      '- Read before you edit, always. Use edit_file with exact search/replace blocks; never rewrite a file you have not read.',
+      '- Change only what was asked. No opportunistic refactors, reformatting, renames, deletions, or directory reshuffles.',
+      '- Never run destructive commands (rm -rf, git reset --hard, git clean, force push, checkout over uncommitted work). Ask first if the task truly needs one.',
+      '- Credential files (.env, keys, .ssh, tokens) are blocked by the sandbox; work around them rather than trying variations.',
+    ] : []),
     '',
     'Rules:',
     '- Look before you leap: list or read files before editing them.',
@@ -218,6 +245,12 @@ export async function execTool(run, ws, name, args) {
     case 'start_project':
       // chat-gate tool; if the model repeats it mid-run, steer it back
       return 'Project mode is already active — use list_files/read_file/write_file/run_command directly.';
+    case 'open_desktop_project':
+      // same: the folder is already mounted, and re-opening mid-run would swap
+      // the workspace out from under the loop
+      return ws.host_path
+        ? `Already working in ${ws.host_path} — use list_files/read_file/edit_file/run_command on it directly (paths are relative to that folder).`
+        : 'Project mode is already active in a sandboxed workspace. Finish here, or ask the user to start a new chat to work on a folder from their machine.';
     case 'list_files': {
       const entries = listTree(ws, args.path ?? '.');
       if (!entries.length) return '(empty)';
@@ -386,6 +419,30 @@ export function createWorkspaceRow(userId, name) {
   // rowid reuse: a deleted workspace may have left files behind on the host
   rmSync(wsDir(id), { recursive: true, force: true });
   mkdirSync(wsDir(id), { recursive: true });
+  return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id);
+}
+
+/**
+ * Attach a real directory on the host as a workspace ("desktop project").
+ * Owner-only — the caller must have checked that. The path is vetted by
+ * hostfs.js (allowlisted root, no credential stores, symlinks resolved).
+ *
+ * Re-attaching a directory that is already a workspace returns the existing row
+ * instead of making a second one, so asking twice doesn't litter the list.
+ */
+export function attachHostWorkspace(userId, inputPath, name) {
+  const abs = resolveHostPath(inputPath);
+  if (!statSync(abs).isDirectory()) throw new Error('that is a file, not a folder');
+  const existing = db.prepare('SELECT * FROM workspaces WHERE user_id = ? AND host_path = ?')
+    .get(userId, abs);
+  if (existing) return existing;
+  const label = String(name ?? '').trim().slice(0, 60) || abs.split('/').filter(Boolean).pop() || 'desktop';
+  const r = db.prepare('INSERT INTO workspaces (user_id, name, host_path) VALUES (?, ?, ?)')
+    .run(userId, label, abs);
+  const id = r.lastInsertRowid;
+  // NB: no rmSync here. createWorkspaceRow clears the scratch dir to deal with
+  // rowid reuse; doing that for a desktop workspace would delete the project.
+  db.prepare('UPDATE workspaces SET port_base = ? WHERE id = ?').run(portBase(id), id);
   return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id);
 }
 
@@ -587,6 +644,68 @@ export default async function agentRoutes(app) {
     db.prepare(`SELECT w.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.workspace_id = w.id) AS runs
                 FROM workspaces w WHERE user_id = ? ORDER BY last_used DESC`).all(req.user.id));
 
+  // ----- desktop access (owner only, every route) -----
+
+  const ownerOnly = (req, reply) => {
+    if (req.user?.role !== 'owner') {
+      reply.code(403).send({ error: 'desktop access is owner-only' });
+      return false;
+    }
+    return true;
+  };
+
+  // Current configuration: is it on, which roots are allowed, what defaults
+  // would be picked if the owner has never set them.
+  app.get('/api/desktop/config', async (req, reply) => {
+    if (!ownerOnly(req, reply)) return;
+    return {
+      enabled: hostAccessEnabled(),
+      roots: hostRoots().map((p) => ({ path: p, exists: existsSync(p) })),
+      home: process.env.HOME ?? null,
+    };
+  });
+
+  app.patch('/api/desktop/config', async (req, reply) => {
+    if (!ownerOnly(req, reply)) return;
+    try {
+      if (req.body?.enabled !== undefined) setHostAccessEnabled(!!req.body.enabled);
+      if (req.body?.roots !== undefined) setHostRoots(req.body.roots);
+    } catch (err) {
+      return reply.code(400).send({ error: String(err.message ?? err) });
+    }
+    return {
+      ok: true,
+      enabled: hostAccessEnabled(),
+      roots: hostRoots().map((p) => ({ path: p, exists: existsSync(p) })),
+    };
+  });
+
+  // Directory picker. No `path` lists the allowed roots.
+  app.get('/api/desktop/browse', async (req, reply) => {
+    if (!ownerOnly(req, reply)) return;
+    try {
+      const r = browseHost(req.query?.path ? String(req.query.path) : null);
+      return { ...r, hint: r.path ? projectHint(r.path) : null };
+    } catch (err) {
+      return reply.code(400).send({ error: String(err.message ?? err) });
+    }
+  });
+
+  // Attach a directory as a workspace, and optionally point a conversation at
+  // it so the very next chat turn is already in project mode on those files.
+  app.post('/api/desktop/attach', async (req, reply) => {
+    if (!ownerOnly(req, reply)) return;
+    let ws;
+    try { ws = attachHostWorkspace(req.user.id, req.body?.path, req.body?.name); }
+    catch (err) { return reply.code(400).send({ error: String(err.message ?? err) }); }
+    if (req.body?.conv_id) {
+      const conv = db.prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?')
+        .get(req.body.conv_id, req.user.id);
+      if (conv) db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(ws.id, conv.id);
+    }
+    return { ok: true, workspace: ws, hint: projectHint(ws.host_path) };
+  });
+
   app.post('/api/workspaces', async (req, reply) => {
     const name = String(req.body?.name ?? '').trim().slice(0, 60) || 'untitled';
     const count = db.prepare('SELECT COUNT(*) c FROM workspaces WHERE user_id = ?').get(req.user.id).c;
@@ -641,7 +760,7 @@ export default async function agentRoutes(app) {
     if (!ws) return reply.code(404).send({ error: 'not found' });
     try {
       const p = safePath(ws, String(req.query.path ?? ''));
-      if (resolve(p) === resolve(wsDir(ws.id))) throw new Error('refusing to delete workspace root');
+      if (resolve(p) === resolve(wsRoot(ws))) throw new Error('refusing to delete workspace root');
       rmSync(p, { recursive: true });
       return { ok: true };
     } catch (err) { return reply.code(400).send({ error: err.message }); }
