@@ -416,6 +416,28 @@ try { db.exec("ALTER TABLE providers ADD COLUMN fallback_json TEXT NOT NULL DEFA
 try { db.exec("ALTER TABLE providers ADD COLUMN free_only INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE providers ADD COLUMN spend_cap_usd REAL'); } catch { /* exists */ }
 
+// Catalog curation (stage 14). Adding one API key can import 300+ models; the
+// picker becomes unusable. `import_mode` decides what a sync does with models
+// it has never seen before:
+//   all      — enable on import (old behaviour, kept as the default so an
+//              existing pond does not silently lose its models)
+//   curated  — import DISABLED; the owner picks what shows up in the picker
+//   free     — enable only models detectably free, import the rest disabled
+// `hidden` is stronger than `enabled = 0`: it removes the row from the catalog
+// table too, for the hundreds of dated snapshots nobody will ever pick.
+try { db.exec("ALTER TABLE providers ADD COLUMN import_mode TEXT NOT NULL DEFAULT 'all'"); } catch { /* exists */ }
+try { db.exec('ALTER TABLE provider_models ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE provider_models ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+// Capability flags sniffed at sync time from the provider payload + model id:
+// { reasoning, vision, tools, free, audio, image, embed }. Drives the picker
+// badges, the capability filter, and whether reasoning params are sent at all.
+try { db.exec("ALTER TABLE provider_models ADD COLUMN caps_json TEXT NOT NULL DEFAULT '{}'"); } catch { /* exists */ }
+// Owner-visible label + free-form note, so a catalog of cryptic ids can be
+// made readable ("fast draft model", "the good one for refactors").
+try { db.exec('ALTER TABLE provider_models ADD COLUMN label TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE provider_models ADD COLUMN note TEXT'); } catch { /* exists */ }
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_pmodels_pick ON provider_models(provider_id, hidden, enabled)'); } catch { /* exists */ }
+
 // Theme marketplace: user-published themes (full color map + layout + effects
 // + css bundled in theme_json). Seeded by routes/themes.js on first boot.
 db.exec(`CREATE TABLE IF NOT EXISTS community_themes (
@@ -444,6 +466,7 @@ CREATE TABLE IF NOT EXISTS providers (
   fallback_json TEXT NOT NULL DEFAULT '[]',     -- ordered model fallback chain (preference order)
   free_only INTEGER NOT NULL DEFAULT 0,          -- sync imports only models detectably free
   spend_cap_usd REAL,                            -- monthly spend cap in USD (NULL = unlimited)
+  import_mode TEXT NOT NULL DEFAULT 'all',       -- all | curated | free (what a sync enables)
   last_sync_at INTEGER,
   last_sync_count INTEGER,
   last_error TEXT,
@@ -460,11 +483,17 @@ CREATE TABLE IF NOT EXISTS provider_models (
   price_out REAL,           -- USD per 1M output tokens
   price_cached_in REAL,     -- USD per 1M cached input tokens (provider-discounted)
   enabled INTEGER NOT NULL DEFAULT 1,
+  hidden INTEGER NOT NULL DEFAULT 0,        -- kept out of the catalog table entirely
+  favorite INTEGER NOT NULL DEFAULT 0,      -- pinned to the top of the model picker
+  caps_json TEXT NOT NULL DEFAULT '{}',     -- {reasoning,vision,tools,free,audio,image,embed}
+  label TEXT,                               -- owner-set display name
+  note TEXT,                                -- owner-set free-form note
   raw_json TEXT NOT NULL DEFAULT '{}',
   fetched_at INTEGER NOT NULL DEFAULT (unixepoch()),
   UNIQUE(provider_id, model_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pmodels_provider ON provider_models(provider_id);
+CREATE INDEX IF NOT EXISTS idx_pmodels_pick ON provider_models(provider_id, hidden, enabled);
 
 -- per-request cost ledger: every paid (or would-have-been-paid) call leaves a
 -- row; baseline_usd is what the same work would have cost without the saver

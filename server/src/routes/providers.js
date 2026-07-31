@@ -3,7 +3,7 @@
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import {
-  PROVIDER_PRESETS, providerModelFor, syncProviderModels, testProvider,
+  autoCurate, PROVIDER_PRESETS, parseCaps, providerModelFor, syncProviderModels, testProvider,
 } from '../providers.js';
 import { providerMonthSpend } from '../costs.js';
 
@@ -24,6 +24,7 @@ const mask = (p) => ({
   cache_enabled: !!p.cache_enabled,
   fallback: JSON.parse(p.fallback_json ?? '[]'),
   free_only: !!p.free_only,
+  import_mode: p.import_mode ?? 'all',
   spend_cap_usd: p.spend_cap_usd ?? null,
   month_spend: providerMonthSpend(p.id),
   has_key: !!p.api_key,
@@ -33,7 +34,14 @@ const mask = (p) => ({
   last_error: p.last_error,
   created_at: p.created_at,
   models: db.prepare('SELECT COUNT(*) AS n FROM provider_models WHERE provider_id = ?').get(p.id).n,
+  // what the picker actually shows — the number that matters when a key
+  // imports 400 models and the user wants 6 of them
+  models_on: db.prepare(
+    'SELECT COUNT(*) AS n FROM provider_models WHERE provider_id = ? AND enabled = 1 AND hidden = 0',
+  ).get(p.id).n,
 });
+
+const IMPORT_MODES = new Set(['all', 'curated', 'free']);
 
 const cleanBase = (u) => {
   const s = String(u ?? '').trim().replace(/\/+$/, '');
@@ -95,12 +103,20 @@ export default async function providerRoutes(app) {
     catch (err) {
       return reply.code(400).send({ error: `couldn't reach the provider: ${String(err.message ?? err)}` });
     }
-    const r = db.prepare('INSERT INTO providers (name, base_url, api_key, free_only) VALUES (?, ?, ?, ?)')
-      .run(name, base, key, freeOnly ? 1 : 0);
+    // New providers default to `curated`: import the whole catalog but only
+    // switch on a shortlist, so one pasted key can't bury the model picker.
+    // (Existing providers keep 'all' — nobody's picker changes under them.)
+    const importMode = IMPORT_MODES.has(String(req.body?.import_mode))
+      ? String(req.body.import_mode)
+      : 'curated';
+    const r = db.prepare(
+      'INSERT INTO providers (name, base_url, api_key, free_only, import_mode) VALUES (?, ?, ?, ?, ?)',
+    ).run(name, base, key, freeOnly ? 1 : 0, importMode);
     const id = Number(r.lastInsertRowid);
     let sync = { ok: false, count: 0 };
     try { sync = await syncProviderModels(id, req.log); }
     catch (err) { sync = { ok: false, count: 0, error: String(err.message ?? err) }; }
+    if (sync.ok && importMode === 'curated') sync.curated = autoCurate(id);
     const row = db.prepare('SELECT * FROM providers WHERE id = ?').get(id);
     return { ok: true, provider: mask(row), sync };
   });
@@ -109,7 +125,16 @@ export default async function providerRoutes(app) {
     if (!ownerOnly(req, reply)) return;
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    const { name, base_url, api_key, enabled, cache_enabled, fallback, free_only, spend_cap_usd } = req.body ?? {};
+    const {
+      name, base_url, api_key, enabled, cache_enabled, fallback, free_only,
+      spend_cap_usd, import_mode,
+    } = req.body ?? {};
+    if (import_mode !== undefined) {
+      if (!IMPORT_MODES.has(String(import_mode))) {
+        return reply.code(400).send({ error: 'import_mode must be all, curated or free' });
+      }
+      db.prepare('UPDATE providers SET import_mode = ? WHERE id = ?').run(String(import_mode), p.id);
+    }
     if (name !== undefined) db.prepare('UPDATE providers SET name = ? WHERE id = ?')
       .run(String(name).trim().slice(0, 80) || p.name, p.id);
     if (base_url !== undefined) {
@@ -167,17 +192,56 @@ export default async function providerRoutes(app) {
     catch (err) { return reply.code(502).send({ ok: false, error: String(err.message ?? err) }); }
   });
 
+  // The catalog view. `?q=` substring, `?cap=` capability, `?show=on|off|hidden|all`
+  // — filtering server-side keeps a 400-model provider from shipping the whole
+  // list to the browser on every keystroke.
   app.get('/api/providers/:id/models', async (req, reply) => {
     const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(req.params.id);
     if (!p) return reply.code(404).send({ error: 'not found' });
-    return db.prepare(`
-      SELECT id, provider_id, model_id, context_length, max_output,
-             price_in, price_out, price_cached_in, enabled, fetched_at
-      FROM provider_models WHERE provider_id = ?
-      ORDER BY COALESCE(price_in, 0) + COALESCE(price_out, 0), model_id COLLATE NOCASE`).all(p.id);
+    const q = String(req.query?.q ?? '').trim().toLowerCase();
+    const show = String(req.query?.show ?? 'visible');
+    const cap = String(req.query?.cap ?? '').trim();
+    const limit = Math.min(500, Math.max(1, Number(req.query?.limit ?? 250)));
+
+    const where = ['provider_id = ?'];
+    const vals = [p.id];
+    if (show === 'on') where.push('enabled = 1 AND hidden = 0');
+    else if (show === 'off') where.push('enabled = 0 AND hidden = 0');
+    else if (show === 'hidden') where.push('hidden = 1');
+    else if (show !== 'all') where.push('hidden = 0');      // 'visible' default
+    if (q) { where.push('(LOWER(model_id) LIKE ? OR LOWER(COALESCE(label, \'\')) LIKE ?)'); vals.push(`%${q}%`, `%${q}%`); }
+    if (cap) { where.push("caps_json LIKE ?"); vals.push(`%"${cap}":true%`); }
+
+    const rows = db.prepare(`
+      SELECT id, provider_id, model_id, label, note, context_length, max_output,
+             price_in, price_out, price_cached_in, enabled, hidden, favorite,
+             caps_json, fetched_at
+      FROM provider_models WHERE ${where.join(' AND ')}
+      ORDER BY favorite DESC, enabled DESC,
+               COALESCE(price_in, 0) + COALESCE(price_out, 0), model_id COLLATE NOCASE
+      LIMIT ?`).all(...vals, limit);
+
+    const counts = db.prepare(`
+      SELECT COUNT(*) AS total,
+             SUM(enabled = 1 AND hidden = 0) AS on_count,
+             SUM(hidden = 1) AS hidden_count,
+             SUM(favorite = 1) AS fav_count
+      FROM provider_models WHERE provider_id = ?`).get(p.id);
+
+    return {
+      models: rows.map((r) => ({ ...r, caps: parseCaps(r) })),
+      counts: {
+        total: counts.total ?? 0,
+        on: counts.on_count ?? 0,
+        hidden: counts.hidden_count ?? 0,
+        favorites: counts.fav_count ?? 0,
+      },
+      truncated: rows.length >= limit,
+    };
   });
 
-  // Per-model overrides: enable/disable in the picker, fix pricing/context.
+  // Per-model overrides: enable/disable in the picker, hide it from the catalog
+  // entirely, favorite it to the top, rename it, fix pricing/context/caps.
   app.patch('/api/providers/:id/models', async (req, reply) => {
     if (!ownerOnly(req, reply)) return;
     const pid = Number(req.params.id);
@@ -188,18 +252,107 @@ export default async function providerRoutes(app) {
     const sets = [];
     const vals = [];
     const put = (col, val) => { sets.push(`${col} = ?`); vals.push(val); };
-    if (req.body.enabled !== undefined) put('enabled', req.body.enabled ? 1 : 0);
+    for (const col of ['enabled', 'hidden', 'favorite']) {
+      if (req.body[col] !== undefined) put(col, req.body[col] ? 1 : 0);
+    }
     for (const col of ['price_in', 'price_out', 'price_cached_in']) {
       if (req.body[col] !== undefined) put(col, num(req.body[col]));
     }
     for (const col of ['context_length', 'max_output']) {
       if (req.body[col] !== undefined) put(col, num(req.body[col]));
     }
+    for (const col of ['label', 'note']) {
+      if (req.body[col] !== undefined) {
+        const s = String(req.body[col] ?? '').trim().slice(0, 200);
+        put(col, s || null);
+      }
+    }
+    // Capability overrides merge onto the sniffed flags — the owner corrects a
+    // wrong guess without losing the ones that were right.
+    if (req.body.caps !== undefined && req.body.caps && typeof req.body.caps === 'object') {
+      const merged = { ...parseCaps(row) };
+      for (const [k, v] of Object.entries(req.body.caps)) {
+        if (v) merged[k] = true; else delete merged[k];
+      }
+      put('caps_json', JSON.stringify(merged));
+    }
     if (sets.length) {
       db.prepare(`UPDATE provider_models SET ${sets.join(', ')} WHERE provider_id = ? AND model_id = ?`)
         .run(...vals, pid, mid);
     }
-    return { ok: true, model: providerModelFor(pid, mid) };
+    const out = providerModelFor(pid, mid);
+    return { ok: true, model: { ...out, caps: parseCaps(out) } };
+  });
+
+  /**
+   * Bulk curation — the whole point of this stage. Turning 400 imported models
+   * into the 6 you actually use has to be two clicks, not 400.
+   * Body: { action, model_ids?: [], filter?: { q, cap, free, priced, show } }
+   * With `model_ids` the action hits exactly those; with `filter` it hits every
+   * model matching it (that is how "disable all" and "keep only free" work).
+   */
+  app.post('/api/providers/:id/models/bulk', async (req, reply) => {
+    if (!ownerOnly(req, reply)) return;
+    const pid = Number(req.params.id);
+    const p = db.prepare('SELECT * FROM providers WHERE id = ?').get(pid);
+    if (!p) return reply.code(404).send({ error: 'not found' });
+
+    const ACTIONS = {
+      enable: ['enabled', 1], disable: ['enabled', 0],
+      hide: ['hidden', 1], show: ['hidden', 0],
+      favorite: ['favorite', 1], unfavorite: ['favorite', 0],
+    };
+    const action = String(req.body?.action ?? '');
+    const spec = ACTIONS[action];
+    if (!spec) {
+      return reply.code(400).send({ error: `action must be one of ${Object.keys(ACTIONS).join(', ')}` });
+    }
+    const [col, val] = spec;
+
+    const ids = Array.isArray(req.body?.model_ids) ? req.body.model_ids.map(String) : null;
+    let changed = 0;
+    if (ids?.length) {
+      const stmt = db.prepare(
+        `UPDATE provider_models SET ${col} = ? WHERE provider_id = ? AND model_id = ?`);
+      const tx = db.transaction(() => {
+        for (const mid of ids.slice(0, 2000)) changed += stmt.run(val, pid, mid).changes;
+      });
+      tx();
+    } else {
+      const f = req.body?.filter ?? {};
+      const where = ['provider_id = ?'];
+      const vals = [pid];
+      const q = String(f.q ?? '').trim().toLowerCase();
+      if (q) { where.push("LOWER(model_id) LIKE ?"); vals.push(`%${q}%`); }
+      if (f.cap) { where.push('caps_json LIKE ?'); vals.push(`%"${String(f.cap)}":true%`); }
+      // free = both prices known and zero, or a :free/-free id
+      if (f.free) where.push("((price_in = 0 AND price_out = 0) OR model_id LIKE '%:free' OR model_id LIKE '%-free')");
+      if (f.priced) where.push('(COALESCE(price_in, 0) > 0 OR COALESCE(price_out, 0) > 0)');
+      if (f.show === 'on') where.push('enabled = 1 AND hidden = 0');
+      else if (f.show === 'off') where.push('enabled = 0');
+      else if (f.show === 'hidden') where.push('hidden = 1');
+      // Favorites are the owner's explicit keep-list: a blanket disable/hide
+      // never sweeps them away.
+      if ((col === 'enabled' && val === 0) || (col === 'hidden' && val === 1)) where.push('favorite = 0');
+      changed = db.prepare(
+        `UPDATE provider_models SET ${col} = ? WHERE ${where.join(' AND ')}`).run(val, ...vals).changes;
+    }
+    const counts = db.prepare(`
+      SELECT COUNT(*) AS total, SUM(enabled = 1 AND hidden = 0) AS on_count
+      FROM provider_models WHERE provider_id = ?`).get(pid);
+    return { ok: true, changed, total: counts.total ?? 0, on: counts.on_count ?? 0 };
+  });
+
+  // "Pick a starter set for me" — same shortlist logic a new key gets, on
+  // demand, for a catalog the owner has since disabled into silence.
+  app.post('/api/providers/:id/models/curate', async (req, reply) => {
+    if (!ownerOnly(req, reply)) return;
+    const pid = Number(req.params.id);
+    if (!db.prepare('SELECT 1 FROM providers WHERE id = ?').get(pid)) {
+      return reply.code(404).send({ error: 'not found' });
+    }
+    const limit = Math.min(30, Math.max(1, Number(req.body?.limit ?? 8)));
+    return { ok: true, enabled: autoCurate(pid, { limit }) };
   });
 
   // Clear this provider's cached replies (e.g. after a model update).

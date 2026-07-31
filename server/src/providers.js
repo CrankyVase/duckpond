@@ -149,6 +149,75 @@ export function knownMeta(modelId) {
   return { price_in: null, price_out: null, price_cached_in: null, context_length: null };
 }
 
+// ---------- capability sniffing ----------
+// A provider's /models entry rarely states capabilities in a standard way, so
+// we read whatever structured hints exist first (OpenRouter's
+// architecture.input_modalities / supported_parameters is the richest) and fall
+// back to the model id. Wrong guesses are cheap and correctable: every flag is
+// editable per model in the Providers panel, and `caps.reasoning` only decides
+// whether we bother SENDING a reasoning parameter — a provider that ignores it
+// costs nothing.
+const CAP_HINTS = [
+  ['reasoning', /reason|thinking|-think|\br1\b|qwq|\bo[134]\b|gpt-5|magistral|deepseek-r|grok-4|glm-.*-air|minimax-m/i],
+  ['vision', /vision|-vl\b|vl-|multimodal|omni|gpt-4o|gpt-5|gemini|claude-3|claude-[45]|llama-4|pixtral|internvl|qwen2?\.?5?-vl/i],
+  ['audio', /audio|whisper|voxtral|tts|speech|realtime/i],
+  ['image', /dall-e|flux|stable-diffusion|sdxl|imagen|image-gen|ideogram|midjourney/i],
+  ['embed', /embed|bge-|gte-|e5-|text-embedding/i],
+];
+
+/**
+ * Best-effort capability flags for a catalog row.
+ * Structured provider metadata always wins over the id regexes.
+ */
+export function sniffCaps(modelId, raw) {
+  const m = raw ?? {};
+  const id = String(modelId ?? '');
+  const caps = {};
+  for (const [flag, re] of CAP_HINTS) if (re.test(id)) caps[flag] = true;
+
+  // OpenRouter / LiteLLM style: declared input modalities and parameters.
+  const modalities = []
+    .concat(m.architecture?.input_modalities ?? [], m.input_modalities ?? [], m.modalities ?? [])
+    .map((x) => String(x).toLowerCase());
+  if (modalities.length) {
+    caps.vision = modalities.includes('image');
+    caps.audio = modalities.includes('audio');
+  }
+  const outModalities = []
+    .concat(m.architecture?.output_modalities ?? [], m.output_modalities ?? [])
+    .map((x) => String(x).toLowerCase());
+  if (outModalities.includes('image')) caps.image = true;
+
+  const params = (m.supported_parameters ?? m.supportedParameters ?? []).map((x) => String(x).toLowerCase());
+  if (params.length) {
+    caps.tools = params.includes('tools') || params.includes('tool_choice');
+    caps.reasoning = params.includes('reasoning') || params.includes('include_reasoning')
+      || params.includes('reasoning_effort') || caps.reasoning === true;
+  }
+  // Explicit boolean shapes seen in the wild (nano-gpt, Groq, some gateways).
+  for (const [key, flag] of [
+    ['supports_vision', 'vision'], ['supports_tools', 'tools'],
+    ['supports_function_calling', 'tools'], ['supports_reasoning', 'reasoning'],
+    ['vision', 'vision'], ['tool_use', 'tools'],
+  ]) if (typeof m[key] === 'boolean') caps[flag] = m[key];
+
+  // Tools: no structured hint anywhere → assume yes for chat models. Every
+  // serious OpenAI-compatible chat endpoint takes a `tools` array, and being
+  // wrong here only means an ignored parameter.
+  if (caps.tools === undefined && !caps.embed && !caps.image) caps.tools = true;
+  if (isFreeModelId(id)) caps.free = true;
+
+  for (const k of Object.keys(caps)) if (!caps[k]) delete caps[k];
+  return caps;
+}
+
+export function parseCaps(row) {
+  try {
+    const c = JSON.parse(row?.caps_json ?? '{}');
+    return c && typeof c === 'object' ? c : {};
+  } catch { return {}; }
+}
+
 /** Pull context/pricing out of the many /models response shapes in the wild. */
 export function normalizeModelMeta(modelId, raw) {
   const m = raw ?? {};
@@ -266,26 +335,47 @@ export async function syncProviderModels(providerId, log) {
         .map(([m]) => m);
     }
 
+    // What a NEVER-SEEN-BEFORE model gets for `enabled`. Existing rows keep
+    // whatever the owner set — a resync must never undo curation.
+    const mode = String(provider.import_mode ?? 'all');
+    const enabledFor = (id, meta) => {
+      if (mode === 'curated') return 0;
+      if (mode === 'free') {
+        return (isFreeModelId(id) || (Number(meta.price_in) === 0 && Number(meta.price_out) === 0)) ? 1 : 0;
+      }
+      return 1;
+    };
+
     const upsert = db.prepare(`
       INSERT INTO provider_models
-        (provider_id, model_id, context_length, max_output, price_in, price_out, price_cached_in, raw_json, fetched_at)
-      VALUES (@pid, @mid, @ctx, @maxOut, @pin, @pout, @pcache, @raw, unixepoch())
+        (provider_id, model_id, context_length, max_output, price_in, price_out, price_cached_in,
+         enabled, caps_json, raw_json, fetched_at)
+      VALUES (@pid, @mid, @ctx, @maxOut, @pin, @pout, @pcache, @enabled, @caps, @raw, unixepoch())
       ON CONFLICT(provider_id, model_id) DO UPDATE SET
         context_length = COALESCE(excluded.context_length, provider_models.context_length),
         max_output = COALESCE(excluded.max_output, provider_models.max_output),
         price_in = COALESCE(excluded.price_in, provider_models.price_in),
         price_out = COALESCE(excluded.price_out, provider_models.price_out),
         price_cached_in = COALESCE(excluded.price_cached_in, provider_models.price_cached_in),
+        caps_json = excluded.caps_json,
         raw_json = excluded.raw_json,
         fetched_at = unixepoch()`);
     const seen = [];
+    let added = 0;
+    const known = new Set(
+      db.prepare('SELECT model_id FROM provider_models WHERE provider_id = ?')
+        .all(providerId).map((r) => r.model_id),
+    );
     const tx = db.transaction(() => {
       for (const m of list) {
         const meta = normalizeModelMeta(m.id, m);
+        if (!known.has(m.id)) added += 1;
         upsert.run({
           pid: providerId, mid: m.id,
           ctx: meta.context_length, maxOut: meta.max_output,
           pin: meta.price_in, pout: meta.price_out, pcache: meta.price_cached_in,
+          enabled: enabledFor(m.id, meta),
+          caps: JSON.stringify(sniffCaps(m.id, m)),
           raw: JSON.stringify(m).slice(0, 8000),
         });
         seen.push(m.id);
@@ -295,13 +385,67 @@ export async function syncProviderModels(providerId, log) {
     db.prepare(
       'UPDATE providers SET last_sync_at = unixepoch(), last_sync_count = ?, last_error = NULL WHERE id = ?',
     ).run(seen.length, providerId);
-    log?.info({ provider: provider.name, models: seen.length }, 'provider catalog synced');
-    return { ok: true, count: seen.length };
+    log?.info({ provider: provider.name, models: seen.length, added, mode }, 'provider catalog synced');
+    return { ok: true, count: seen.length, added, mode };
   } catch (err) {
     db.prepare('UPDATE providers SET last_error = ? WHERE id = ?')
       .run(String(err.message ?? err).slice(0, 500), providerId);
     throw err;
   }
+}
+
+// Noise that should never be the first thing you see in a model picker:
+// dated snapshots (gpt-4o-2024-08-06), previews, betas, and non-chat models.
+const NOISE_RE = /(\d{4}-\d{2}-\d{2}|:\d{8}|-(preview|alpha|beta|rc\d?|nightly|test|deprecated|legacy|online)\b|\b(embed|embedding|rerank|moderation|whisper|tts|dall-e)\b)/i;
+
+/**
+ * Pick a small starter set for a freshly imported catalog.
+ *
+ * A brand-new provider key in `curated` mode imports everything DISABLED —
+ * correct, but an empty picker is a worse first impression than a flooded one.
+ * So we enable a shortlist: models the pricing table recognises (i.e. the ones
+ * with names a human would recognise), preferring cheap-and-capable, skipping
+ * dated snapshots and non-chat endpoints. Everything else stays one click away
+ * in the catalog.
+ */
+export function autoCurate(providerId, { limit = 8 } = {}) {
+  const rows = db.prepare(
+    'SELECT * FROM provider_models WHERE provider_id = ? AND hidden = 0',
+  ).all(providerId);
+  if (!rows.length) return 0;
+
+  const scored = rows
+    .filter((r) => !NOISE_RE.test(r.model_id))
+    .map((r) => {
+      const caps = parseCaps(r);
+      if (caps.embed || caps.image || caps.audio) return null;
+      let score = 0;
+      // Recognised by the pricing table = a model someone has heard of.
+      if (knownMeta(r.model_id).price_in != null) score += 5;
+      if (caps.tools) score += 2;
+      if (caps.reasoning) score += 1;
+      if (caps.vision) score += 1;
+      if (isFreeModelId(r.model_id)) score += 3;
+      if ((r.context_length ?? 0) >= 100_000) score += 1;
+      // Prefer the cheap end within the same tier — a fresh pond should not
+      // default to the $75/1M model.
+      const price = (r.price_in ?? 0) + (r.price_out ?? 0);
+      if (price > 0 && price < 5) score += 1;
+      if (price > 40) score -= 2;
+      // Shorter ids are usually the canonical alias (gpt-5 over gpt-5-chat-x).
+      score -= Math.min(3, Math.floor(r.model_id.length / 30));
+      return { r, score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || a.r.model_id.localeCompare(b.r.model_id))
+    .slice(0, limit)
+    .filter((x) => x.score > 0);
+
+  if (!scored.length) return 0;
+  const stmt = db.prepare('UPDATE provider_models SET enabled = 1 WHERE id = ?');
+  const tx = db.transaction(() => { for (const { r } of scored) stmt.run(r.id); });
+  tx();
+  return scored.length;
 }
 
 /** Lazy 24h re-sync (OmniRoute's daily model auto-sync, pond-style). */
