@@ -438,6 +438,43 @@ try { db.exec('ALTER TABLE provider_models ADD COLUMN label TEXT'); } catch { /*
 try { db.exec('ALTER TABLE provider_models ADD COLUMN note TEXT'); } catch { /* exists */ }
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_pmodels_pick ON provider_models(provider_id, hidden, enabled)'); } catch { /* exists */ }
 
+// Tool permissions (stage 17). One JSON blob per user: {mode, overrides,
+// allowCommands}. See permissions.js — 'balanced' is the default and means
+// reads and workspace writes run free, shell and anything leaving the machine
+// asks first.
+try { db.exec("ALTER TABLE users ADD COLUMN tool_policy TEXT NOT NULL DEFAULT '{}'"); } catch { /* exists */ }
+
+// Every gated tool call, allowed or not. This table IS the "auto mode review":
+// what ran on its own while you were reading the reply.
+db.exec(`
+CREATE TABLE IF NOT EXISTS tool_audit (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conv_id INTEGER,
+  run_id INTEGER,
+  tool TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  decision TEXT NOT NULL,          -- allow | ask | deny | approved | rejected
+  approved_by TEXT,                -- username, 'auto', or 'timeout'
+  detail TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON tool_audit(user_id, id DESC);
+
+-- Connected GitHub accounts (stage 18). One row per user; the token is stored
+-- as given because this pond is single-box and loopback-only — the same trust
+-- model as providers.api_key, which sits next to it in this database.
+CREATE TABLE IF NOT EXISTS github_accounts (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  login TEXT NOT NULL,
+  token TEXT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT '',
+  default_repo TEXT,               -- owner/name the model assumes when unstated
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  last_used_at INTEGER
+);
+`);
+
 // Theme marketplace: user-published themes (full color map + layout + effects
 // + css bundled in theme_json). Seeded by routes/themes.js on first boot.
 db.exec(`CREATE TABLE IF NOT EXISTS community_themes (

@@ -32,6 +32,8 @@ import {
 import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tokenSaver.js';
 import { saveContext, saverSummary } from '../contextsaver.js';
 import { reasoningDialect, reasoningParams } from '../reasoning.js';
+import { capabilityManifest } from '../permissions.js';
+import { GITHUB_READ_TOOLS, GITHUB_TOOLS, hasGithub } from '../github.js';
 import {
   GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
   WIDGET_TOOLS, WIDGET_TOOL_NAMES,
@@ -218,6 +220,30 @@ export function registerChatPost(app) {
         ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
         : withToolsPolicy(
           buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
+      // The turn's tool list, hoisted so the capability manifest below can name
+      // the actual tools rather than describe the policy in the abstract.
+      const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
+      const ghOn = hasGithub(req.user.id);
+      const turnTools = constrained ? [] : filterTools(
+        wsRow
+          ? [...AGENT_TOOLS, ...(ghOn ? GITHUB_TOOLS : []), ...WIDGET_TOOLS, ...memTools]
+          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
+            ...(ghOn ? GITHUB_READ_TOOLS : []), ...WIDGET_TOOLS, ...memTools],
+        disabledTools,
+      ).filter((t) => imgPrefs.allowed || t.function.name !== 'generate_image');
+
+      // Tell the model its own permissions. A model that doesn't know a tool
+      // needs approval either avoids useful tools or promises things it can't
+      // deliver — and it pre-asks in prose, which is exactly the double-prompt
+      // the approval card is supposed to replace.
+      if (!constrained && promptMessages[0]?.role === 'system') {
+        const manifest = capabilityManifest(req.user.id, {
+          tools: turnTools, hasWorkspace: !!wsRow, hasGithub: ghOn,
+        });
+        if (manifest) {
+          promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${manifest}` };
+        }
+      }
       // deep-research mode: prepend the directive to the leading system message
       if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
@@ -511,16 +537,11 @@ export function registerChatPost(app) {
             abortSignal: abort.signal, onDelta, onEvent: fbNotice,
           });
         } else {
-          const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
-          const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS, ...memTools]
-            : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS, ...memTools], disabledTools);
           res = await streamChat({
             model: conv.model_id, messages: promptMessages,
             params: {
               ...params,
-              tools: imgPrefs.allowed
-                ? baseTools
-                : baseTools.filter((t) => t.function.name !== 'generate_image'),
+              tools: turnTools,          // hoisted above, same list the manifest described
               tool_choice: 'auto',
             },
             abortSignal: abort.signal, onDelta, onEvent: fbNotice,
