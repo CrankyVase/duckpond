@@ -30,6 +30,7 @@ import {
   cacheKey, cacheLookup, cacheStore, estimateTokens, resolveRemote,
 } from '../providers.js';
 import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tokenSaver.js';
+import { saveContext, saverSummary } from '../contextsaver.js';
 import {
   GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
   WIDGET_TOOLS, WIDGET_TOOL_NAMES,
@@ -346,6 +347,42 @@ export function registerChatPost(app) {
         if (spent >= cap) {
           send({ type: 'error', message: `${remoteInfo.provider.name} hit its monthly spend cap ($${spent.toFixed(2)} of $${cap}) — raise or clear it in Providers.` });
           return; // finally{} closes the stream
+        }
+      }
+      // Context saver — runs before anything else looks at the prompt, and for
+      // LOCAL turns too: on a 32k local budget the win is headroom (more room
+      // for the actual conversation), on a paid remote turn it is money. The
+      // lossless engines (tool-output compression, session dedup) always run;
+      // the lossy ones only once the prompt crosses HEADROOM_AT. Doing this
+      // BEFORE auto-compaction often means the expensive LLM compaction pass
+      // never has to fire at all.
+      const saverLevel = conv._settings.context_saver ?? 'auto';
+      if (saverLevel !== 'off') {
+        try {
+          const saved = saveContext(promptMessages, {
+            ctxSize: conv._settings.ctx_size,
+            level: saverLevel,
+          });
+          if (saved.report.savedTokens > 0) {
+            promptMessages = saved.messages;
+            const line = saverSummary(saved.report);
+            if (line) send({ type: 'notice', message: line });
+            req.log.info(saved.report, 'context saver');
+            if (remote) {
+              // The saved tokens would have been billed at input rate; log them
+              // as savings so the Costs panel shows the engine paying for itself.
+              try {
+                recordEvent({
+                  userId: req.user.id, convId: conv.id, modelId: conv.model_id,
+                  kind: 'context_saved', tokensIn: saved.report.savedTokens, costUsd: 0,
+                  baselineUsd: costFor(modelRowForRemoteId(conv.model_id), saved.report.savedTokens, 0, 0),
+                });
+              } catch { /* ledger best-effort */ }
+            }
+          }
+        } catch (err) {
+          // A compression bug must never cost the user their turn.
+          req.log.warn({ err: String(err?.message ?? err) }, 'context saver skipped');
         }
       }
       if (remote) promptMessages = orderSystemForPrefixCache(promptMessages);

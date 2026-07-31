@@ -15,6 +15,10 @@ export const DEFAULT_SETTINGS = {
   repeat_penalty: 1.1,
   system_prompt: '',
   thinking: 'auto',   // auto | high | low | none — applied only if model supports it
+  // Context saver (contextsaver.js). 'auto' is the right answer for everyone:
+  // lossless engines always, lossy ones only under context pressure. 'off' is
+  // the escape hatch, 'aggressive' compresses from the first token.
+  context_saver: 'auto',   // auto | off | aggressive
   disabledTools: [],  // tool ids this model profile is never offered; all on by default
   mirostat: 0,        // 0 off | 1 v1 | 2 v2 — llama.cpp entropy-target sampling
   mirostat_tau: 5,    // target entropy (higher = more surprising text)

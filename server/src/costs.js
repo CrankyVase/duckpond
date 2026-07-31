@@ -71,6 +71,8 @@ const KIND_LABELS = {
   aux_memory: 'Cheap model for memory extraction',
   aux_compact: 'Cheap model for compaction summaries',
   compact_savings: 'Auto-compaction (tokens not sent)',
+  context_saved: 'Context saver (tool output, repeats, filler)',
+  fallback: 'Fallback to a backup model',
 };
 
 export function costsSummary(userId) {
