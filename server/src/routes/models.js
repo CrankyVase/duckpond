@@ -14,7 +14,8 @@ export const DEFAULT_SETTINGS = {
   top_k: 40,
   repeat_penalty: 1.1,
   system_prompt: '',
-  thinking: 'auto',   // auto | high | low | none — applied only if model supports it
+  thinking: 'auto',   // auto | high | low | none — translated per provider dialect (reasoning.js)
+  thinking_budget: 0, // explicit reasoning-token budget; 0 = derive from `thinking`
   // Context saver (contextsaver.js). 'auto' is the right answer for everyone:
   // lossless engines always, lossy ones only under context pressure. 'off' is
   // the escape hatch, 'aggressive' compresses from the first token.

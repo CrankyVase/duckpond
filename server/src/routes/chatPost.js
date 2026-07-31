@@ -27,10 +27,11 @@ import {
   auxBaselineCost, costFor, modelRowForRemoteId, providerMonthSpend, recordEvent,
 } from '../costs.js';
 import {
-  cacheKey, cacheLookup, cacheStore, estimateTokens, resolveRemote,
+  cacheKey, cacheLookup, cacheStore, estimateTokens, parseCaps, resolveRemote,
 } from '../providers.js';
 import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tokenSaver.js';
 import { saveContext, saverSummary } from '../contextsaver.js';
+import { reasoningDialect, reasoningParams } from '../reasoning.js';
 import {
   GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
   WIDGET_TOOLS, WIDGET_TOOL_NAMES,
@@ -322,15 +323,43 @@ export function registerChatPost(app) {
       } else if (grammarStr) {
         params.grammar = grammarStr;
       }
-      // thinking control: enable_thinking is honored by qwen-style templates,
-      // reasoning_effort by gpt-oss-style ones; unsupported kwargs are ignored
-      const think = conv._settings.thinking;
-      // A grammar/schema constrains the WHOLE output — with thinking on,
-      // llama-server's reasoning parser swallows the constrained tokens as
-      // reasoning_content and the visible reply comes back empty.
-      if (think === 'none' || constrained) params.chat_template_kwargs = { enable_thinking: false };
-      else if (modeCfg.ultra) params.reasoning_effort = 'high';
-      else if (think === 'high' || think === 'low') params.reasoning_effort = think;
+      // Thinking control, translated to the dialect this model actually speaks
+      // (reasoning.js). `reasoning_effort` is an OpenAI-ism — Anthropic wants a
+      // token budget, OpenRouter its own `reasoning` object, qwen templates
+      // `enable_thinking`. Sending the wrong one is why the toggle used to look
+      // like it did nothing on most providers.
+      //
+      // A grammar/schema constrains the WHOLE output — with thinking on, the
+      // reasoning parser swallows the constrained tokens and the visible reply
+      // comes back empty, so `constrained` forces thinking off in every dialect.
+      {
+        const thinkPref = modeCfg.ultra ? 'high' : conv._settings.thinking;
+        const rr = remote ? resolveRemote(conv.model_id) : null;
+        const dialect = reasoningDialect(rr?.provider ?? null, rr?.modelId ?? conv.model_id);
+        // Local models: llama-server decides from the template, so assume yes.
+        // Remote: only send a reasoning param when the catalog says it can.
+        const supported = rr?.model ? parseCaps(rr.model).reasoning === true : true;
+        const rp = reasoningParams({
+          dialect,
+          effort: thinkPref,
+          supported,
+          budget: Number(conv._settings.thinking_budget) || 0,
+          constrained,
+          remote,
+        });
+        // `_soft` is prompt text, not a request param (Qwen3's /think and
+        // /no_think switches) — it goes on the last user message instead.
+        const { _soft: soft, ...rest } = rp;
+        Object.assign(params, rest);
+        if (soft) {
+          for (let i = promptMessages.length - 1; i >= 0; i -= 1) {
+            const m = promptMessages[i];
+            if (m.role !== 'user' || typeof m.content !== 'string') continue;
+            promptMessages[i] = { ...m, content: `${m.content} ${soft}` };
+            break;
+          }
+        }
+      }
 
       // ---------- cost saver (remote turns only) ----------
       // 1) stable-prefix ordering so provider prompt caches keep hitting

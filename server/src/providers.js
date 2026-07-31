@@ -5,6 +5,7 @@
 // Remote model ids are strings: `r<providerId>:<modelId>` (e.g. "r1:claude-sonnet-4.5").
 import { createHash } from 'node:crypto';
 import { db } from './db.js';
+import { makeThinkSplitter } from './reasoning.js';
 
 // ---------- id helpers ----------
 
@@ -522,6 +523,7 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
   let usage = null;
   let finishReason = null;
   const toolCalls = [];
+  const splitter = makeThinkSplitter();
 
   const noteUsage = (u) => {
     if (!u) return;
@@ -575,11 +577,26 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
         onDelta?.('', { reasoning: think });
       }
       if (delta.content) {
-        content += delta.content;
-        onDelta?.(delta.content, {});
+        // Not every provider populates reasoning_content — plenty inline the
+        // chain of thought in `content` as <think>…</think>. Split it out here
+        // so it lands in the thinking panel instead of leaking raw tags into
+        // the reply. The splitter holds back partial tags across chunks.
+        const part = splitter.push(delta.content);
+        if (part.reasoning) {
+          reasoning += part.reasoning;
+          onDelta?.('', { reasoning: part.reasoning });
+        }
+        if (part.text) {
+          content += part.text;
+          onDelta?.(part.text, {});
+        }
       }
     }
   }
+  // Anything held back as a possible partial tag is real content after all.
+  const tail = splitter.flush();
+  if (tail.reasoning) { reasoning += tail.reasoning; onDelta?.('', { reasoning: tail.reasoning }); }
+  if (tail.text) { content += tail.text; onDelta?.(tail.text, {}); }
   return { content, reasoning, timings: null, usage, toolCalls: toolCalls.filter(Boolean), finishReason };
 }
 
