@@ -423,17 +423,18 @@ export function registerChatPost(app) {
             const line = saverSummary(saved.report);
             if (line) send({ type: 'notice', message: line });
             req.log.info(saved.report, 'context saver');
-            if (remote) {
-              // The saved tokens would have been billed at input rate; log them
-              // as savings so the Costs panel shows the engine paying for itself.
-              try {
-                recordEvent({
-                  userId: req.user.id, convId: conv.id, modelId: conv.model_id,
-                  kind: 'context_saved', tokensIn: saved.report.savedTokens, costUsd: 0,
-                  baselineUsd: costFor(modelRowForRemoteId(conv.model_id), saved.report.savedTokens, 0, 0),
-                });
-              } catch { /* ledger best-effort */ }
-            }
+            // Logged for LOCAL turns too, with a zero baseline: there is no bill
+            // to save, but the tokens are still real and the Settings panel
+            // shows them. Only remote turns get a dollar baseline.
+            try {
+              recordEvent({
+                userId: req.user.id, convId: conv.id, modelId: conv.model_id,
+                kind: 'context_saved', tokensIn: saved.report.savedTokens, costUsd: 0,
+                baselineUsd: remote
+                  ? costFor(modelRowForRemoteId(conv.model_id), saved.report.savedTokens, 0, 0)
+                  : 0,
+              });
+            } catch { /* ledger best-effort */ }
           }
         } catch (err) {
           // A compression bug must never cost the user their turn.

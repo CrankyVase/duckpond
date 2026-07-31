@@ -75,6 +75,25 @@ const KIND_LABELS = {
   fallback: 'Fallback to a backup model',
 };
 
+/**
+ * Context-saver totals, in TOKENS rather than dollars.
+ *
+ * Separate from costsSummary's byKind because that one filters on
+ * `saved_usd > 0` — which hides every local turn and every free model, i.e.
+ * most of this pond. The engine's headline number is tokens not sent.
+ */
+export function saverStats(userId) {
+  const q = (since) => db.prepare(`
+    SELECT COALESCE(SUM(tokens_in), 0) AS tokens,
+           COALESCE(SUM(saved_usd), 0) AS usd,
+           COUNT(*) AS turns
+    FROM usage_events
+    WHERE user_id = ? AND kind IN ('context_saved', 'compact_savings') AND created_at >= ?`)
+    .get(userId, since);
+  const week = Math.floor(Date.now() / 1000) - 7 * 86400;
+  return { all: q(0), week: q(week) };
+}
+
 export function costsSummary(userId) {
   const totals = db.prepare(`
     SELECT COALESCE(SUM(cost_usd),0) AS spend,
@@ -113,7 +132,7 @@ export function costsSummary(userId) {
     GROUP BY provider ORDER BY spend DESC`).all(userId);
   const cacheSize = db.prepare(
     'SELECT COUNT(*) AS n, COALESCE(SUM(hits),0) AS hits FROM response_cache').get();
-  return { totals, month, byKind, byModel, byProvider, cache: cacheSize };
+  return { totals, month, byKind, byModel, byProvider, cache: cacheSize, saver: saverStats(userId) };
 }
 
 export function costsDaily(userId, days = 30) {

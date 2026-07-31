@@ -6,6 +6,7 @@
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
   import Brain from '@lucide/svelte/icons/brain';
+  import Gauge from '@lucide/svelte/icons/gauge';
   import ImageIcon from '@lucide/svelte/icons/image';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import KeyRound from '@lucide/svelte/icons/key-round';
@@ -24,6 +25,19 @@
   import UserPlus from '@lucide/svelte/icons/user-plus';
   import Wrench from '@lucide/svelte/icons/wrench';
   import X from '@lucide/svelte/icons/x';
+
+  // ---- context saver stats ----
+  let saver = $state(null);
+  $effect(() => {
+    if (!app.settingsOpen) return;
+    api('/api/costs/saver').then((s) => { saver = s; }).catch(() => { /* non-fatal */ });
+  });
+  const fmtTok = (n) => {
+    const v = Number(n) || 0;
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1000) return `${Math.round(v / 1000)}k`;
+    return String(v);
+  };
 
   // ---- tool permissions + GitHub ----
   let perm = $state({ mode: 'balanced' });
@@ -447,47 +461,10 @@
             <div class="hint">how quickly the controller corrects toward tau</div>
           </div>
         {/if}
-        <div class="srow">
-          <div class="shead"><span>Context budget</span><span class="sval mono">{Math.round(form.ctx_size / 1024)}k</span></div>
-          <input type="range" min="4096" max="131072" step="4096" bind:value={form.ctx_size} />
-          <div class="hint">capped by the router preset for this model</div>
+        <div class="hint">
+          Context budget, thinking, the context saver and the system prompt now live in
+          <b>Prompt &amp; token saving</b> below.
         </div>
-        <div class="row">
-          <div class="rlabel">
-            <div class="rt">Reasoning effort</div>
-            <div class="rd">translated to whatever this provider speaks — leave on auto unless you have a reason</div>
-          </div>
-          <select bind:value={form.thinking}>
-            <option value="auto">auto</option>
-            <option value="high">high</option>
-            <option value="low">low</option>
-            <option value="none">off</option>
-          </select>
-        </div>
-        {#if form.thinking !== 'none' && form.thinking !== 'auto'}
-          <div class="srow">
-            <div class="shead">
-              <span>Thinking budget</span>
-              <span class="sval mono">{form.thinking_budget ? `${Math.round(form.thinking_budget / 1000)}k` : 'auto'}</span>
-            </div>
-            <input type="range" min="0" max="32000" step="1000" bind:value={form.thinking_budget} />
-            <div class="hint">max tokens of private reasoning. 0 = let the effort level decide. Only providers that take a budget (Anthropic, Google, OpenRouter) use this.</div>
-          </div>
-        {/if}
-        <div class="row">
-          <div class="rlabel">
-            <div class="rt">Context saver</div>
-            <div class="rd">compresses tool output, drops repeated blocks and filler before sending. Auto only gets aggressive when the context fills up.</div>
-          </div>
-          <select bind:value={form.context_saver}>
-            <option value="auto">auto</option>
-            <option value="aggressive">aggressive</option>
-            <option value="off">off</option>
-          </select>
-        </div>
-        <label class="sys">System prompt
-          <textarea rows="3" bind:value={form.system_prompt} placeholder="(none)"></textarea>
-        </label>
         <div class="substitle">Structured output</div>
         <div class="hint">Force every reply from this model into a shape: a GBNF grammar or a JSON schema (both llama.cpp native). While either is set the model can only answer in that shape — tools, search, and widgets are off. Schema wins if both are filled in.</div>
         <label class="sys">GBNF grammar
@@ -498,6 +475,110 @@
         </label>
       {:else}
         <div class="hint">Pick a model to edit its generation settings.</div>
+      {/if}
+    </section>
+
+    <!-- prompt & token saving: everything that shapes what actually gets sent -->
+    <section>
+      <div class="stitle"><Gauge size={13} />Prompt &amp; token saving{#if model}<span class="formodel mono">{model.id}</span>{/if}</div>
+
+      {#if saver}
+        <div class="savehero">
+          <div class="savenum">{fmtTok(saver.all?.tokens ?? 0)}</div>
+          <div class="savelbl">
+            tokens kept out of prompts
+            {#if (saver.week?.tokens ?? 0) > 0}<br /><span class="rd">{fmtTok(saver.week.tokens)} in the last 7 days</span>{/if}
+            {#if (saver.all?.usd ?? 0) > 0.005}<br /><span class="rd">≈ ${saver.all.usd.toFixed(2)} not billed</span>{/if}
+          </div>
+        </div>
+      {/if}
+
+      {#if form}
+        <div class="row">
+          <div class="rlabel">
+            <div class="rt">Context saver</div>
+            <div class="rd">
+              Compresses tool output, replaces repeated blocks with a pointer, and strips
+              filler — code, paths, URLs and numbers are never touched.
+            </div>
+          </div>
+          <select bind:value={form.context_saver}>
+            <option value="auto">auto</option>
+            <option value="aggressive">aggressive</option>
+            <option value="off">off</option>
+          </select>
+        </div>
+        <div class="hint">
+          {#if form.context_saver === 'auto'}
+            <b>Auto</b> — tool output and repeats are always compressed; filler removal and
+            history trimming only kick in past 60% of the context window. Leave it here.
+          {:else if form.context_saver === 'aggressive'}
+            <b>Aggressive</b> — every engine runs from the first token. Saves more, and old
+            replies read tighter than the model wrote them.
+          {:else}
+            <b>Off</b> — nothing is compressed. Long tool output will eat the context window.
+          {/if}
+        </div>
+      {/if}
+
+      <div class="row">
+        <div class="rlabel">
+          <div class="rt">Auto-compaction</div>
+          <div class="rd">summarize older turns when the context fills up, instead of dropping them</div>
+        </div>
+        <button class="tog" class:on={prefs.autoCompact} role="switch" aria-checked={prefs.autoCompact}
+          onclick={() => { prefs.autoCompact = !prefs.autoCompact; savePrefs(); }}>
+          <span class="knob"></span>
+        </button>
+      </div>
+
+      {#if form}
+        <div class="srow">
+          <div class="shead"><span>Context budget</span><span class="sval mono">{Math.round(form.ctx_size / 1024)}k</span></div>
+          <input type="range" min="4096" max="131072" step="4096" bind:value={form.ctx_size} />
+          <div class="hint">capped by the router preset for local models; remote models use what the provider reports</div>
+        </div>
+
+        <div class="substitle">Thinking</div>
+        <div class="row">
+          <div class="rlabel">
+            <div class="rt">Reasoning effort</div>
+            <div class="rd">
+              translated to whatever this provider speaks — OpenAI effort levels, Anthropic
+              budgets, OpenRouter's own shape, qwen switches. Auto lets the provider decide.
+            </div>
+          </div>
+          <select bind:value={form.thinking}>
+            <option value="auto">auto</option>
+            <option value="high">high</option>
+            <option value="low">low</option>
+            <option value="none">off</option>
+          </select>
+        </div>
+        {#if model && !model.caps?.reasoning && model.remote}
+          <div class="hint">This model isn't flagged as a thinking model, so no reasoning setting is sent. Fix the flag in Providers if that's wrong.</div>
+        {/if}
+        {#if form.thinking !== 'none' && form.thinking !== 'auto'}
+          <div class="srow">
+            <div class="shead">
+              <span>Thinking budget</span>
+              <span class="sval mono">{form.thinking_budget ? `${Math.round(form.thinking_budget / 1000)}k` : 'auto'}</span>
+            </div>
+            <input type="range" min="0" max="32000" step="1000" bind:value={form.thinking_budget} />
+            <div class="hint">max tokens of private reasoning. 0 = let the effort level decide. Only providers that take a budget (Anthropic, Google, OpenRouter) use it.</div>
+          </div>
+        {/if}
+
+        <div class="substitle">System prompt</div>
+        <div class="hint">Added after the core prompt, for this model only. The core prompt every model shares is further down{#if app.user?.role !== 'owner'} (owner only){/if}.</div>
+        <label class="sys">
+          <textarea rows="3" bind:value={form.system_prompt} placeholder="(none)"></textarea>
+        </label>
+        <button class="wide" onclick={save} disabled={saving}>
+          <Save size={13} />{saving ? 'Saving…' : 'Save prompt & saving settings'}
+        </button>
+      {:else}
+        <div class="hint">Pick a model to edit its prompt and saving settings.</div>
       {/if}
     </section>
 
@@ -1022,6 +1103,19 @@
   .del:hover { color: var(--red); }
   .invite { display: flex; flex-direction: column; gap: 8px; margin-top: 2px; }
   .invite input { font-size: 13px; padding: 8px 12px; }
+
+  .savehero {
+    display: flex; align-items: center; gap: calc(12px * var(--rf));
+    padding: calc(11px * var(--rf)) calc(13px * var(--rf));
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .savenum {
+    font-size: calc(24px * var(--rf)); font-weight: 700; color: var(--accent);
+    line-height: 1; font-variant-numeric: tabular-nums;
+  }
+  .savelbl { font-size: calc(12px * var(--rf)); color: var(--text-dim); line-height: 1.5; }
 
   .substitle { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.07em; margin-top: 4px; }
   .coreta { resize: vertical; font-size: 12px; font-family: var(--mono); line-height: 1.55; min-height: 140px; }
