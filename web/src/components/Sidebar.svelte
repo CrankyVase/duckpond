@@ -19,6 +19,17 @@
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
 
+  // Build stamp — fetched once, never changes while the page is open.
+  let build = $state(null);
+  $effect(() => {
+    api('/api/version').then((b) => { build = b; }).catch(() => { /* no stamp, no harm */ });
+  });
+  const buildTitle = $derived(build
+    ? `v${build.version} · commit ${build.commit ?? 'unknown'}`
+      + `${build.commit_date ? ` · ${new Date(build.commit_date).toLocaleString()}` : ''}`
+      + `\nnode ${build.node}`
+    : '');
+
   // Duck Pond Control — owner only. Prod: dash.crankyvase.site · local: :8082
   function controlUrl() {
     const { protocol, hostname, port } = location;
@@ -265,6 +276,16 @@
       </button>
       <button class="ghost out" onclick={logout} title="Sign out"><LogOut size={14} /></button>
     </div>
+
+    <!-- Build stamp. The version says what this is; the commit says exactly
+         which build is live, which is the bit that matters when the deploy
+         timer has been running and you want to know if your fix is up yet. -->
+    {#if build}
+      <div class="build" title={buildTitle}>
+        DuckPond v{build.version}{build.codename ? ` “${build.codename}”` : ''}
+        {#if build.commit}<span class="sha">{build.commit}</span>{/if}
+      </div>
+    {/if}
   </div>
 </aside>
 
@@ -421,6 +442,19 @@
     border-top: 1px solid var(--border-soft);
     display: flex; align-items: center; gap: 10px;
     flex-shrink: 0; min-width: 0;
+  }
+  .build {
+    padding: 0 14px 9px;
+    font-size: 10px;
+    color: var(--text-faint);
+    letter-spacing: 0.02em;
+    display: flex; align-items: center; gap: 5px;
+    flex-shrink: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .build .sha {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    opacity: 0.75;
   }
   .avatar {
     width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;

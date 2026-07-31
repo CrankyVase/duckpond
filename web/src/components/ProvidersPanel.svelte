@@ -17,6 +17,9 @@
   import PlugZap from '@lucide/svelte/icons/plug-zap';
   import Plus from '@lucide/svelte/icons/plus';
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+  import Search from '@lucide/svelte/icons/search';
+  import Sparkles from '@lucide/svelte/icons/sparkles';
+  import Star from '@lucide/svelte/icons/star';
   import Trash2 from '@lucide/svelte/icons/trash-2';
 
   const isOwner = $derived(app.user?.role === 'owner');
@@ -154,24 +157,110 @@
   // ---- expandable models table ----
   let expanded = $state(null);       // provider id with open catalog
   let modelsByProv = $state({});     // id -> array | 'loading' | 'error'
+  let countsByProv = $state({});     // id -> { total, on, hidden, favorites }
   let rowSaving = $state({});        // `${pid}:${model_id}` -> bool
+  let bulkBusy = $state({});         // provider id -> bool
+  // Catalog filters. Searching server-side matters here: one key can import
+  // 400+ models and re-filtering that in the browser on every keystroke is the
+  // difference between usable and not.
+  let query = $state('');
+  let showFilter = $state('visible'); // visible | on | off | hidden | all
+  let capFilter = $state('');
+
+  const CAPS = [
+    { key: 'reasoning', label: 'Thinks' },
+    { key: 'vision', label: 'Vision' },
+    { key: 'tools', label: 'Tools' },
+    { key: 'free', label: 'Free' },
+  ];
 
   async function toggleExpand(p) {
     if (expanded === p.id) { expanded = null; return; }
     expanded = p.id;
-    if (!modelsByProv[p.id] || modelsByProv[p.id] === 'error') await loadModelsFor(p);
+    query = ''; showFilter = 'visible'; capFilter = '';
+    await loadModelsFor(p, true);
   }
 
   async function loadModelsFor(p, force = false) {
     if (!force && Array.isArray(modelsByProv[p.id])) return;
     modelsByProv = { ...modelsByProv, [p.id]: 'loading' };
     try {
-      const rows = await api(`/api/providers/${p.id}/models`);
-      modelsByProv = { ...modelsByProv, [p.id]: rows };
+      const qs = new URLSearchParams();
+      if (query.trim()) qs.set('q', query.trim());
+      if (showFilter) qs.set('show', showFilter);
+      if (capFilter) qs.set('cap', capFilter);
+      const r = await api(`/api/providers/${p.id}/models?${qs}`);
+      modelsByProv = { ...modelsByProv, [p.id]: r.models ?? [] };
+      countsByProv = { ...countsByProv, [p.id]: r.counts ?? null };
     } catch (e) {
       modelsByProv = { ...modelsByProv, [p.id]: 'error' };
       toast(`Couldn't load catalog: ${e.error ?? e.message ?? e}`, 'error');
     }
+  }
+
+  // Debounced so typing in the search box doesn't fire a request per keystroke.
+  let searchTimer = null;
+  function onSearch(p) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadModelsFor(p, true), 220);
+  }
+
+  /**
+   * Bulk curation. With no explicit ids the server applies the action to
+   * everything matching the CURRENT filter — that is how "disable everything
+   * I'm not using" is two clicks instead of four hundred.
+   */
+  async function bulk(p, action, { filtered = true } = {}) {
+    bulkBusy = { ...bulkBusy, [p.id]: true };
+    try {
+      const body = { action };
+      if (filtered) {
+        body.filter = {
+          q: query.trim() || undefined,
+          cap: capFilter || undefined,
+          show: showFilter === 'visible' || showFilter === 'all' ? undefined : showFilter,
+        };
+      }
+      const r = await api(`/api/providers/${p.id}/models/bulk`, { method: 'POST', body });
+      toast(`${r.changed} model${r.changed === 1 ? '' : 's'} updated — ${r.on} on in the picker`, 'ok');
+      await loadModelsFor(p, true);
+      await load();
+      loadModels();
+    } catch (e) {
+      toast(String(e.error ?? e.message ?? e), 'error');
+    }
+    bulkBusy = { ...bulkBusy, [p.id]: false };
+  }
+
+  async function curateFor(p) {
+    bulkBusy = { ...bulkBusy, [p.id]: true };
+    try {
+      const r = await api(`/api/providers/${p.id}/models/curate`, { method: 'POST', body: { limit: 8 } });
+      toast(r.enabled ? `Picked ${r.enabled} models to start with` : 'Nothing obvious to pick — enable a few by hand', r.enabled ? 'ok' : 'error');
+      await loadModelsFor(p, true);
+      await load();
+      loadModels();
+    } catch (e) {
+      toast(String(e.error ?? e.message ?? e), 'error');
+    }
+    bulkBusy = { ...bulkBusy, [p.id]: false };
+  }
+
+  async function toggleFlag(p, m, field) {
+    const key = `${p.id}:${m.model_id}`;
+    rowSaving = { ...rowSaving, [key]: true };
+    try {
+      const r = await api(`/api/providers/${p.id}/models`, {
+        method: 'PATCH',
+        body: { model_id: m.model_id, [field]: !m[field] },
+      });
+      m[field] = r.model?.[field] ?? !m[field];
+      await load();
+      loadModels();
+    } catch (e) {
+      toast(String(e.error ?? e.message ?? e), 'error');
+    }
+    rowSaving = { ...rowSaving, [key]: false };
   }
 
   const numOrNull = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? null : Number(v));
@@ -363,6 +452,24 @@
 
           <div class="prow">
             <div class="cachetog">
+              <span class="ct">New models arrive</span>
+              {#if isOwner}
+                <select class="sel" value={p.import_mode ?? 'all'}
+                  title="What a catalog sync does with models it has never seen before"
+                  onchange={(e) => patchProvider(p, { import_mode: e.target.value }, `New models will arrive ${e.target.value === 'all' ? 'switched on' : e.target.value === 'free' ? 'on only if free' : 'switched off'}`)}>
+                  <option value="curated">off — I'll pick</option>
+                  <option value="free">on if free</option>
+                  <option value="all">on</option>
+                </select>
+              {:else}
+                <span class="statetag">{p.import_mode ?? 'all'}</span>
+              {/if}
+              <span class="pmeta inline">{p.models_on ?? 0} of {p.models ?? 0} in the picker</span>
+            </div>
+          </div>
+
+          <div class="prow">
+            <div class="cachetog">
               <span class="ct">Monthly cap</span>
               {#if isOwner}
                 <input class="numin capin" type="number" min="0" step="1" placeholder="no cap"
@@ -380,12 +487,65 @@
 
           {#if expanded === p.id}
             <div class="mtable">
+              <!-- Curation bar: search, capability filter, and the bulk actions
+                   that turn "400 models imported" into "the six I use". -->
+              <div class="curate">
+                <div class="cline">
+                  <div class="searchwrap">
+                    <Search size={14} />
+                    <input class="search" type="search" placeholder="Search this provider's models…"
+                      bind:value={query} oninput={() => onSearch(p)} />
+                  </div>
+                  <select class="sel" bind:value={showFilter} onchange={() => loadModelsFor(p, true)}>
+                    <option value="visible">All visible</option>
+                    <option value="on">On in picker</option>
+                    <option value="off">Off</option>
+                    <option value="hidden">Hidden</option>
+                    <option value="all">Everything</option>
+                  </select>
+                </div>
+                <div class="cline">
+                  <div class="chips">
+                    <button class="chip" class:on={capFilter === ''}
+                      onclick={() => { capFilter = ''; loadModelsFor(p, true); }}>Any</button>
+                    {#each CAPS as c (c.key)}
+                      <button class="chip" class:on={capFilter === c.key}
+                        onclick={() => { capFilter = capFilter === c.key ? '' : c.key; loadModelsFor(p, true); }}>{c.label}</button>
+                    {/each}
+                  </div>
+                  {#if countsByProv[p.id]}
+                    <span class="counts">
+                      {countsByProv[p.id].on} on · {countsByProv[p.id].total} total
+                      {#if countsByProv[p.id].hidden}· {countsByProv[p.id].hidden} hidden{/if}
+                    </span>
+                  {/if}
+                </div>
+                {#if isOwner}
+                  <div class="cline bulk">
+                    <span class="blabel">Apply to everything matching:</span>
+                    <button class="ghost sm" disabled={bulkBusy[p.id]} onclick={() => bulk(p, 'enable')}>Turn on</button>
+                    <button class="ghost sm" disabled={bulkBusy[p.id]} onclick={() => bulk(p, 'disable')}>Turn off</button>
+                    <button class="ghost sm" disabled={bulkBusy[p.id]} onclick={() => bulk(p, 'hide')}>Hide</button>
+                    <button class="ghost sm" disabled={bulkBusy[p.id]} onclick={() => bulk(p, 'show')}>Unhide</button>
+                    <button class="ghost sm accent" disabled={bulkBusy[p.id]} onclick={() => curateFor(p)}
+                      title="Enable a sensible starter set — recognisable, capable, cheap">
+                      <Sparkles size={13} />Pick for me
+                    </button>
+                  </div>
+                  <div class="tblhint">Favourites are never swept away by a bulk turn-off or hide.</div>
+                {/if}
+              </div>
+
               {#if modelsByProv[p.id] === 'loading' || modelsByProv[p.id] == null}
                 <div class="empty shimmer">loading catalog…</div>
               {:else if modelsByProv[p.id] === 'error'}
                 <div class="empty">Couldn't load the catalog — try Sync now.</div>
               {:else if !modelsByProv[p.id].length}
-                <div class="empty">No models in the catalog — try Sync now.</div>
+                <div class="empty">
+                  {query || capFilter || showFilter !== 'visible'
+                    ? 'Nothing matches those filters.'
+                    : 'No models in the catalog — try Sync now.'}
+                </div>
               {:else}
                 <ProviderFallback {p} models={modelsByProv[p.id]} {isOwner}
                   onsave={(body, msg) => patchProvider(p, body, msg)} />
@@ -393,14 +553,32 @@
                   <table>
                     <thead>
                       <tr>
+                        <th class="num" title="Favourite — pinned to the top of the picker">★</th>
                         <th>Model</th><th class="num">Ctx</th><th class="num">Max out</th><th class="num">$ in /1M</th>
-                        <th class="num">$ out /1M</th><th class="num">$ cached /1M</th><th class="num">On</th>
+                        <th class="num">$ out /1M</th><th class="num">$ cached /1M</th>
+                        <th class="num">On</th><th class="num" title="Hide from this catalog entirely">Hide</th>
                       </tr>
                     </thead>
                     <tbody>
                       {#each modelsByProv[p.id] as m (m.model_id)}
-                        <tr class:muted={!m.enabled}>
-                          <td class="mono mid" title={m.model_id}>{m.model_id}</td>
+                        <tr class:muted={!m.enabled} class:hidden-row={m.hidden}>
+                          <td class="num">
+                            <button class="star" class:on={m.favorite} disabled={!isOwner || rowSaving[`${p.id}:${m.model_id}`]}
+                              title={m.favorite ? 'Favourited' : 'Favourite this model'}
+                              onclick={() => toggleFlag(p, m, 'favorite')}>
+                              <Star size={13} fill={m.favorite ? 'currentColor' : 'none'} />
+                            </button>
+                          </td>
+                          <td class="mono mid" title={m.note || m.model_id}>
+                            {m.label || m.model_id}
+                            {#if m.caps}
+                              <span class="capr">
+                                {#each CAPS as c (c.key)}
+                                  {#if m.caps[c.key]}<span class="cap" title={c.label}>{c.label}</span>{/if}
+                                {/each}
+                              </span>
+                            {/if}
+                          </td>
                           <td class="num">
                             {#if isOwner}
                               <input class="numin" type="number" min="0" step="1024"
@@ -439,6 +617,12 @@
                             <input type="checkbox" checked={!!m.enabled}
                               disabled={!isOwner || rowSaving[`${p.id}:${m.model_id}`]}
                               onchange={() => toggleModelEnabled(p, m)} />
+                          </td>
+                          <td class="num">
+                            <input type="checkbox" checked={!!m.hidden}
+                              title="Hide from the catalog — for the hundreds of dated snapshots you will never pick"
+                              disabled={!isOwner || rowSaving[`${p.id}:${m.model_id}`]}
+                              onchange={() => toggleFlag(p, m, 'hidden')} />
                           </td>
                         </tr>
                       {/each}
@@ -602,6 +786,62 @@
   }
   input[type='checkbox'] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
   .tblhint { margin-top: 8px; font-size: 11px; color: var(--text-faint); }
+
+  /* ---- catalog curation bar ---- */
+  .curate {
+    display: flex; flex-direction: column; gap: calc(8px * var(--rf));
+    padding: calc(10px * var(--rf)); margin-bottom: calc(10px * var(--rf));
+    border: 1px solid var(--border); border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-card) 60%, transparent);
+  }
+  .cline { display: flex; align-items: center; gap: calc(8px * var(--rf)); flex-wrap: wrap; }
+  .searchwrap {
+    display: flex; align-items: center; gap: 6px; flex: 1 1 220px;
+    padding: 0 calc(9px * var(--rf)); border: 1px solid var(--border);
+    border-radius: 8px; background: var(--bg-input, var(--bg-card));
+    color: var(--text-faint);
+  }
+  .search {
+    flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text);
+    padding: calc(7px * var(--rf)) 0; font-size: calc(13px * var(--rf)); outline: none;
+  }
+  .sel {
+    padding: calc(6px * var(--rf)) calc(8px * var(--rf));
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-card); color: var(--text); font-size: calc(12px * var(--rf));
+  }
+  .chips { display: flex; gap: 5px; flex-wrap: wrap; }
+  .chip {
+    padding: calc(4px * var(--rf)) calc(9px * var(--rf));
+    border: 1px solid var(--border); border-radius: 999px;
+    background: transparent; color: var(--text-faint);
+    font-size: calc(11px * var(--rf)); cursor: pointer;
+  }
+  .chip:hover { color: var(--text); }
+  .chip.on {
+    color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .counts { margin-left: auto; font-size: calc(11px * var(--rf)); color: var(--text-faint); }
+  .bulk { border-top: 1px dashed var(--border); padding-top: calc(8px * var(--rf)); }
+  .blabel { font-size: calc(11px * var(--rf)); color: var(--text-faint); }
+  .ghost.sm.accent { color: var(--accent); }
+  .pmeta.inline { margin-left: 8px; font-size: calc(11px * var(--rf)); color: var(--text-faint); }
+
+  .star {
+    display: inline-flex; padding: 2px; border: 0; background: transparent;
+    color: var(--text-faint); cursor: pointer; border-radius: 4px;
+  }
+  .star:hover:not(:disabled) { color: var(--text); }
+  .star.on { color: var(--accent); }
+  .star:disabled { cursor: default; opacity: 0.5; }
+  .capr { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+  .cap {
+    font-size: calc(9px * var(--rf)); text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 1px 5px; border-radius: 4px; color: var(--text-faint);
+    border: 1px solid var(--border); font-family: var(--font-ui, inherit);
+  }
+  tr.hidden-row { opacity: 0.4; }
 
   @media (max-width: 768px) {
     .prov {

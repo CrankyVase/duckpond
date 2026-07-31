@@ -7,6 +7,7 @@
   import Duck from './Duck.svelte';
   import Brain from '@lucide/svelte/icons/brain';
   import ImageIcon from '@lucide/svelte/icons/image';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
   import KeyRound from '@lucide/svelte/icons/key-round';
   import LinkIcon from '@lucide/svelte/icons/link';
   import Palette from '@lucide/svelte/icons/palette';
@@ -23,6 +24,80 @@
   import UserPlus from '@lucide/svelte/icons/user-plus';
   import Wrench from '@lucide/svelte/icons/wrench';
   import X from '@lucide/svelte/icons/x';
+
+  // ---- tool permissions + GitHub ----
+  let perm = $state({ mode: 'balanced' });
+  let permSummary = $state(null);
+  let auditOpen = $state(false);
+  let auditRows = $state([]);
+  let gh = $state(null);
+  let ghToken = $state('');
+  let ghBusy = $state(false);
+
+  $effect(() => {
+    api('/api/permissions')
+      .then((r) => { perm = r.policy ?? perm; permSummary = r.summary ?? null; })
+      .catch(() => { /* non-fatal */ });
+    api('/api/github').then((r) => { gh = r.account; }).catch(() => { /* non-fatal */ });
+  });
+
+  async function savePermMode(mode) {
+    const before = perm.mode;
+    perm = { ...perm, mode };                    // optimistic
+    try {
+      const r = await api('/api/permissions', { method: 'PUT', body: { mode } });
+      perm = r.policy;
+      toast(`Permission mode: ${mode}`, 'ok');
+    } catch (e) {
+      perm = { ...perm, mode: before };
+      toast(String(e.error ?? e.message ?? e), 'error');
+    }
+  }
+
+  async function toggleAudit() {
+    auditOpen = !auditOpen;
+    if (!auditOpen) return;
+    try {
+      const r = await api('/api/permissions/audit?limit=60');
+      auditRows = r.events ?? [];
+      permSummary = r.summary ?? permSummary;
+    } catch (e) { toast(String(e.error ?? e.message ?? e), 'error'); }
+  }
+
+  async function connectGithub() {
+    ghBusy = true;
+    try {
+      const r = await api('/api/github', { method: 'POST', body: { token: ghToken.trim() } });
+      gh = r.account;
+      ghToken = '';
+      toast(`Connected as ${gh.login}`, 'ok');
+    } catch (e) {
+      toast(String(e.error ?? e.message ?? e), 'error');
+    }
+    ghBusy = false;
+  }
+
+  async function saveDefaultRepo(v) {
+    try {
+      const r = await api('/api/github', { method: 'PATCH', body: { default_repo: v.trim() } });
+      gh = r.account;
+    } catch (e) { toast(String(e.error ?? e.message ?? e), 'error'); }
+  }
+
+  async function disconnectGithub() {
+    const ok = await confirmDialog({
+      title: 'Disconnect GitHub?',
+      body: 'The token is deleted from this pond. Nothing on GitHub changes.',
+      confirmLabel: 'Disconnect',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api('/api/github', { method: 'DELETE' });
+      gh = null;
+      toast('GitHub disconnected', 'ok');
+    } catch (e) { toast(String(e.error ?? e.message ?? e), 'error'); }
+  }
 
   const model = $derived(app.models.find((m) => m.id === app.conv?.model_id));
   let form = $state(null);
@@ -380,13 +455,34 @@
         <div class="row">
           <div class="rlabel">
             <div class="rt">Reasoning effort</div>
-            <div class="rd">only applies to thinking models</div>
+            <div class="rd">translated to whatever this provider speaks — leave on auto unless you have a reason</div>
           </div>
           <select bind:value={form.thinking}>
             <option value="auto">auto</option>
             <option value="high">high</option>
             <option value="low">low</option>
             <option value="none">off</option>
+          </select>
+        </div>
+        {#if form.thinking !== 'none' && form.thinking !== 'auto'}
+          <div class="srow">
+            <div class="shead">
+              <span>Thinking budget</span>
+              <span class="sval mono">{form.thinking_budget ? `${Math.round(form.thinking_budget / 1000)}k` : 'auto'}</span>
+            </div>
+            <input type="range" min="0" max="32000" step="1000" bind:value={form.thinking_budget} />
+            <div class="hint">max tokens of private reasoning. 0 = let the effort level decide. Only providers that take a budget (Anthropic, Google, OpenRouter) use this.</div>
+          </div>
+        {/if}
+        <div class="row">
+          <div class="rlabel">
+            <div class="rt">Context saver</div>
+            <div class="rd">compresses tool output, drops repeated blocks and filler before sending. Auto only gets aggressive when the context fills up.</div>
+          </div>
+          <select bind:value={form.context_saver}>
+            <option value="auto">auto</option>
+            <option value="aggressive">aggressive</option>
+            <option value="off">off</option>
           </select>
         </div>
         <label class="sys">System prompt
@@ -549,6 +645,82 @@
             <div class="hint">Nothing remembered yet — it learns as you chat.</div>
           {/each}
         </div>
+      {/if}
+    </section>
+
+    <!-- what the model may do on its own -->
+    <section>
+      <div class="stitle"><ShieldCheck size={13} />What the model may do</div>
+      <div class="hint">
+        Reading is always free. This decides what happens when the model wants to change
+        something — it pauses and shows you an approve/deny card instead of just doing it.
+      </div>
+      <div class="row">
+        <div class="rlabel">
+          <div class="rt">Permission mode</div>
+          <div class="rd">
+            {#if perm.mode === 'open'}Everything runs unattended. Dangerous shell commands still ask.
+            {:else if perm.mode === 'balanced'}Files in the sandbox are free; shell commands and anything leaving this machine ask first.
+            {:else if perm.mode === 'careful'}Every change asks first, including sandbox file writes.
+            {:else}The model can look but never touch.
+            {/if}
+          </div>
+        </div>
+        <select value={perm.mode} onchange={(e) => savePermMode(e.target.value)}>
+          <option value="open">open</option>
+          <option value="balanced">balanced</option>
+          <option value="careful">careful</option>
+          <option value="readonly">read-only</option>
+        </select>
+      </div>
+      {#if permSummary}
+        <div class="hint">
+          Last 7 days: <b>{permSummary.allowed}</b> ran automatically ·
+          <b>{permSummary.asked}</b> asked you · <b>{permSummary.denied}</b> blocked.
+        </div>
+      {/if}
+      <button class="wide" onclick={toggleAudit}>
+        {auditOpen ? 'Hide' : 'Show'} activity log
+      </button>
+      {#if auditOpen}
+        <div class="memlist">
+          {#each auditRows as a (a.id)}
+            <div class="memrow">
+              <span class="mono">{a.tool}</span>
+              <span class="statetag" class:on={a.decision === 'allow' || a.decision === 'approved'}>{a.decision}</span>
+              <span class="rd">{a.detail}</span>
+            </div>
+          {:else}
+            <div class="hint">Nothing yet — the model has not changed anything.</div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <!-- github -->
+    <section>
+      <div class="stitle"><GitBranch size={13} />GitHub</div>
+      {#if gh}
+        <div class="hint">
+          Connected as <b>{gh.login}</b> · token {gh.token_hint}
+          {#if gh.scopes}· scopes {gh.scopes}{/if}
+        </div>
+        <input placeholder="default repo, e.g. CrankyVase/duckpond"
+          value={gh.default_repo ?? ''} onchange={(e) => saveDefaultRepo(e.target.value)} />
+        <div class="hint">The model assumes this repo when you don't name one. It can read anything your token can see; commits, branches and pull requests always ask you first, and it will never commit to your default branch.</div>
+        <button class="wide danger" onclick={disconnectGithub}>Disconnect</button>
+      {:else}
+        <div class="hint">
+          Connect a GitHub account and the model can read your repos, pull one into its
+          workspace, and — with your approval each time — commit, push and open pull requests.
+          Use a fine-grained personal access token with <b>Contents: read &amp; write</b> and
+          <b>Pull requests: read &amp; write</b>.
+        </div>
+        <input type="password" placeholder="personal access token (ghp_… or github_pat_…)"
+          bind:value={ghToken} autocomplete="off" />
+        <button class="wide" onclick={connectGithub} disabled={ghBusy || ghToken.length < 10}>
+          {ghBusy ? 'Checking…' : 'Connect GitHub'}
+        </button>
       {/if}
     </section>
 
