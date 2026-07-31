@@ -5,6 +5,7 @@
   import {
     app, closeSidebarIfMobile, loadConversations, newConversation, openConversation,
   } from '../lib/state.svelte.js';
+  import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -13,6 +14,7 @@
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Palette from '@lucide/svelte/icons/palette';
+  import Pencil from '@lucide/svelte/icons/pencil';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
   import PiggyBank from '@lucide/svelte/icons/piggy-bank';
   import Search from '@lucide/svelte/icons/search';
@@ -118,6 +120,34 @@
     return out.filter((g) => g.items.length);
   });
 
+  // ----- inline rename (pencil on hover, or double-click the title) -----
+  let renamingId = $state(null);
+  let renameDraft = $state('');
+  function startRename(c, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    renamingId = c.id;
+    renameDraft = c.title;
+  }
+  async function commitRename(c) {
+    if (renamingId !== c.id) return;
+    const t = renameDraft.trim();
+    renamingId = null;
+    if (!t || t === c.title) return;
+    c.title = t; // optimistic — the list is ours
+    if (app.conv?.id === c.id) app.conv.title = t;
+    try {
+      await api(`/api/conversations/${c.id}`, { method: 'PATCH', body: { title: t } });
+    } catch (err) {
+      toast(`Rename failed: ${err.message ?? err}`, 'error');
+      loadConversations();
+    }
+  }
+  /** svelte action: focus + select the rename input once it mounts.
+   *  Microtask-deferred — synchronous focus() inside the mount flush trips
+   *  document-level focus listeners (mascot) into unsafe state writes. */
+  function focusSelect(node) { queueMicrotask(() => { node.focus(); node.select(); }); }
+
   async function remove(id, e) {
     e.stopPropagation();
     e.preventDefault();
@@ -204,15 +234,30 @@
       {#each groups as g (g.label)}
         <div class="group">{g.label}</div>
         {#each g.items as c (c.id)}
-          <a class="item" class:active={app.conv?.id === c.id}
+          <a class="item" class:active={app.conv?.id === c.id} class:renaming={renamingId === c.id}
             href={app.user?.id != null ? chatPath(app.user.id, c.title, c.id) : '#'}
-            onclick={(e) => { e.preventDefault(); openChat(c.id); }}
+            onclick={(e) => { e.preventDefault(); if (renamingId !== c.id) openChat(c.id); }}
+            ondblclick={(e) => startRename(c, e)}
             role="link">
             <span class="ci"><MessageSquare size={13} /></span>
-            <span class="title">{c.title}</span>
-            <button class="del" onclick={(e) => remove(c.id, e)} title="Delete chat">
-              <X size={13} />
-            </button>
+            {#if renamingId === c.id}
+              <input class="rninput" bind:value={renameDraft} use:focusSelect
+                onclick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                onblur={() => commitRename(c)}
+                onkeydown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') commitRename(c);
+                  if (e.key === 'Escape') renamingId = null;
+                }} />
+            {:else}
+              <span class="title">{c.title}</span>
+              <button class="act rn" onclick={(e) => startRename(c, e)} title="Rename chat">
+                <Pencil size={12} />
+              </button>
+              <button class="act del" onclick={(e) => remove(c.id, e)} title="Delete chat">
+                <X size={13} />
+              </button>
+            {/if}
           </a>
         {/each}
       {:else}
@@ -386,21 +431,33 @@
     transition: background 110ms ease, color 110ms ease;
   }
   .item:hover { background: var(--bg-hover); color: var(--text); }
-  .item.active { background: var(--bg-raised); color: var(--text); }
+  .item.active { background: var(--bg-raised); color: var(--text); position: relative; }
+  /* small accent tick in the nav gutter — instant "you are here" */
+  .item.active::before {
+    content: ''; position: absolute; left: -6px; top: 22%; bottom: 22%;
+    width: 3px; border-radius: 3px; background: var(--accent);
+  }
   .ci { display: grid; place-items: center; color: var(--text-faint); flex-shrink: 0; }
   .item.active .ci { color: var(--text-dim); }
   .title {
     flex: 1 1 auto; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .del {
+  .act {
     all: unset; cursor: pointer; display: grid; place-items: center;
     width: 22px; height: 22px; border-radius: calc(6px * var(--rf));
     color: var(--text-dim); flex-shrink: 0;
     opacity: 0; transition: opacity 120ms ease, background 120ms ease;
   }
-  .item:hover .del { opacity: 0.7; }
+  .item:hover .act { opacity: 0.7; }
+  .rn:hover { background: var(--bg-raised); color: var(--text); opacity: 1; }
   .del:hover { background: rgba(192, 96, 79, 0.15); color: var(--red); opacity: 1; }
+  .rninput {
+    flex: 1; min-width: 0;
+    background: var(--bg-input); border: 1px solid var(--accent-dim);
+    border-radius: calc(6px * var(--rf)); padding: 3px 8px;
+    font-size: 13px; box-shadow: none;
+  }
   .none { padding: 18px 12px; color: var(--text-faint); font-size: 12.5px; text-align: center; }
 
   .item.result { flex-direction: column; align-items: stretch; gap: 3px; padding: 8px 10px; }
@@ -566,14 +623,15 @@
       font-size: 14.5px;
       gap: 10px;
     }
-    /* always show delete on touch */
-    .del {
+    /* always show rename/delete on touch */
+    .act {
       opacity: 0.55;
       width: 34px; height: 34px;
     }
-    .item:hover .del,
-    .item .del { opacity: 0.75; }
+    .item:hover .act,
+    .item .act { opacity: 0.75; }
     .del:active { opacity: 1; background: rgba(192, 96, 79, 0.18); color: var(--red); }
+    .rninput { font-size: 16px; padding: 6px 10px; }
 
     /* 2×2 page tiles (Control spans its own row via .page.control) */
     .pages {

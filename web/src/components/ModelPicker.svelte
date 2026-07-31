@@ -19,6 +19,9 @@
 
   // Remote ids look like `r{providerId}:{model_id}` — show just the model part.
   const dispName = (m) => (m?.remote ? m.id.slice(m.id.indexOf(':') + 1) : m?.id);
+  // Same stripping for a bare id string (fallback when the models list hasn't
+  // loaded) — the r1: plumbing prefix should never reach the screen.
+  const stripRemote = (id) => (id && /^r\d+:/.test(id) ? id.slice(id.indexOf(':') + 1) : id);
 
   // USD per 1M tokens, compact: $0.005 / $0.50 / $12.30
   function perM(p) {
@@ -41,13 +44,15 @@
       || (m.remote && (m.provider?.name ?? '').toLowerCase().includes(q)));
   });
 
-  // Local group first (original server order), then one group per provider,
-  // providers + their models alphabetically. Items keep their flat index into
-  // `filtered` so keyboard hover/pick stays correct.
+  // Favorites first (stars from Providers curation + your default), then Local,
+  // then one group per provider — providers + their models alphabetically.
+  // Items keep their flat index into `filtered` so keyboard hover/pick stays correct.
   const groups = $derived.by(() => {
+    const favs = [];
     const locals = [];
     const byProv = new Map();
     filtered.forEach((m, i) => {
+      if (m.favorite || m.id === app.user?.default_model_id) { favs.push({ m, i }); return; }
       if (!m.remote) { locals.push({ m, i }); return; }
       const key = m.provider?.id ?? '?';
       if (!byProv.has(key)) byProv.set(key, { label: m.provider?.name ?? 'Remote', items: [] });
@@ -56,11 +61,21 @@
     const provs = [...byProv.values()];
     for (const g of provs) g.items.sort((a, b) => dispName(a.m).localeCompare(dispName(b.m)));
     provs.sort((a, b) => a.label.localeCompare(b.label));
-    return locals.length ? [{ label: 'Local', items: locals }, ...provs] : provs;
+    const out = [];
+    if (favs.length) out.push({ label: 'Favorites', items: favs });
+    if (locals.length) out.push({ label: 'Local', items: locals });
+    return [...out, ...provs];
   });
 
   $effect(() => {
-    if (app.modelPickerOpen && inputEl) { inputEl.focus(); search = ''; hoverIdx = 0; }
+    if (app.modelPickerOpen && inputEl) {
+      search = '';
+      hoverIdx = 0;
+      // focus after the flush — synchronous focus() here dispatches focusin
+      // into document listeners while Svelte is mid-flush (unsafe mutation)
+      const el = inputEl;
+      queueMicrotask(() => el.focus());
+    }
   });
 
   async function pick(m) {
@@ -114,7 +129,7 @@
   <button class="current" onclick={() => (app.modelPickerOpen = !app.modelPickerOpen)}
     title="Switch model (Ctrl+K)">
     <span class="dot" style="background:{dot(current?.status)}"></span>
-    <span class="name">{dispName(current) ?? app.conv?.model_id ?? 'Pick a model'}</span>
+    <span class="name">{dispName(current) ?? stripRemote(app.conv?.model_id) ?? 'Pick a model'}</span>
     <span class="chev" class:flip={app.modelPickerOpen}><ChevronDown size={14} /></span>
   </button>
 
@@ -195,6 +210,10 @@
         {:else}
           <div class="empty">no matches</div>
         {/each}
+      </div>
+      <div class="foot">
+        <span><kbd>↑</kbd> <kbd>↓</kbd> navigate · <kbd>Enter</kbd> pick</span>
+        <span><kbd>Ctrl</kbd>+<kbd>K</kbd> opens this anywhere</span>
       </div>
     </div>
   {/if}
@@ -317,4 +336,14 @@
   .eject:hover { background: rgba(192, 96, 79, 0.16); color: var(--red); }
   .eject:disabled { opacity: 0.4; cursor: default; }
   .empty { padding: 14px; color: var(--text-faint); text-align: center; font-size: 13px; }
+  .foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 8px 10px 2px; margin-top: 4px;
+    border-top: 1px solid var(--border-soft);
+    font-size: 10.5px; color: var(--text-faint);
+    user-select: none; flex-shrink: 0;
+  }
+  @media (max-width: 768px) {
+    .foot { display: none; } /* keyboard hints mean nothing on touch */
+  }
 </style>

@@ -69,6 +69,12 @@
     for (const st of search.steps ?? []) for (const site of st.sites) all.push(site);
     return all;
   });
+  // which model wrote this reply — matters once a chat has switched models
+  const modelLabel = $derived.by(() => {
+    const id = msg.model_id;
+    if (!id) return null;
+    return /^r\d+:/.test(id) ? id.slice(id.indexOf(':') + 1) : id;
+  });
   const sibIdx = $derived(siblings.findIndex((s) => s === msg.id));
   const hasBranches = $derived(siblings.length > 1);
   const hasText = $derived(!!(msg.content ?? '').trim());
@@ -238,6 +244,7 @@
             {#if msg.pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
           </button>
           <button class="ic danger" onclick={() => ondelete?.(msg)} title="Delete (and everything after it)"><Trash2 size={14} /></button>
+          {#if modelLabel}<span class="stat model" title="Answered by {modelLabel}">{modelLabel}</span>{/if}
           {#if msg.tok_per_sec}<span class="stat">{msg.tok_per_sec.toFixed(1)} tok/s</span>{/if}
           {#if msg.tokens_out}<span class="stat">{msg.tokens_out} tok</span>{/if}
         </div>
@@ -411,6 +418,9 @@
   .branch .ic { width: 20px; height: 20px; font-size: 13px; color: var(--text-dim); }
   .bn { padding: 0 2px; }
   .stat { font-family: var(--mono); font-size: 11px; color: var(--text-faint); margin-left: 8px; }
+  .stat.model {
+    max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
   /* ---------- widget grouping: compact cards flow side-by-side ---------- */
   .wgroup { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }

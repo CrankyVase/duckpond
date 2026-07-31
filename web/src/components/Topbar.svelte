@@ -2,9 +2,23 @@
   import { app } from '../lib/state.svelte.js';
   import ContextBar from './ContextBar.svelte';
   import ModelPicker from './ModelPicker.svelte';
+  import AudioWaveform from '@lucide/svelte/icons/audio-waveform';
+  import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import Files from '@lucide/svelte/icons/files';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
+  import PiggyBank from '@lucide/svelte/icons/piggy-bank';
   import Settings2 from '@lucide/svelte/icons/settings-2';
+
+  const VIEWS = {
+    stats: { label: 'Stats', icon: BarChart3 },
+    files: { label: 'Files', icon: Files },
+    providers: { label: 'Providers', icon: Cloud },
+    costs: { label: 'Costs & savings', icon: PiggyBank },
+    speech: { label: 'Speech Lab', icon: AudioWaveform },
+  };
+  const viewMeta = $derived(VIEWS[app.view] ?? null);
 
   const vram = $derived(app.gpu?.totalBytes
     ? `${(app.gpu.usedBytes / 1e9).toFixed(1)} / ${(app.gpu.totalBytes / 1e9).toFixed(0)} GB`
@@ -31,12 +45,17 @@
     }} title="Back to chat">
       <MessageSquare size={16} />
     </button>
-    <span class="viewtitle">{app.view === 'stats' ? 'Stats' : app.view === 'files' ? 'Files' : app.view === 'providers' ? 'Providers' : app.view === 'costs' ? 'Costs & savings' : 'Speech Lab'}</span>
+    <span class="viewtitle">
+      {#if viewMeta}<viewMeta.icon size={14} /> {viewMeta.label}{/if}
+    </span>
     <div class="spacer"></div>
   {/if}
   {#if vram}
-    <span class="vram desk" class:hot={vramPct > 0.9} title="GPU VRAM used / total">
-      <span class="vlabel">VRAM</span> <span class="vnum">{vram}</span>
+    <span class="vram desk" class:hot={vramPct > 0.9}
+      title="GPU VRAM used / total — {Math.round(vramPct * 100)}%">
+      <span class="vlabel">VRAM</span>
+      <span class="meter"><span class="fill" style="width:{Math.min(100, vramPct * 100)}%"></span></span>
+      <span class="vnum">{vram}</span>
     </span>
   {/if}
   {#if app.view === 'chat'}
@@ -77,11 +96,14 @@
     flex-shrink: 0;
   }
   .viewtitle {
+    display: inline-flex; align-items: center; gap: 7px;
     font-size: 13px; font-weight: 600; color: var(--text-dim); padding-left: 2px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     min-width: 0;
   }
+  .viewtitle :global(svg) { color: var(--text-faint); flex-shrink: 0; }
   .vram {
+    display: inline-flex; align-items: center; gap: 7px;
     font-family: var(--mono); font-size: 11px; color: var(--text-dim);
     padding: 5px 11px; border-radius: 999px;
     background: var(--bg-raised); border: 1px solid var(--border-soft);
@@ -89,6 +111,15 @@
   }
   .vram.hot { color: var(--red); }
   .vlabel { color: var(--text-faint); letter-spacing: 0.05em; }
+  .meter {
+    width: 38px; height: 4px; border-radius: 2px; overflow: hidden;
+    background: var(--bg-hover); display: inline-block; flex-shrink: 0;
+  }
+  .fill {
+    display: block; height: 100%; border-radius: 2px;
+    background: var(--accent); transition: width 400ms ease, background 300ms ease;
+  }
+  .vram.hot .fill { background: var(--red); }
   .ctxwrap { flex-shrink: 0; }
 
   @media (max-width: 768px) {

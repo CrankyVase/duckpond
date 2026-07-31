@@ -265,9 +265,19 @@ export function startMascotBrain() {
 
   const composerish = (t) => t && (t.tagName === 'TEXTAREA' ||
     (t.tagName === 'INPUT' && t.type === 'text') || t.isContentEditable);
-  document.addEventListener('focusin', (e) => { if (composerish(e.target)) { mind.typing = true; bump(0.05, 0.03, 0.12); } });
-  document.addEventListener('focusout', () => { mind.typing = false; });
-  document.addEventListener('keydown', () => { if (mind.typing) bump(0.02, 0, 0.03); }, { passive: true });
+  // Deferred by a microtask: focus/blur fire SYNCHRONOUSLY when a component
+  // calls el.focus() inside an $effect, and mutating mind there makes Svelte
+  // throw state_unsafe_mutation mid-flush. Ambience can wait a tick.
+  document.addEventListener('focusin', (e) => {
+    const hit = composerish(e.target);
+    queueMicrotask(() => { if (hit) { mind.typing = true; bump(0.05, 0.03, 0.12); } });
+  });
+  document.addEventListener('focusout', () => {
+    queueMicrotask(() => { mind.typing = false; });
+  });
+  document.addEventListener('keydown', () => {
+    queueMicrotask(() => { if (mind.typing) bump(0.02, 0, 0.03); });
+  }, { passive: true });
 }
 
 // Petting Dumpling (click). Returns immediately; the reaction is global —

@@ -90,7 +90,11 @@ export default async function modelRoutes(app) {
   app.addHook('preHandler', requireAuth);
 
   app.get('/api/models', async (req) => {
-    const models = await listModels();
+    // A dead llama daemon must not take remote models down with it — the
+    // picker showing "nothing at all" is the worst possible failure mode.
+    let models = [];
+    try { models = await listModels(); }
+    catch (err) { req.log.warn({ err }, 'local llama daemon unreachable — serving remote models only'); }
     // background: fill/refresh Hugging Face card blurbs (never blocks this reply)
     queueCardFetch(models.map((m) => m.id), req.log);
     // lazy 24h catalog refresh for providers (OmniRoute-style auto-sync)
