@@ -1,178 +1,176 @@
-# NEXT STEPS — Remote Providers & Cost Saver (handoff doc)
+# NEXT STEPS — handoff doc
 
-> Written 2026-07-26. This file is the continuation point for the remote-providers
-> + cost-savings feature. If a session runs out of quota mid-work, start here.
-> Everything below is already pushed to GitHub — no work exists only on an agent's
-> scratch disk.
+> Continuation point for DuckPond feature work. Stages 1–13 were the
+> remote-providers + cost-saver program (see §9 for that history). Stages 14–19
+> are the agentic-coding program: model curation, thinking mode, context
+> compression, tool permissions, GitHub, and the UI for all of it.
 
 ## 0. Golden workflow rule (from the user)
 
 **Push every file to GitHub immediately after it is created or edited.**
-Commit to the working branch (currently `feat/remote-providers`) as version-history
-log entries (`stage X/10: …`), one commit per file or per small logical unit.
-Merge to `main` only when a stage is complete and verified — the production site
-deploys from `main` (auto-deploy timer + `deploy.sh`, or manual
-`cd web && npm run build && systemctl --user restart duckpond.service`).
+Commit to the working branch as version-history log entries (`stage X: …`),
+one commit per file or per small logical unit. Merge to `main` only when a
+stage is complete and verified — the production site deploys from `main`
+(auto-deploy timer + `deploy.sh`).
 
 ## 1. Current state: SHIPPED ✅
 
-Stages 1–13 are merged to `main`:
+Stages 1–13 (remote providers + cost saver) and 14–19 (agentic coding).
 
-| PR | Content | Merge commit |
-|---|---|---|
-| #4 | Server: stages 1–6 (providers, costs engine, token saver, dispatcher, chat refactor) | `adaad08` |
-| #6 | Hotfix: wildcard route startup crash (issue #5) | `83d272a` |
-| #7 | Web UI: stages 7–9 + README resolution | `9530f3f` |
-| #9 | Stage 12: fallback chains, free-only import mode, provider presets | `ccba8c1` |
-| #11 | Stage 13: per-provider monthly spend caps + 80% alerts | `68cd1fa` |
+| Stage | Content |
+|---|---|
+| 14 | Model catalog curation — a pasted API key no longer floods the picker |
+| 15 | Context saver — OmniRoute's compression engines, baked in |
+| 16 | Thinking mode that actually works — dialects + inline `<think>` splitting |
+| 17 | Tool permissions — risk tiers, approval for every tool, audit log |
+| 18 | GitHub — read, pull, branch, commit/push, open PR |
+| 19 | UI for all of it + version stamp |
 
-Known-good rollback points: before the feature = PR #3 merge (`921e640a5`);
-server-only with hotfix = `83d272a`.
+## 2. Verification checklist after deploying
 
-## 2. First-run verification checklist (do this next)
+1. **Version** — the sidebar footer shows `DuckPond v0.3.0 "agentic" <sha>`.
+   The sha must match `git rev-parse --short HEAD` on the box. If it doesn't,
+   the deploy didn't take.
+2. **Curation** — Providers → a provider → Models. Search, capability chips,
+   and the status filter should all narrow the list. "Pick for me" should
+   enable ~8 sensible models. Bulk "Turn off" should not touch favourites.
+3. **New key** — add a provider. It defaults to `curated`: the whole catalog
+   imports but only the auto-picked shortlist is on. The picker should stay
+   short.
+4. **Thinking** — pick a reasoning model, ask something hard. Reasoning must
+   land in the collapsible thinking panel, never as raw `<think>` tags in the
+   reply. Try a gateway model (OpenRouter/nano-gpt) — that path used to be
+   silently broken.
+5. **Context saver** — have a long agentic conversation with tool output. A
+   `Context saver: −N tokens` notice should appear, and Costs & savings should
+   show a `context_saved` row.
+6. **Permissions** — Settings → "What the model may do". On `balanced`, ask the
+   model to run `ls` (should just run) and `npm install express` (should show
+   an approval card). The activity log should fill in.
+7. **GitHub** — Settings → GitHub, paste a fine-grained PAT with Contents +
+   Pull requests read/write. Then: "pull CrankyVase/duckpond into the workspace
+   and tell me what's in server/src". Then ask for a change on a new branch —
+   the commit must show an approval card, and committing to `main` must be
+   refused outright.
+8. **Screenshots** — only works if the sandbox image has chromium. Without it
+   the tool returns a clear error instead of failing oddly.
 
-1. Pull main, rebuild: `cd web && npm run build && systemctl --user restart duckpond.service`
-   (or wait for the deploy timer).
-2. Open the app → Sidebar → **Providers** (new tile). Glance at the sidebar layout —
-   the pages row is now a 2×2 tile grid with the owner "Control" link on its own
-   full-width row (intended change, just confirm it looks right).
-3. Add a provider: name optional, base URL e.g. `https://nano-gpt.com/api/v1`, API key.
-   Use **Test connection** first, then **Add provider** — it verifies, inserts, and
-   auto-syncs the catalog ("N models imported").
-4. Open the model picker: models should be grouped **Local** + one group per provider,
-   each remote model showing context size and per-1M-token pricing.
-5. Chat with a remote model. Then open **Costs & savings**: spend/saved hero cards,
-   savings-by-technique bars, 30-day chart, recent events should populate.
-6. Send the exact same plain message twice → second turn should be a free cache replay
-   (`cache_hit` event, full price counted as saved).
-7. Long conversation → when prompt pressure exceeds the context budget, an
-   auto-compaction notice appears and a `compact_savings` event is logged.
+## 3. Architecture map — what stages 14–19 added
 
-## 3. Architecture map
+### `server/src/contextsaver.js` (stage 15)
+Five compression engines, dependency-free, `npm test`-covered:
+`protectSpans`/`restoreSpans` (code, URLs, paths, hashes, numbers lifted out
+before any lossy pass — SINGLE-pass alternation, because a sequential loop
+would nest sentinels and corrupt the restore), `compressToolOutput` (RTK-style:
+ANSI, CR redraws, repeated lines, installer noise, head/tail window),
+`dedupeSession`, `compressProse` (phrase-level filler only — NOT caveman
+grammar stripping, which `notes/COMPACTION.md` already rejected),
+`trimToHeadroom` (relevance-ranked), and `saveContext` to orchestrate.
+Wired in `routes/chatPost.js` before `orderSystemForPrefixCache`, for local
+turns too. Level lives in `model_settings.context_saver` (`auto` default).
 
-### Server (`server/src/`)
-- `providers.js` — provider CRUD helpers, OpenAI-compatible streaming client
-  (`streamRemote`), catalog sync (`syncProviderModels`, lazy 24h `syncStaleProviders`,
-  free-only filter when `providers.free_only`), response-cache helpers
-  (`cacheKey/cacheLookup/cacheStore`), `isRemoteId/parseRemoteId/resolveRemote`,
-  fallback-chain helpers (`isRetryableRemoteError`, `fallbackCandidates` — typed
-  errors carry `.status`), `PROVIDER_PRESETS` (8 key-only starters).
-- `costs.js` — pricing (`costFor`, `priceRemoteTurn`, `auxBaselineCost`), ledger
-  (`recordEvent`), `providerMonthSpend` (per-provider calendar-month spend; backs
-  the spend cap), dashboard queries (`costsSummary/costsDaily/costsEvents`),
-  `modelRowForRemoteId`.
-- `tokenSaver.js` — `orderSystemForPrefixCache` (volatile date/memory block moved to
-  END of system message for remote), `promptPressure` (chars/4 estimate vs ctx budget),
-  `cacheEligible`.
-- `chatBackend.js` — `auxModelFor` (cheapest enabled model on same provider, else local).
-- `llama.js` — dispatcher: `streamChat`/`countInputTokens` route `r{id}:{model}` ids to
-  the provider; llama-only params stripped; remote `max_tokens` capped at 4096.
-  `remoteCall` runs the fallback chain: up to 3 attempts, only before any content
-  has streamed, only on retryable errors; hops reported via the optional `onEvent`
-  callback (`{ type: 'fallback', from, to, reason }`).
-- `routes/providers.js` — provider REST API (owner-only mutations): CRUD, test,
-  sync, cache clear, per-model PATCH, `GET /api/providers/presets`, preset quick-add
-  (`POST { preset, api_key }`), `fallback` + `free_only` PATCH fields.
-- `routes/costs.js` — `/api/costs/summary|daily|events`.
-- `routes/models.js` — `/api/models` merges local + remote entries; remote ctx size
-  seeds `modelSettings`; `PUT /api/models/*` handles slash-containing remote ids
-  (find-my-way wildcard must be LAST path char — see issue #5).
-- Chat pipeline split: `chatkit.js` (tree/prompt/tools/usage+cost recording),
-  `chatpolicy.js` (turn policies + speculative tool calling), `chatflow.js`
-  (turn flows: diffusion, inline search, follow-ups, auto-compact, agent, image),
-  `routes/chatPost.js` (the streaming turn + saver pipeline), `routes/chat.js` (CRUD,
-  live, stop, compact, context).
+**Gotcha:** the seam left by a headroom trim rides in the LEADING system
+message. Never insert a mid-thread system turn — qwen chat templates reject it,
+which is why `buildPrompt` hoists all system content into one message.
 
-### Web (`web/src/`)
-- `components/ModelPicker.svelte` — provider grouping + cost/context lines.
-- `components/ProvidersPanel.svelte` — the settings UI (add/test/sync/toggles/catalog,
-  free-only toggle) + `ProviderPresets.svelte` (key-only quick-add grid) and
-  `ProviderFallback.svelte` (fallback-chain chip editor) in the catalog view.
-- `components/CostsPanel.svelte` — savings dashboard.
-- `components/Chat.svelte` — `notice` SSE events render as toasts (fallback hops,
-  auto-compaction).
-- Wiring: `lib/router.js` (`/u/:id/providers|costs` + legacy paths),
-  `lib/state.svelte.js` (view values), `App.svelte`, `Sidebar.svelte`, `Topbar.svelte`.
+### `server/src/reasoning.js` (stage 16)
+`reasoningDialect(provider, modelId)` → `openai | anthropic | openrouter |
+google | qwen | llama | always`. The gateway's envelope beats the upstream
+model (OpenRouter normalises everything onto its own `reasoning` object).
+`reasoningParams()` emits the right shape per dialect and nothing at all when
+the catalog says the model can't reason.
+
+**Gotcha:** `chat_template_kwargs` is on BOTH remote strip lists (`llama.js`
+`LLAMA_ONLY_PARAMS`, `chatBackend.js` `LLAMA_ONLY`). Remote qwen models
+therefore use Qwen3's `/think` and `/no_think` prompt switches instead, returned
+as `_soft` and applied to the last user message by `chatPost`. Don't "fix" this
+by removing the strip — a gateway 400 is not retryable, so the turn would die.
+
+`makeThinkSplitter()` is a streaming state machine that pulls inline
+`<think>…</think>` out of `content`, holding back partial tags across chunk
+boundaries. Wired into both `providers.streamRemote` and `llama.streamChatInner`.
+
+### `server/src/permissions.js` (stage 17)
+Risk tiers `read | write | exec | external`; modes `open | balanced | careful |
+readonly` (default `balanced`) in `users.tool_policy`. `decideTool()` escalates
+dangerous shell shapes past the mode and de-escalates read-only ones.
+`gateToolCall()` in `routes/agent.js` wraps EVERY tool now — the old
+`NEEDS_APPROVAL` regex list covered `run_command` only. `capabilityManifest()`
+puts the actual per-bucket tool names into the system prompt.
+`tool_audit` table = the activity log.
+
+### `server/src/github.js` (stage 18)
+Dependency-free REST over fetch. `commitFiles` builds blobs → tree → commit →
+ref move so N files land atomically. Two rules that are enforced in code, not
+just in the prompt: no commit to a default branch, and `pullIntoWorkspace` uses
+the tree API so no credential ever enters the sandbox. `github_commit` accepts
+`workspace_path` so a file the model just wrote isn't re-serialised through the
+model to be committed.
 
 ### DB (auto-migrated in `db.js`)
-`providers` (+ `fallback_json` chain, `free_only` import filter, `spend_cap_usd`
-monthly cap), `provider_models`
-(catalog + pricing + per-model enable), `response_cache` (exact-turn cache),
-`usage_events` (cost ledger: cost/baseline/saved USD, kind, cache_hit).
+`provider_models` + `hidden`/`favorite`/`caps_json`/`label`/`note`;
+`providers` + `import_mode`; `users` + `tool_policy`; new `tool_audit` and
+`github_accounts`.
 
-## 4. How the saver works (all automatic, lossless)
+## 4. Known limitations / next up
 
-1. **Provider prompt caching** — system prompt reordered for a stable byte-identical
-   prefix; `cached_tokens` from the provider priced at the discounted rate; the
-   discount is logged as savings (kind `chat`, baseline > cost).
-2. **Exact response cache** — plain remote turns (no workspace/constrained/regenerate)
-   hash ({provider, model, messages, params}); a hit replays the saved reply free and
-   logs full price as saved (kind `cache_hit`). Per-provider toggle in the panel.
-3. **Auto-compaction** — when `promptPressure` says the prompt exceeds the ctx budget,
-   everything but the last 8 messages is summarized by the cheap aux model and spliced
-   into the leading system message (in-memory only; DB tree untouched). Logged as
-   `compact_savings` + `aux_compact`.
-4. **Cheap aux routing** — auto-titles, follow-up chips, memory extraction, and
-   compaction run on the cheapest model of the same provider; baseline = what the
-   conversation's model would have charged (kinds `aux_title/aux_followup/aux_memory/aux_compact`).
-5. **Fallback chains** — a provider can name backup models (`fallback_json`); when a
-   remote call dies before streaming with a retryable error, the turn transparently
-   retries on the next model in the chain (toast + `fallback` ledger event). Edit
-   the chain in the provider's catalog view.
+- **Screenshots need chromium in the sandbox image.** `nikolaik/python-nodejs`
+  doesn't ship it. Either bake a new image or add an approved install step.
+- **`safePath` is lexical, not `realpath`.** A symlink created inside
+  `/workspace` by `run_command` pointing at `/etc` would be followed by
+  `readWsFile`/`writeWsFile`. Worth closing now that a permission layer implies
+  a boundary.
+- **`assertQuota` is still not called on agent write paths** — `write_file` can
+  exceed the 15 GiB user cap.
+- **`cache_hit` SSE event is emitted but unhandled** in `Chat.svelte` and
+  `applyLiveEvent`, so a free cache replay shows no indicator and won't replay
+  on reattach.
+- **Capability sniffing is heuristic.** Every flag is editable per model via
+  `PATCH /api/providers/:id/models {caps}`; the UI exposes favourite/hide but
+  not yet per-flag editing.
+- **No per-user provider keys** — provider keys stay global/owner-managed.
+  GitHub tokens ARE per user.
+- **`usage_events` and `tool_audit` grow unbounded** — add a prune job if it
+  ever matters.
+- Per-model "pin aux model" override is still a small `providers.aux_model`
+  column + select away.
 
-Safety rails: paid models skip the GPU queue and warm-up probe, never drive the
-sandbox/agent tooling (`start_project` disabled remotely, `wsRow` forced null),
-remote `max_tokens` capped at 4096.
+## 5. Test plan for future changes
 
-## 5. Known limitations / future polish (not bugs)
-
-- Provider keys are **global** (shared across users; only owner can manage).
-  Per-user keys would be a new table + picker filtering.
-- `usage_events` grows unbounded — add a prune job if it ever matters.
-- Response cache has no TTL/eviction — clear per-provider from the panel if needed.
-- Aux model = cheapest on same provider; a per-provider "pin aux model" override
-  would be a small `providers.aux_model` column + select in the panel.
-- CostsPanel USD rule: amounts < $1 render with 4 decimals (spec-literal); if that
-  looks noisy, change the threshold line in `CostsPanel.svelte` `usd()`.
-- OmniRoute ideas deliberately NOT ported: per-model quirky compressors
-  (prompts-to-images etc.), multi-user key pools/rate-limit routing. Fallback
-  chains shipped in stage 12; per-provider monthly spend caps + 80% alerts
-  shipped in stage 13.
-- Frontend was verified per-file with the Svelte 5 compiler; a full
-  `npm run build` on the server is the real gate — run it before restarting prod.
+1. `node --input-type=module --check` every server file touched.
+2. `cd server && npm test` — contextsaver + reasoning suites (79 assertions).
+3. **Boot the server** for route changes; lint alone missed issue #5. Use a
+   scratch DB: `DUCKPOND_DB=/tmp/x.db PORT=3999 node src/index.js`, then curl
+   the new paths (401 = registered, 404 = missing).
+4. `cd web && npm run build` — the real gate for the frontend.
+5. Merge → rebuild web → restart → smoke-test chat with a local AND a remote
+   model.
 
 ## 6. If something breaks
 
-- Server won't boot → check `journalctl --user -u duckpond -n 100`; route-syntax
-  crashes name the file:line (that was issue #5; fixed pattern: `*` only at path end).
-- Quick rollback: `git revert -m 1 68cd1fa` (stage-13 merge) or redeploy from `ccba8c1`.
-- Provider sync fails → the provider card shows `last_error`; catalog keeps the last
-  good sync; models stay usable.
-- Remote turn fails mid-stream → the interrupted reply is parked in the tree like
-  local turns ("say continue").
+- Server won't boot → `journalctl --user -u duckpond -n 100`; route-syntax
+  crashes name the file:line (issue #5; find-my-way wildcards only at path end).
+- Deploy looks stale → compare the sidebar sha against `git rev-parse --short HEAD`.
+- Provider sync fails → the provider card shows `last_error`; the catalog keeps
+  the last good sync and models stay usable.
+- Context saver suspected of mangling something → set the model's
+  `context_saver` to `off` in Settings; it's a single switch and everything
+  downstream is unchanged.
+- Model won't stop asking permission → Settings → "What the model may do";
+  `open` runs everything unattended except genuinely dangerous shell shapes.
 
-## 7. Continuing this work (paste into a new agent session)
+## 7. History: stages 1–13 (remote providers + cost saver)
 
-> Repo `CrankyVase/duckpond` (public). Read `NEXT-STEPS.md` at the repo root first.
-> The remote-providers + cost-saver feature is fully merged to main (PRs
-> #4/#6/#7/#9/#11, stages 1–13); verify the checklist in §2. Then pick items from §5. Rules: push every
-> file to the branch immediately after writing it (commit per file, `stage X: …`
-> messages), verify pushes byte-for-byte (curl the file back and prefix-compare),
-> never merge to main until verified, and find-my-way wildcards only at path end.
-> Branch: `feat/remote-providers` or cut a fresh one from main.
->
-> Push discipline (learned the hard way): NEVER hand-reconstruct a file's content
-> inside a push call from memory — dump the local verified file and copy it
-> verbatim. A from-memory push once corrupted db.js (wrong DB path → the site
-> would have looked data-wiped) and providers.js (CJS require in ESM). Very large
-> files (30KB+) occasionally truncate mid-push — just retry the same verbatim push;
-> always byte-verify afterwards.
+| PR | Content | Merge commit |
+|---|---|---|
+| #4 | Server: stages 1–6 (providers, costs engine, token saver, dispatcher) | `adaad08` |
+| #6 | Hotfix: wildcard route startup crash (issue #5) | `83d272a` |
+| #7 | Web UI: stages 7–9 | `9530f3f` |
+| #9 | Stage 12: fallback chains, free-only import, provider presets | `ccba8c1` |
+| #11 | Stage 13: per-provider monthly spend caps + 80% alerts | `68cd1fa` |
 
-## 8. Test plan for future changes
-
-1. `node --input-type=module --check` every server file touched.
-2. Svelte 5 compiler parse for every component touched.
-3. Boot test for route changes (register all paths against find-my-way, or actually
-   boot the server) — lint alone missed issue #5.
-4. curl the pushed file back and prefix-compare bytes before merging.
-5. Merge → rebuild web → restart → smoke-test chat with both a local and a remote model.
+Savers from that program, all still active: provider prompt caching (system
+prompt reordered for a stable prefix), exact response cache, auto-compaction,
+cheap aux routing, fallback chains, monthly spend caps. Stage 15's context
+saver runs BEFORE all of them, so the expensive LLM compaction often never
+fires at all.

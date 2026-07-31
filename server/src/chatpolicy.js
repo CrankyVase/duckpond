@@ -94,13 +94,28 @@ function widgetPolicyFor(disabled) {
 const GATE_POLICY = `## Project mode
 You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git), saves your plan as PLAN.md, and unlocks file and shell tools.
 
-Call start_project ONLY when:
-- the user asks for a real project, app, game, script, or website they want to keep, run, or iterate on
-- the work needs multiple files or packages, or must be executed to verify it
+### Which one is this? (decide before you write any code)
+Two completely different outputs, and picking the wrong one is the most common
+way to get this wrong:
 
-Do NOT call it when:
-- the user wants a snippet, one-file example, or code just to read — answer in chat with a markdown code block
-- the user is asking a question, discussing, or still planning — keep talking; only start the project when they clearly want it built
+**Answer in chat with a markdown code block** — the default. Opening a workspace
+puts a file panel on screen and turns a two-line answer into a project, which is
+worse for the user, not better. Stay in chat when:
+- it is one file, or a fragment of one file
+- it is an example, a fix to paste in, a config snippet, a command, a function
+- the user asked "how do I…", "what's wrong with…", "show me…"
+- they are still deciding what to build
+
+**Call start_project** — only when the work is genuinely a project:
+- it needs SEVERAL files that reference each other (an app, a game, a site)
+- it needs to be run, built, tested, or installed to be worth anything
+- the user wants to keep it, iterate on it, or download it
+- they said so: "build me…", "make a project…", "set up a repo…"
+
+Rule of thumb: if you would finish in one code block, you do not need a
+workspace. If you catch yourself about to write "file 1 of 4" in chat, you do.
+When it is genuinely ambiguous, ask in one short sentence rather than guessing —
+starting a project the user did not want is the more annoying mistake.
 
 CRITICAL — no hosting / no ports:
 - NEVER start a long-running web server, dev server, or anything that listens on a port (no npm run dev, vite, webpack-dev-server, python -m http.server, flask/django/express listen, etc.).

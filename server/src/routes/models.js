@@ -3,7 +3,7 @@ import { db } from '../db.js';
 import { gpuVram, listModels, loadModel, unloadModel } from '../llama.js';
 import { ctxBlurb, describeModel } from '../modelDescribe.js';
 import { cardFor, queueCardFetch } from '../modelCards.js';
-import { isRemoteId, parseRemoteId, syncStaleProviders } from '../providers.js';
+import { isRemoteId, parseCaps, parseRemoteId, syncStaleProviders } from '../providers.js';
 import { TOOL_CATALOG } from '../toolCatalog.js';
 
 // Defaults per spec §1; overridable per model, stored in model_settings.
@@ -14,7 +14,12 @@ export const DEFAULT_SETTINGS = {
   top_k: 40,
   repeat_penalty: 1.1,
   system_prompt: '',
-  thinking: 'auto',   // auto | high | low | none — applied only if model supports it
+  thinking: 'auto',   // auto | high | low | none — translated per provider dialect (reasoning.js)
+  thinking_budget: 0, // explicit reasoning-token budget; 0 = derive from `thinking`
+  // Context saver (contextsaver.js). 'auto' is the right answer for everyone:
+  // lossless engines always, lossy ones only under context pressure. 'off' is
+  // the escape hatch, 'aggressive' compresses from the first token.
+  context_saver: 'auto',   // auto | off | aggressive
   disabledTools: [],  // tool ids this model profile is never offered; all on by default
   mirostat: 0,        // 0 off | 1 v1 | 2 v2 — llama.cpp entropy-target sampling
   mirostat_tau: 5,    // target entropy (higher = more surprising text)
@@ -46,10 +51,11 @@ function remoteModels() {
   const rows = db.prepare(`
     SELECT pm.*, p.name AS provider_name, p.enabled AS provider_enabled
     FROM provider_models pm JOIN providers p ON p.id = pm.provider_id
-    WHERE p.enabled = 1 AND pm.enabled = 1
-    ORDER BY p.name COLLATE NOCASE, pm.model_id COLLATE NOCASE`).all();
+    WHERE p.enabled = 1 AND pm.enabled = 1 AND pm.hidden = 0
+    ORDER BY pm.favorite DESC, p.name COLLATE NOCASE, pm.model_id COLLATE NOCASE`).all();
   return rows.map((r) => {
     const id = `r${r.provider_id}:${r.model_id}`;
+    const caps = parseCaps(r);
     const h = describeModel(r.model_id, r.context_length);
     const priceBits = [
       r.price_in != null ? `${fmtPrice(r.price_in)} in` : null,
@@ -65,6 +71,10 @@ function remoteModels() {
       provider: { id: r.provider_id, name: r.provider_name },
       pricing: { in: r.price_in, out: r.price_out, cachedIn: r.price_cached_in },
       maxOutput: r.max_output,
+      caps,
+      favorite: !!r.favorite,
+      label: r.label ?? null,
+      note: r.note ?? null,
       settings: modelSettings(id),
       ...h,
       blurb: [

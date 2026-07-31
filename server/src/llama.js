@@ -11,6 +11,7 @@ import {
   estimateTokens, fallbackCandidates, isRemoteId, isRetryableRemoteError,
   resolveRemote, streamRemote,
 } from './providers.js';
+import { makeThinkSplitter } from './reasoning.js';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
 
@@ -180,6 +181,7 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
   let usage = null;
   let finishReason = null;
   const toolCalls = []; // streamed as fragments keyed by index; arguments concatenate
+  const splitter = makeThinkSplitter();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -217,11 +219,24 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
         onDelta?.('', { reasoning: delta.reasoning_content, timings: json.timings });
       }
       if (delta.content) {
-        content += delta.content;
-        onDelta?.(delta.content, { timings: json.timings });
+        // A GGUF whose template llama-server has no reasoning parser for emits
+        // <think>…</think> inline in content instead. Split it out so it lands
+        // in the thinking panel rather than the visible reply.
+        const part = splitter.push(delta.content);
+        if (part.reasoning) {
+          reasoning += part.reasoning;
+          onDelta?.('', { reasoning: part.reasoning, timings: json.timings });
+        }
+        if (part.text) {
+          content += part.text;
+          onDelta?.(part.text, { timings: json.timings });
+        }
       }
     }
   }
+  const tail = splitter.flush();
+  if (tail.reasoning) { reasoning += tail.reasoning; onDelta?.('', { reasoning: tail.reasoning, timings }); }
+  if (tail.text) { content += tail.text; onDelta?.(tail.text, { timings }); }
   return { content, reasoning, timings, usage, toolCalls: toolCalls.filter(Boolean), finishReason };
 }
 

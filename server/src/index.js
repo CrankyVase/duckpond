@@ -13,6 +13,8 @@ import agentRoutes, { reclaimOrphanRuns, reapStaleAgentRuns } from './routes/age
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
 import costRoutes from './routes/costs.js';
+import githubRoutes from './routes/github.js';
+import { BUILD, versionLine } from './version.js';
 import imageRoutes from './routes/images.js';
 import modelRoutes from './routes/models.js';
 import docRoutes from './routes/docs.js';
@@ -36,8 +38,12 @@ process.on('uncaughtException', (err) => { console.error('UNCAUGHT', err); proce
 process.on('unhandledRejection', (err) => { console.error('UNHANDLED_REJECTION', err); });
 
 const app = Fastify({ logger: { level: 'info' } });
-app.log.info('duckpond server build 2026-07-15-gen-only');
+app.log.info(`duckpond server ${versionLine()}`);
 await app.register(fastifyCookie);
+// Unauthenticated on purpose: the version footer renders on the login screen
+// too, and "which build is live?" is the first question when a deploy looks
+// like it did not take.
+app.get('/api/version', async () => BUILD);
 await app.register(authRoutes);
 await app.register(modelRoutes);
 await app.register(chatRoutes);
@@ -55,6 +61,7 @@ await app.register(speechRoutes);
 await app.register(themeRoutes);
 await app.register(providerRoutes);
 await app.register(costRoutes);
+await app.register(githubRoutes);
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(dist)) {

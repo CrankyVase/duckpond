@@ -14,6 +14,12 @@ import {
   destroyWorkspace, ensureRunning, execCmd, portBase,
   stopWorkspace, truncateOutput, wsDir,
 } from '../sandbox.js';
+import { auditTool, decideTool, describeCall, RISK } from '../permissions.js';
+import {
+  commitFiles as ghCommit, createBranch as ghCreateBranch, listFiles as ghListFiles,
+  openPullRequest as ghOpenPr, pullIntoWorkspace as ghPull, readFile as ghReadFile,
+  repoInfo as ghRepoInfo,
+} from '../github.js';
 
 export const DEFAULT_AGENT_MODEL = process.env.AGENT_MODEL ?? 'qwen3-coder-next-q4-k-m';
 // Bigger projects (games, multi-file app) routinely need more than 30 tool steps.
@@ -25,15 +31,10 @@ const APPROVAL_TIMEOUT_MS = 15 * 60 * 1000;
 // with the process). Reclaim them so the next chat doesn't hit 409 forever.
 const STALE_RUN_SEC = Number(process.env.AGENT_STALE_RUN_SEC ?? 45 * 60);
 
-// commands that pull code from the network need a human yes first
-const NEEDS_APPROVAL = [
-  /\b(npm|pnpm|yarn|bun)\s+(i|install|add|ci)\b/,
-  /\bnpx\b/,
-  /\bpip3?\s+install\b/, /\buv\s+(pip\s+install|add)\b/,
-  /\bapt(-get)?\s+install\b/,
-  /\b(curl|wget)\b[^|;&]*\|\s*(ba|z)?sh\b/,
-  /\bgit\s+clone\b/,
-];
+// (The old NEEDS_APPROVAL regex list lived here and covered run_command only.
+// permissions.js replaced it with a policy that covers every tool — including
+// the ones that can now reach a git remote — and still knows which shell
+// shapes are dangerous and which are plainly read-only.)
 
 // ---------- live run plumbing ----------
 
@@ -190,6 +191,18 @@ export const AGENT_TOOLS = [
       timeout_sec: { type: 'number', description: 'kill after N seconds (default 120, max 900)' },
     }, required: ['command'] },
   } },
+  { type: 'function', function: {
+    name: 'screenshot',
+    description: 'Take a PNG screenshot of a workspace HTML file (or a public URL) and save it into the workspace. Use it to SEE what you built — check a layout actually renders before telling the user it works. Needs headless chromium in the sandbox; if it is missing you get a clear error, so fall back to reading the markup.',
+    parameters: { type: 'object', properties: {
+      path: { type: 'string', description: 'workspace-relative HTML file to render, e.g. index.html' },
+      url: { type: 'string', description: 'public http(s) URL to render instead of a local file' },
+      out: { type: 'string', description: 'where to save the PNG (default screenshots/<name>.png)' },
+      width: { type: 'number', description: 'viewport width, default 1280' },
+      height: { type: 'number', description: 'viewport height, default 800' },
+      full_page: { type: 'boolean', description: 'capture the whole scrollable page' },
+    }, required: [] },
+  } },
   GENERATE_IMAGE_TOOL,
   WEB_SEARCH_TOOL,
   FETCH_PAGE_TOOL,
@@ -213,7 +226,47 @@ function agentSystemPrompt(ws) {
   ].join('\n');
 }
 
+/**
+ * Universal permission gate. Every tool call passes through here before it
+ * runs — not just shell commands, which was the old behaviour and left file
+ * writes, fetches and (now) git pushes completely ungated.
+ *
+ * Returns null when the call may proceed, or the DENIED string to hand back to
+ * the model when it may not.
+ */
+export async function gateToolCall(run, name, args) {
+  const verdict = decideTool(run.user_id, name, args);
+  const detail = describeCall(name, args);
+
+  if (verdict.decision === 'deny') {
+    auditTool({
+      userId: run.user_id, runId: run.id, tool: name, risk: verdict.risk,
+      decision: 'deny', approvedBy: 'policy', detail,
+    });
+    return `DENIED by permission policy: ${verdict.reason}. Do not retry this or route around it with another tool — tell the user which setting would need to change.`;
+  }
+  if (verdict.decision === 'allow') {
+    // Silent for reads; anything that changed something is worth a log line.
+    if (verdict.risk !== RISK.READ) {
+      auditTool({
+        userId: run.user_id, runId: run.id, tool: name, risk: verdict.risk,
+        decision: 'allow', approvedBy: 'auto', detail,
+      });
+    }
+    return null;
+  }
+
+  const ok = await requestApproval(run, { tool: name, risk: verdict.risk, reason: verdict.reason, detail, args });
+  auditTool({
+    userId: run.user_id, runId: run.id, tool: name, risk: verdict.risk,
+    decision: ok ? 'approved' : 'rejected', detail,
+  });
+  return ok ? null : 'DENIED: the user declined this action. Do not retry it and do not attempt the same thing another way; adapt, or explain what you now cannot do.';
+}
+
 export async function execTool(run, ws, name, args) {
+  const denied = await gateToolCall(run, name, args);
+  if (denied) return denied;
   switch (name) {
     case 'start_project':
       // chat-gate tool; if the model repeats it mid-run, steer it back
@@ -323,10 +376,9 @@ export async function execTool(run, ws, name, args) {
     }
     case 'run_command': {
       const cmd = String(args.command ?? '');
-      if (NEEDS_APPROVAL.some((re) => re.test(cmd))) {
-        const ok = await requestApproval(run, cmd);
-        if (!ok) return 'DENIED: the user did not approve this command. Do not retry it; adapt or explain what is missing.';
-      }
+      // Approval already happened in gateToolCall — decideTool() knows both the
+      // dangerous shapes and the read-only ones, so `ls` no longer prompts and
+      // `curl … | sh` prompts even in the most permissive mode.
       // Builds / installs routinely exceed 60s; allow up to 15 min when asked.
       const timeoutSec = Math.min(Math.max(Number(args.timeout_sec) || 120, 5), 900);
       const r = await execCmd(ws, cmd, { timeoutSec });
@@ -336,14 +388,103 @@ export async function execTool(run, ws, name, args) {
       });
       return `exit ${r.exitCode}${r.timedOut ? ' (TIMED OUT)' : ''}\n${r.output || '(no output)'}`;
     }
+    case 'screenshot': {
+      // Rendered by headless chromium INSIDE the sandbox, so the page gets the
+      // container's network and filesystem, not the host's. The binary is not
+      // in the base image; the error says so plainly rather than failing weird.
+      const target = args.url
+        ? String(args.url)
+        : `file:///workspace/${String(args.path ?? 'index.html').replace(/^\/+/, '')}`;
+      if (args.url && !/^https?:\/\//i.test(target)) return 'ERROR: url must be http(s)';
+      const base = (args.path ?? 'page').split('/').pop().replace(/\.[^.]+$/, '') || 'page';
+      const out = String(args.out ?? `screenshots/${base}.png`).replace(/^\/+/, '');
+      const w = Math.min(3000, Math.max(200, Number(args.width) || 1280));
+      const h = Math.min(3000, Math.max(200, Number(args.height) || 800));
+      const bin = 'command -v chromium || command -v chromium-browser || command -v google-chrome';
+      const probe = await execCmd(ws, bin, { timeoutSec: 15 });
+      if (probe.exitCode !== 0) {
+        return 'ERROR: no headless chromium in the sandbox, so a screenshot is not possible. '
+          + 'Do not claim you looked at the page — read the markup instead, or ask the user to install chromium in the workspace image.';
+      }
+      const chrome = probe.output.trim().split('\n')[0];
+      const cmd = `mkdir -p "$(dirname '${out}')" && '${chrome}' --headless --disable-gpu --no-sandbox `
+        + `--screenshot='${out}' --window-size=${w},${h} ${args.full_page ? '--full-page-screenshot ' : ''}'${target}'`;
+      const r = await execCmd(ws, cmd, { timeoutSec: 90 });
+      if (r.exitCode !== 0) return `ERROR: screenshot failed (exit ${r.exitCode})\n${r.output}`;
+      emit(run.id, 'diff', { path: out, before: null, after: `(screenshot ${w}×${h})`, created: true });
+      return `Saved a ${w}×${h} screenshot to ${out}. It is in the workspace file rail — the user can open it there.`;
+    }
+
+    // ---------- GitHub ----------
+    // Every mutating case here is tier `external` in permissions.js, so the
+    // approval card has already been answered by the time we get here.
+    case 'github_repo_info': {
+      const r = await ghRepoInfo(run.user_id, args.repo);
+      return `${r.full_name} · default branch ${r.default_branch} · ${r.private ? 'private' : 'public'}`
+        + `${r.language ? ` · ${r.language}` : ''} · you ${r.can_push ? 'CAN' : 'CANNOT'} push`;
+    }
+    case 'github_list_files': {
+      const items = await ghListFiles(run.user_id, args.repo, { ref: args.ref, path: args.path ?? '' });
+      if (!items.length) return '(empty)';
+      return items.map((f) => (f.type === 'dir' ? `${f.path}/` : `${f.path} (${f.size}b)`)).join('\n');
+    }
+    case 'github_read_file': {
+      if (!args.path) return 'ERROR: path is required';
+      const f = await ghReadFile(run.user_id, args.repo, args.path, { ref: args.ref });
+      return truncateOutput(f.content, 24_000, 8_000).text;
+    }
+    case 'github_pull': {
+      const r = await ghPull(run.user_id, args.repo, {
+        ref: args.ref,
+        dest: args.dest ?? '.',
+        writeFile: (rel, text) => { writeWsFile(ws, rel, text); },
+      });
+      emit(run.id, 'diff', { path: `${r.repo}@${r.ref}`, before: null, after: `pulled ${r.files} files`, created: true });
+      return `Pulled ${r.files} files (${Math.round(r.bytes / 1024)} KB) from ${r.repo}@${r.ref} into the workspace`
+        + `${r.truncated ? ' (truncated — large repo)' : ''}. Use list_files to see them.`;
+    }
+    case 'github_create_branch': {
+      if (!args.branch) return 'ERROR: branch is required';
+      const r = await ghCreateBranch(run.user_id, args.repo, args.branch, { from: args.from });
+      return `Created branch ${r.branch} from ${r.from} (${r.sha.slice(0, 7)}).`;
+    }
+    case 'github_commit': {
+      // workspace_path lets the model commit a file it just wrote without
+      // repeating its whole content back through the model — the single
+      // biggest token sink in a "fix it and push it" turn.
+      const files = (Array.isArray(args.files) ? args.files : []).map((f) => {
+        if (f?.workspace_path && f.content === undefined) {
+          return { path: f.path, content: readWsFile(ws, f.workspace_path) };
+        }
+        return f;
+      });
+      const r = await ghCommit(run.user_id, args.repo, {
+        branch: args.branch, message: args.message, files,
+      });
+      return `Committed ${r.files} file(s) to ${r.branch} as ${r.commit}. ${r.url}`;
+    }
+    case 'github_open_pr': {
+      const r = await ghOpenPr(run.user_id, args.repo, {
+        head: args.head, base: args.base, title: args.title, body: args.body ?? '', draft: !!args.draft,
+      });
+      return `Opened PR #${r.number}: ${r.url}`;
+    }
     default:
       return `unknown tool: ${name}`;
   }
 }
 
-function requestApproval(run, command) {
+function requestApproval(run, req) {
   return new Promise((resolvePromise) => {
-    const eventId = emit(run.id, 'approval_request', { command });
+    // `command` stays in the payload for the existing UI + resume snapshot;
+    // tool/risk/detail are the generalised fields any tool can fill.
+    const eventId = emit(run.id, 'approval_request', {
+      command: req.args?.command ?? req.detail,
+      tool: req.tool,
+      risk: req.risk,
+      reason: req.reason,
+      detail: req.detail,
+    });
     setRunStatus(run.id, 'waiting_approval');
     const timer = setTimeout(() => finish(false, 'timeout'), APPROVAL_TIMEOUT_MS);
     const finish = (approved, by) => {

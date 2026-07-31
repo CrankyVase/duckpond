@@ -14,9 +14,17 @@ Web UI auto-rebuilds and restarts on file changes (every 2 min via `duckpond-dep
 ## Features
 
 - **Multi-user chat** — Fastify 5 + SSE streaming, per-user sessions, login lockouts
-- **Model management** — load/unload, per-model settings, model picker with provider grouping
+- **Model management** — load/unload, per-model settings, capability badges, curated catalogs
 - **Remote providers** — connect external API endpoints alongside local models, cost tracking
-- **Agentic coding** — podman sandbox for code execution, run replay, search trace
+- **Context saver** — tool-output compression, session dedup and filler removal before every
+  turn, with code, paths and numbers protected byte-for-byte. On by default
+- **Thinking mode** — reasoning translated to each provider's dialect, inline `<think>` tags
+  split into a collapsible panel
+- **Agentic coding** — podman sandbox for code execution, run replay, search trace, screenshots
+- **Tool permissions** — risk-tiered approval for every tool the model calls, plus an
+  activity log of what ran unattended
+- **GitHub** — read repos, pull one into the workspace, commit, push and open pull requests
+  (each with your approval)
 - **Image generation** — in-chat image gen via diffusion bridge (FLUX, SDXL)
 - **Markdown rendering** — block-memoized, rAF-batched, with mermaid diagrams, LaTeX, code blocks
 - **Speech** — TTS via Piper, STT via whisper.cpp
@@ -56,8 +64,14 @@ node scripts/admin.mjs list-users
 
 ```bash
 cd server && npm run dev     # dev server on :8090 with --watch
+cd server && npm test        # context saver + reasoning suites
 cd web && npm run dev        # Vite dev on :5199, proxies /api
+cd web && npm run build      # the real gate before deploying
 ```
+
+The running version and its git commit are in the sidebar footer and at
+`GET /api/version` — check the sha there against the box when a deploy looks
+like it didn't take.
 
 ## Tech stack
 

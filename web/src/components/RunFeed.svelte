@@ -82,9 +82,17 @@
         <DiffView before={e.before} after={e.after} created={e.created} />
       </div>
     {:else if e.type === 'approval_request'}
-      <div class="appr" class:settled={pendingApproval?.id !== e.id}>
-        <div class="apphead"><ShieldAlert size={14} /> Wants to run:</div>
-        <code class="appcmd">{e.command}</code>
+      <!-- Any tool can ask now, not just run_command — so the card leads with
+           WHAT is being asked and WHY it needs asking, and only falls back to
+           the bare command when the server sent an old-shape event. -->
+      <div class="appr" class:settled={pendingApproval?.id !== e.id} class:ext={e.risk === 'external'}>
+        <div class="apphead">
+          <ShieldAlert size={14} />
+          {e.tool ? 'Needs your approval' : 'Wants to run:'}
+          {#if e.risk}<span class="risk risk-{e.risk}">{e.risk}</span>{/if}
+        </div>
+        <code class="appcmd">{e.detail || e.command}</code>
+        {#if e.reason}<div class="appwhy">{e.reason}</div>{/if}
         {#if pendingApproval?.id === e.id && onapprove}
           <div class="appbtns">
             <button class="ok" onclick={() => onapprove(true)}><CircleCheck size={13} /> Allow</button>
@@ -217,6 +225,18 @@
   }
   .appr.settled { opacity: 0.6; }
   .apphead { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--yellow); font-weight: 600; }
+  .risk {
+    margin-left: auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 1px 6px; border-radius: 4px; font-weight: 700;
+    border: 1px solid currentColor; opacity: 0.85;
+  }
+  .risk-external { color: var(--red, #e5766a); }
+  .risk-exec { color: var(--yellow); }
+  .risk-write { color: var(--text-dim); }
+  .risk-read { color: var(--text-faint); }
+  /* anything leaving the machine is the one that must not be clicked past */
+  .appr.ext { border-color: color-mix(in srgb, var(--red, #e5766a) 45%, transparent); }
+  .appwhy { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
   .appcmd {
     font-family: var(--mono); font-size: 12px; color: var(--text);
     background: var(--bg); border-radius: calc(6px * var(--rf)); padding: 6px 9px;

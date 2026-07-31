@@ -151,6 +151,16 @@
                   {/if}
                 </span>
               </span>
+              <!-- Sniffed capability flags — the difference between "pick a
+                   model" and "pick a model that can actually do this". -->
+              {#if m.caps}
+                <span class="caps">
+                  {#if m.caps.reasoning}<span class="cap" title="Supports a thinking / reasoning mode">think</span>{/if}
+                  {#if m.caps.vision}<span class="cap" title="Can see images you attach">vision</span>{/if}
+                  {#if m.caps.tools}<span class="cap" title="Can call tools — search, files, GitHub">tools</span>{/if}
+                  {#if m.caps.free}<span class="cap free" title="Free to use">free</span>{/if}
+                </span>
+              {/if}
               {#if m.remote}
                 <span class="ptag">{m.provider?.name ?? 'remote'}</span>
               {/if}
@@ -261,6 +271,14 @@
   .opt.sel .oname { color: var(--accent); }
   .meta { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
   .noprice { opacity: 0.6; font-style: italic; }
+  .caps { display: inline-flex; gap: 3px; flex-shrink: 0; }
+  .cap {
+    font-size: calc(9px * var(--rf)); letter-spacing: 0.03em;
+    padding: 1px 5px; border-radius: 4px;
+    color: var(--text-faint); border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .cap.free { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
   .ptag {
     flex-shrink: 0;
     font-size: 10px; font-weight: 600; letter-spacing: 0.04em;

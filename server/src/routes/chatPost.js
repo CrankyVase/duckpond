@@ -27,9 +27,13 @@ import {
   auxBaselineCost, costFor, modelRowForRemoteId, providerMonthSpend, recordEvent,
 } from '../costs.js';
 import {
-  cacheKey, cacheLookup, cacheStore, estimateTokens, resolveRemote,
+  cacheKey, cacheLookup, cacheStore, estimateTokens, parseCaps, resolveRemote,
 } from '../providers.js';
 import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tokenSaver.js';
+import { saveContext, saverSummary } from '../contextsaver.js';
+import { reasoningDialect, reasoningParams } from '../reasoning.js';
+import { capabilityManifest } from '../permissions.js';
+import { GITHUB_READ_TOOLS, GITHUB_TOOLS, hasGithub } from '../github.js';
 import {
   GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
   WIDGET_TOOLS, WIDGET_TOOL_NAMES,
@@ -216,6 +220,30 @@ export function registerChatPost(app) {
         ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
         : withToolsPolicy(
           buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
+      // The turn's tool list, hoisted so the capability manifest below can name
+      // the actual tools rather than describe the policy in the abstract.
+      const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
+      const ghOn = hasGithub(req.user.id);
+      const turnTools = constrained ? [] : filterTools(
+        wsRow
+          ? [...AGENT_TOOLS, ...(ghOn ? GITHUB_TOOLS : []), ...WIDGET_TOOLS, ...memTools]
+          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
+            ...(ghOn ? GITHUB_READ_TOOLS : []), ...WIDGET_TOOLS, ...memTools],
+        disabledTools,
+      ).filter((t) => imgPrefs.allowed || t.function.name !== 'generate_image');
+
+      // Tell the model its own permissions. A model that doesn't know a tool
+      // needs approval either avoids useful tools or promises things it can't
+      // deliver — and it pre-asks in prose, which is exactly the double-prompt
+      // the approval card is supposed to replace.
+      if (!constrained && promptMessages[0]?.role === 'system') {
+        const manifest = capabilityManifest(req.user.id, {
+          tools: turnTools, hasWorkspace: !!wsRow, hasGithub: ghOn,
+        });
+        if (manifest) {
+          promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${manifest}` };
+        }
+      }
       // deep-research mode: prepend the directive to the leading system message
       if (modeCfg.ultra && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { role: 'system', content: `${promptMessages[0].content}\n\n${ULTRA_DIRECTIVE}` };
@@ -321,15 +349,43 @@ export function registerChatPost(app) {
       } else if (grammarStr) {
         params.grammar = grammarStr;
       }
-      // thinking control: enable_thinking is honored by qwen-style templates,
-      // reasoning_effort by gpt-oss-style ones; unsupported kwargs are ignored
-      const think = conv._settings.thinking;
-      // A grammar/schema constrains the WHOLE output — with thinking on,
-      // llama-server's reasoning parser swallows the constrained tokens as
-      // reasoning_content and the visible reply comes back empty.
-      if (think === 'none' || constrained) params.chat_template_kwargs = { enable_thinking: false };
-      else if (modeCfg.ultra) params.reasoning_effort = 'high';
-      else if (think === 'high' || think === 'low') params.reasoning_effort = think;
+      // Thinking control, translated to the dialect this model actually speaks
+      // (reasoning.js). `reasoning_effort` is an OpenAI-ism — Anthropic wants a
+      // token budget, OpenRouter its own `reasoning` object, qwen templates
+      // `enable_thinking`. Sending the wrong one is why the toggle used to look
+      // like it did nothing on most providers.
+      //
+      // A grammar/schema constrains the WHOLE output — with thinking on, the
+      // reasoning parser swallows the constrained tokens and the visible reply
+      // comes back empty, so `constrained` forces thinking off in every dialect.
+      {
+        const thinkPref = modeCfg.ultra ? 'high' : conv._settings.thinking;
+        const rr = remote ? resolveRemote(conv.model_id) : null;
+        const dialect = reasoningDialect(rr?.provider ?? null, rr?.modelId ?? conv.model_id);
+        // Local models: llama-server decides from the template, so assume yes.
+        // Remote: only send a reasoning param when the catalog says it can.
+        const supported = rr?.model ? parseCaps(rr.model).reasoning === true : true;
+        const rp = reasoningParams({
+          dialect,
+          effort: thinkPref,
+          supported,
+          budget: Number(conv._settings.thinking_budget) || 0,
+          constrained,
+          remote,
+        });
+        // `_soft` is prompt text, not a request param (Qwen3's /think and
+        // /no_think switches) — it goes on the last user message instead.
+        const { _soft: soft, ...rest } = rp;
+        Object.assign(params, rest);
+        if (soft) {
+          for (let i = promptMessages.length - 1; i >= 0; i -= 1) {
+            const m = promptMessages[i];
+            if (m.role !== 'user' || typeof m.content !== 'string') continue;
+            promptMessages[i] = { ...m, content: `${m.content} ${soft}` };
+            break;
+          }
+        }
+      }
 
       // ---------- cost saver (remote turns only) ----------
       // 1) stable-prefix ordering so provider prompt caches keep hitting
@@ -346,6 +402,42 @@ export function registerChatPost(app) {
         if (spent >= cap) {
           send({ type: 'error', message: `${remoteInfo.provider.name} hit its monthly spend cap ($${spent.toFixed(2)} of $${cap}) — raise or clear it in Providers.` });
           return; // finally{} closes the stream
+        }
+      }
+      // Context saver — runs before anything else looks at the prompt, and for
+      // LOCAL turns too: on a 32k local budget the win is headroom (more room
+      // for the actual conversation), on a paid remote turn it is money. The
+      // lossless engines (tool-output compression, session dedup) always run;
+      // the lossy ones only once the prompt crosses HEADROOM_AT. Doing this
+      // BEFORE auto-compaction often means the expensive LLM compaction pass
+      // never has to fire at all.
+      const saverLevel = conv._settings.context_saver ?? 'auto';
+      if (saverLevel !== 'off') {
+        try {
+          const saved = saveContext(promptMessages, {
+            ctxSize: conv._settings.ctx_size,
+            level: saverLevel,
+          });
+          if (saved.report.savedTokens > 0) {
+            promptMessages = saved.messages;
+            const line = saverSummary(saved.report);
+            if (line) send({ type: 'notice', message: line });
+            req.log.info(saved.report, 'context saver');
+            if (remote) {
+              // The saved tokens would have been billed at input rate; log them
+              // as savings so the Costs panel shows the engine paying for itself.
+              try {
+                recordEvent({
+                  userId: req.user.id, convId: conv.id, modelId: conv.model_id,
+                  kind: 'context_saved', tokensIn: saved.report.savedTokens, costUsd: 0,
+                  baselineUsd: costFor(modelRowForRemoteId(conv.model_id), saved.report.savedTokens, 0, 0),
+                });
+              } catch { /* ledger best-effort */ }
+            }
+          }
+        } catch (err) {
+          // A compression bug must never cost the user their turn.
+          req.log.warn({ err: String(err?.message ?? err) }, 'context saver skipped');
         }
       }
       if (remote) promptMessages = orderSystemForPrefixCache(promptMessages);
@@ -445,16 +537,11 @@ export function registerChatPost(app) {
             abortSignal: abort.signal, onDelta, onEvent: fbNotice,
           });
         } else {
-          const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
-          const baseTools = filterTools(wsRow ? [...AGENT_TOOLS, ...WIDGET_TOOLS, ...memTools]
-            : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS, ...memTools], disabledTools);
           res = await streamChat({
             model: conv.model_id, messages: promptMessages,
             params: {
               ...params,
-              tools: imgPrefs.allowed
-                ? baseTools
-                : baseTools.filter((t) => t.function.name !== 'generate_image'),
+              tools: turnTools,          // hoisted above, same list the manifest described
               tool_choice: 'auto',
             },
             abortSignal: abort.signal, onDelta, onEvent: fbNotice,
