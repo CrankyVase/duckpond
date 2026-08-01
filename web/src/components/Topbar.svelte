@@ -17,6 +17,7 @@
     providers: { label: 'Providers', icon: Cloud },
     costs: { label: 'Costs & savings', icon: PiggyBank },
     speech: { label: 'Speech Lab', icon: AudioWaveform },
+    settings: { label: 'Settings', icon: Settings2 },
   };
   const viewMeta = $derived(VIEWS[app.view] ?? null);
 
@@ -40,7 +41,6 @@
   {:else}
     <button class="ghost iconb backchat" onclick={() => {
       app.view = 'chat';
-      app.settingsOpen = false;
       app.themeStudioOpen = false;
     }} title="Back to chat">
       <MessageSquare size={16} />
@@ -61,7 +61,9 @@
   {#if app.view === 'chat'}
     <div class="desk ctxwrap"><ContextBar /></div>
   {/if}
-  <button class="ghost iconb" onclick={() => (app.settingsOpen = true)} title="Settings" aria-label="Settings">
+  <button class="ghost iconb" class:onview={app.view === 'settings'}
+    onclick={() => { app.view = 'settings'; app.themeStudioOpen = false; }}
+    title="Settings" aria-label="Settings">
     <Settings2 size={18} />
   </button>
 </header>
@@ -95,6 +97,7 @@
     border-radius: 9px;
     flex-shrink: 0;
   }
+  .iconb.onview { color: var(--accent); background: var(--accent-glow); }
   .viewtitle {
     display: inline-flex; align-items: center; gap: 7px;
     font-size: 13px; font-weight: 600; color: var(--text-dim); padding-left: 2px;

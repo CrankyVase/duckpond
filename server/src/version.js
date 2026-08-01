@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const VERSION = '0.3.1';
+export const VERSION = '0.3.2';
 export const CODENAME = 'agentic';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');

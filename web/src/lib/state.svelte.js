@@ -11,9 +11,8 @@ export const app = $state({
   streaming: null,       // { convId, text, thinking, tokS, n, loading, error }
   context: { used: 0, budget: 32768 },
   gpu: null,             // { totalBytes, usedBytes }
-  view: 'chat',          // 'chat' | 'stats' | 'speech' | 'files' | 'providers' | 'costs'
+  view: 'chat',          // 'chat' | 'stats' | 'speech' | 'files' | 'providers' | 'costs' | 'settings'
   modelPickerOpen: false,
-  settingsOpen: false,
   themeStudioOpen: false,
   // Start collapsed on narrow screens so chat is usable; desktop keeps it open.
   sidebarCollapsed: (typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches),

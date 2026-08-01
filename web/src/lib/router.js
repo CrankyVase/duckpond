@@ -115,14 +115,13 @@ export function pathForState({
   user = null,
   view = 'chat',
   conv = null,
-  settingsOpen = false,
   themeStudioOpen = false,
 } = {}) {
   const uid = user?.id;
   if (uid == null) return '/login';
 
-  if (settingsOpen) return userSubpath(uid, 'settings');
   if (themeStudioOpen) return userSubpath(uid, 'themes');
+  if (view === 'settings') return userSubpath(uid, 'settings');
   if (view === 'stats') return userSubpath(uid, 'stats');
   if (view === 'speech') return userSubpath(uid, 'speech');
   if (view === 'files') return userSubpath(uid, 'files');

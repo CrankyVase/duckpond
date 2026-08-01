@@ -32,6 +32,10 @@
   // Suppress URL writes while we apply a popstate / boot route so we don't
   // push a duplicate history entry.
   let suppressUrl = false;
+  // `booted` flips only after the BOOT ROUTE HAS BEEN APPLIED. If the URL-sync
+  // effect ran before that, it saw the initial state (view: 'chat') and
+  // rewrote a deep link like /u/1/settings to /u/1 before boot ever parsed it.
+  let bootStarted = false; // plain re-entry guard, not reactive
   let booted = $state(false);
   let lastPushedKey = ''; // view|convId — title-only changes use replace
 
@@ -41,7 +45,6 @@
 
   async function openOwnDefault() {
     app.view = 'chat';
-    app.settingsOpen = false;
     app.themeStudioOpen = false;
     if (app.conversations.length) await openConversation(app.conversations[0].id);
     else await newConversation();
@@ -58,7 +61,6 @@
         return;
       }
 
-      app.settingsOpen = false;
       app.themeStudioOpen = false;
 
       if (route.kind === 'stats') {
@@ -72,8 +74,7 @@
       } else if (route.kind === 'costs') {
         app.view = 'costs';
       } else if (route.kind === 'settings') {
-        app.view = 'chat';
-        app.settingsOpen = true;
+        app.view = 'settings';
       } else if (route.kind === 'themes') {
         app.view = 'chat';
         app.themeStudioOpen = true;
@@ -110,10 +111,9 @@
       user: app.user,
       view: app.view,
       conv: app.conv,
-      settingsOpen: app.settingsOpen,
       themeStudioOpen: app.themeStudioOpen,
     });
-    const key = `${app.user.id}|${app.view}|${app.conv?.id ?? ''}|${app.settingsOpen}|${app.themeStudioOpen}`;
+    const key = `${app.user.id}|${app.view}|${app.conv?.id ?? ''}|${app.themeStudioOpen}`;
     const titleOnly = key === lastPushedKey && path !== location.pathname;
     if (path === location.pathname) {
       lastPushedKey = key;
@@ -125,15 +125,15 @@
 
   // (re)load data whenever a user becomes present — first mount AND post-login
   $effect(() => {
-    if (!app.user || booted) return;
-    booted = true;
+    if (!app.user || bootStarted) return;
+    bootStarted = true;
     (async () => {
-      await Promise.all([loadModels(), loadConversations()]);
-      pollStatus();
-
-      // Prefer remembered path (post-login), else current URL
+      // Parse the deep link FIRST — effects may not rewrite the URL yet
       const next = takeNext();
       let route = parsePath(next || location.pathname, routeOpts());
+
+      await Promise.all([loadModels(), loadConversations()]);
+      pollStatus();
 
       // If they bookmarked another user's URL while logged out, after login
       // still bounce — never open someone else's chat.
@@ -143,6 +143,7 @@
       }
 
       await applyRoute(route, { push: false });
+      booted = true; // URL-sync effect may take over from here
       // Normalize address bar to /u/{yourId}/…
       syncUrl({ replace: true });
     })();
@@ -155,7 +156,6 @@
     void app.view;
     void app.conv?.id;
     void app.conv?.title;
-    void app.settingsOpen;
     void app.themeStudioOpen;
     if (suppressUrl) return;
     syncUrl({ replace: false });
@@ -219,10 +219,10 @@
     if (!app.user) return;
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); app.modelPickerOpen = !app.modelPickerOpen; }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newConversation(); }
-    if (e.key === 'Escape' && app.settingsOpen) app.settingsOpen = false;
-    if (e.key === 'Escape' && app.themeStudioOpen) app.themeStudioOpen = false;
+    if (e.key === 'Escape' && app.view === 'settings') app.view = 'chat';
+    else if (e.key === 'Escape' && app.themeStudioOpen) app.themeStudioOpen = false;
     // phone: Escape / back also closes the nav drawer
-    if (e.key === 'Escape' && !app.settingsOpen && !app.themeStudioOpen
+    else if (e.key === 'Escape' && !app.themeStudioOpen
         && !app.sidebarCollapsed && window.matchMedia('(max-width: 768px)').matches) {
       app.sidebarCollapsed = true;
     }
@@ -266,12 +266,13 @@
           <div class="panel-enter view-panel"><ProvidersPanel /></div>
         {:else if app.view === 'costs'}
           <div class="panel-enter view-panel"><CostsPanel /></div>
+        {:else if app.view === 'settings'}
+          <div class="panel-enter view-panel"><SettingsPanel /></div>
         {:else}
           <div class="view-panel"><Chat /></div>
         {/if}
       {/key}
     </main>
-    <SettingsPanel />
     <ThemeStudio />
   </div>
 {/if}

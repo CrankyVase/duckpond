@@ -74,7 +74,6 @@
   }
   async function goNew() {
     app.view = 'chat';
-    app.settingsOpen = false;
     app.themeStudioOpen = false;
     await newConversation();
     closeSidebarIfMobile();
@@ -82,7 +81,6 @@
   /** Duck brand → home: empty welcome chat, no matter where you are. */
   async function goHome() {
     app.view = 'chat';
-    app.settingsOpen = false;
     app.themeStudioOpen = false;
     // Already on an empty welcome thread — stay put
     if (app.conv && !(app.conv.messages?.length)) {
@@ -94,7 +92,6 @@
   }
   function goView(v) {
     app.view = v;
-    app.settingsOpen = false;
     app.themeStudioOpen = false;
     closeSidebarIfMobile();
   }
