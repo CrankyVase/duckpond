@@ -52,6 +52,10 @@ in-chat image gen, diffusion-in-chat wiring, SearxNG deploy, llama.cpp built wit
 diffusion-gemma support (unmerged PR #24423, Vulkan/RDNA4, verified end-to-end
 in-chat). See git log.
 
+## Hardening (not features)
+Correctness, security and quality debt in what's already shipped — 71 findings with
+file:line citations, prioritized P0/P1/P2. → `HARDENING.md`
+
 ---
 **Standalone plans stay separate.** This index just links them; it does not merge
 `EXTRAS-PLAN.md`, `DIFFUSION-HANDOFF.md`, or the per-tier notes into one. Point a
