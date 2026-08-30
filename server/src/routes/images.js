@@ -112,7 +112,7 @@ export default async function imageRoutes(app) {
         userId: req.user.id, prompt, model, size,
         steps: resolvedSteps,
         n, negative, enhance, seed,
-        onProgress: send,
+        onProgress: send, signal: abort.signal,
       });
       send({
         type: 'done',

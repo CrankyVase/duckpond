@@ -79,7 +79,7 @@ export async function bridgeGet(path) {
 // Resolves { images:[{id,url}], enhanced, model_used }; throws on bridge error.
 export async function generateViaBridge({
   userId, prompt, model = null, size = '1024x1024', steps = null, n = 1,
-  negative = '', enhance = true, seed = null, onProgress = () => {},
+  negative = '', enhance = true, seed = null, onProgress = () => {}, signal = null,
 }) {
   const prefs = getUserImagePrefs(userId);
   // Explicit non-auto model wins; otherwise the user's preferred model; else auto.
@@ -108,8 +108,18 @@ export async function generateViaBridge({
   const post = bridgePost('/v1/images/generations', body)
     .then((r) => ({ ok: true, r })).catch((e) => ({ ok: false, e }));
 
+  // A closed chat/studio connection must actually stop the GPU job, not just
+  // stop listening to it — otherwise a cancelled generation keeps burning
+  // GPU time (and VRAM) with nobody watching. The bridge checks CANCEL_TAGS
+  // between denoise steps, so this takes effect within one step.
+  const onAbort = () => { bridgePost('/v1/images/generations/cancel', { tag }).catch(() => {}); };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+
   let settled = false;
-  post.then(() => { settled = true; });
+  post.then(() => { settled = true; if (signal) signal.removeEventListener('abort', onAbort); });
   // Poll often enough to catch individual denoise steps (900ms was missing
   // most of them on short flux runs).
   let lastSeq = 0;

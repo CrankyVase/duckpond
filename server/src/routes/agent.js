@@ -264,7 +264,7 @@ export async function gateToolCall(run, name, args) {
   return ok ? null : 'DENIED: the user declined this action. Do not retry it and do not attempt the same thing another way; adapt, or explain what you now cannot do.';
 }
 
-export async function execTool(run, ws, name, args) {
+export async function execTool(run, ws, name, args, abortSignal) {
   const denied = await gateToolCall(run, name, args);
   if (denied) return denied;
   switch (name) {
@@ -363,6 +363,7 @@ export async function execTool(run, ws, name, args) {
             ev.type === 'preview' ? { b64: ev.b64, image: ev.image, n: ev.n }
               : { phase: ev.phase, step: ev.step, steps: ev.steps, image: ev.image, n: ev.n },
             { store: false }),
+          signal: abortSignal,
         });
         emit(run.id, 'image_done', {}, { store: false });
         for (const im of r.images) {
@@ -653,7 +654,7 @@ export async function agentLoop({
       if (args === null) {
         result = 'ERROR: your tool call arguments were not valid JSON (possibly truncated). Retry the call with complete, well-formed arguments.';
       } else {
-        try { result = await execTool(run, ws, tc.function.name, args); }
+        try { result = await execTool(run, ws, tc.function.name, args, abortSignal); }
         catch (err) { result = `ERROR: ${err.message}`; }
       }
       emit(run.id, 'tool_result', {
