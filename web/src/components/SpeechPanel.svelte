@@ -3,6 +3,7 @@
   // pane + right rail (model card, voice card, emotion card, each drilling
   // into its own selector panel), generate → bottom player bar with waveform.
   import { api } from '../lib/api.js';
+  import { noAutofill } from '../lib/noAutofill.js';
   import { app } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
@@ -361,7 +362,7 @@
           </button>
         </div>
         <div class="setuprow">
-          <input placeholder="…or local vLLM-Omni URL, e.g. http://127.0.0.1:8767" bind:value={urlInput} />
+          <input placeholder="…or local vLLM-Omni URL, e.g. http://127.0.0.1:8767" bind:value={urlInput} use:noAutofill />
         </div>
         {#if cfg?.api_key_set}<p class="mono dim">current key: {cfg.api_key_hint}</p>{/if}
       {:else}
@@ -451,7 +452,7 @@
         </div>
         <div class="vsearch">
           <Search size={13} />
-          <input placeholder="Search voices..." bind:value={vsearch} />
+          <input placeholder="Search voices..." bind:value={vsearch} use:noAutofill />
         </div>
         <div class="filters">
           {#each ['', 'male', 'female'] as g (g)}
@@ -525,7 +526,7 @@
           </label>
         </div>
         {#if recState === 'have'}<p class="okline">Reference ready</p>{/if}
-        <input class="clonename" placeholder="Voice name" bind:value={cloneName} maxlength="60" />
+        <input class="clonename" placeholder="Voice name" bind:value={cloneName} maxlength="60" use:noAutofill />
         <button class="gen wide" disabled={cloneBusy || recState !== 'have' || !cloneName.trim()} onclick={createClone}>
           {cloneBusy ? 'Cloning…' : 'Create cloned voice'}
         </button>

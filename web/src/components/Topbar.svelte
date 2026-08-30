@@ -5,6 +5,7 @@
   import AudioWaveform from '@lucide/svelte/icons/audio-waveform';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import Cloud from '@lucide/svelte/icons/cloud';
+  import Download from '@lucide/svelte/icons/download';
   import Files from '@lucide/svelte/icons/files';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
@@ -16,6 +17,7 @@
     files: { label: 'Files', icon: Files },
     providers: { label: 'Providers', icon: Cloud },
     costs: { label: 'Costs & savings', icon: PiggyBank },
+    hub: { label: 'Model Hub', icon: Download },
     speech: { label: 'Speech Lab', icon: AudioWaveform },
     settings: { label: 'Settings', icon: Settings2 },
   };

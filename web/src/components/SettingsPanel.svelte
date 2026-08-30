@@ -1,11 +1,13 @@
 <script>
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
+  import { noAutofill } from '../lib/noAutofill.js';
   import { applyPrefs, prefs, resetPrefs, savePrefs } from '../lib/prefs.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { applyTheme, persistTheme, sanitizeEffects, theme } from '../lib/theme.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
+  import { NAV_ITEMS } from './Sidebar.svelte';
   import Brain from '@lucide/svelte/icons/brain';
   import Gauge from '@lucide/svelte/icons/gauge';
   import ImageIcon from '@lucide/svelte/icons/image';
@@ -13,11 +15,13 @@
   import KeyRound from '@lucide/svelte/icons/key-round';
   import LinkIcon from '@lucide/svelte/icons/link';
   import Palette from '@lucide/svelte/icons/palette';
+  import PanelLeft from '@lucide/svelte/icons/panel-left';
   import ScrollText from '@lucide/svelte/icons/scroll-text';
   import Plug from '@lucide/svelte/icons/plug';
   import PlugZap from '@lucide/svelte/icons/plug-zap';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Save from '@lucide/svelte/icons/save';
+  import Search from '@lucide/svelte/icons/search';
   import Shield from '@lucide/svelte/icons/shield';
   import ShieldCheck from '@lucide/svelte/icons/shield-check';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
@@ -404,6 +408,7 @@
       { id: 'saving', label: 'Prompt & tokens', icon: Gauge },
       { id: 'tools', label: 'Tools', icon: Wrench },
       { id: 'appearance', label: 'Appearance', icon: Palette },
+      { id: 'navigation', label: 'Sidebar navigation', icon: PanelLeft },
       { id: 'behavior', label: 'Behavior', icon: ToggleLeft },
       { id: 'images', label: 'Images', icon: ImageIcon },
       { id: 'memory', label: 'Memory', icon: Brain },
@@ -438,21 +443,52 @@
     }
     activeSec = cur;
   }
+
+  // ---- searchable settings: filter both the section nav and the section
+  // cards by the section's own rendered text, like VS Code's settings search.
+  let query = $state('');
+  let noResults = $state(false);
+  let matchedIds = $state(null); // null = no filter active, else Set of visible section ids
+  $effect(() => {
+    const q = query.trim().toLowerCase();
+    if (!contentEl) return;
+    let anyVisible = false;
+    const ids = new Set();
+    for (const sec of contentEl.querySelectorAll(':scope > section')) {
+      const show = !q || sec.textContent.toLowerCase().includes(q);
+      sec.hidden = !show;
+      if (show) { anyVisible = true; ids.add(sec.id.replace(/^sec-/, '')); }
+    }
+    matchedIds = q ? ids : null;
+    noResults = q !== '' && !anyVisible;
+  });
 </script>
 
 <div class="page">
   <div class="wrap">
     <nav class="secnav" aria-label="Settings sections">
       <div class="navhead">Settings</div>
+      <div class="navsearch">
+        <Search size={13} />
+        <input type="text" placeholder="Search…" bind:value={query} use:noAutofill />
+        {#if query}
+          <button class="clearq" onclick={() => (query = '')} title="Clear"><X size={12} /></button>
+        {/if}
+      </div>
       {#each SECTIONS as s (s.id)}
-        <button type="button" class="navitem" class:on={activeSec === s.id} onclick={() => jump(s.id)}>
-          <s.icon size={14} />
-          <span>{s.label}</span>
-        </button>
+        {#if !matchedIds || matchedIds.has(s.id)}
+          <button type="button" class="navitem" class:on={activeSec === s.id} onclick={() => jump(s.id)}>
+            <s.icon size={14} />
+            <span>{s.label}</span>
+          </button>
+        {/if}
       {/each}
     </nav>
 
     <div class="content" bind:this={contentEl} onscroll={onSpy}>
+      {#if noResults}
+        <div class="noresults">No settings match &ldquo;{query}&rdquo;.</div>
+      {/if}
       <!-- connection -->
       <section id="sec-connection">
         <div class="stitle"><Plug size={13} />Connection</div>
@@ -691,6 +727,30 @@
             <option value="spacious">Spacious</option>
           </select>
         </div>
+      </section>
+
+      <!-- sidebar nav pins — same idea as Unsloth Studio's pin-to-menu setting -->
+      <section id="sec-navigation">
+        <div class="stitle"><PanelLeft size={13} />Sidebar navigation</div>
+        <div class="hint">Pinned pages show inline; the rest collapse into "More".</div>
+        {#each NAV_ITEMS as item (item.id)}
+          <div class="row">
+            <div class="rlabel"><div class="rt"><item.icon size={13} /> {item.label}</div></div>
+            <button class="tog" class:on={prefs.pinnedNav.includes(item.id)}
+              role="switch" aria-checked={prefs.pinnedNav.includes(item.id)}
+              onclick={() => {
+                if (prefs.pinnedNav.includes(item.id)) {
+                  if (prefs.pinnedNav.length <= 1) return;
+                  prefs.pinnedNav = prefs.pinnedNav.filter((id) => id !== item.id);
+                } else {
+                  prefs.pinnedNav = [...prefs.pinnedNav, item.id];
+                }
+                savePrefs();
+              }}>
+              <span class="knob"></span>
+            </button>
+          </div>
+        {/each}
       </section>
 
       <!-- behavior -->
@@ -1023,6 +1083,21 @@
   .navitem :global(svg) { color: var(--text-faint); flex-shrink: 0; transition: color 120ms ease; }
   .navitem.on :global(svg) { color: var(--accent); }
 
+  .navsearch {
+    display: flex; align-items: center; gap: 7px;
+    margin: 2px 2px 10px; padding: 7px 10px;
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    border-radius: calc(9px * var(--rf));
+  }
+  .navsearch :global(svg) { color: var(--text-faint); flex-shrink: 0; }
+  .navsearch input { all: unset; flex: 1; min-width: 0; font-size: 12.5px; color: var(--text); }
+  .clearq {
+    all: unset; cursor: pointer; display: grid; place-items: center; flex-shrink: 0;
+    color: var(--text-faint); padding: 2px;
+  }
+  .clearq:hover { color: var(--text); }
+  .noresults { font-size: 13px; color: var(--text-faint); text-align: center; padding: 24px 0; }
+
   .content {
     flex: 1; min-width: 0;
     overflow-y: auto;
@@ -1041,6 +1116,7 @@
     display: flex; flex-direction: column; gap: 11px;
     scroll-margin-top: 10px;
   }
+  section:global([hidden]) { display: none; }
   .stitle {
     display: flex; align-items: center; gap: 7px;
     font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase;
@@ -1082,6 +1158,7 @@
   .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .rlabel { min-width: 0; }
   .rt { font-size: 13.5px; }
+  .rt :global(svg) { vertical-align: -2px; color: var(--text-faint); margin-right: 2px; }
   .rd { font-size: 11.5px; color: var(--text-faint); }
   .row select { padding: 6px 10px; font-size: 13px; max-width: 205px; text-overflow: ellipsis; }
 

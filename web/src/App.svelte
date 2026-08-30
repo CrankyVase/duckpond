@@ -5,6 +5,7 @@
   import Duck from './components/Duck.svelte';
   import DuckGallery from './components/DuckGallery.svelte';
   import FilesPanel from './components/FilesPanel.svelte';
+  import HubPanel from './components/HubPanel.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
   import ProvidersPanel from './components/ProvidersPanel.svelte';
@@ -73,6 +74,8 @@
         app.view = 'providers';
       } else if (route.kind === 'costs') {
         app.view = 'costs';
+      } else if (route.kind === 'hub') {
+        app.view = 'hub';
       } else if (route.kind === 'settings') {
         app.view = 'settings';
       } else if (route.kind === 'themes') {
@@ -266,6 +269,8 @@
           <div class="panel-enter view-panel"><ProvidersPanel /></div>
         {:else if app.view === 'costs'}
           <div class="panel-enter view-panel"><CostsPanel /></div>
+        {:else if app.view === 'hub'}
+          <div class="panel-enter view-panel"><HubPanel /></div>
         {:else if app.view === 'settings'}
           <div class="panel-enter view-panel"><SettingsPanel /></div>
         {:else}

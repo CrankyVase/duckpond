@@ -3,6 +3,7 @@
   // project workspaces — delete anything, respect the 15 GB per-user cap.
   import { api, sse } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
+  import { noAutofill } from '../lib/noAutofill.js';
   import { app } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
@@ -337,7 +338,7 @@
               <div class="srow">
                 <label class="grow">
                   <span>Seed <em>blank = random</em></span>
-                  <input type="text" inputmode="numeric" placeholder="random"
+                  <input type="text" inputmode="numeric" placeholder="random" use:noAutofill
                     bind:value={seed} disabled={generating} />
                 </label>
                 <button type="button" class="ghost seedbtn" onclick={randomizeSeed}

@@ -5,6 +5,7 @@
   // type), layout styles, and raw custom CSS. Close without saving reverts;
   // Save persists server-side so the theme follows the account.
   import { api } from '../lib/api.js';
+  import { noAutofill } from '../lib/noAutofill.js';
   import { applyPrefs, prefs, savePrefs } from '../lib/prefs.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import {
@@ -529,7 +530,7 @@
 
           <div class="subhead">Browse · {filteredBrowse.length} themes</div>
           <div class="tfilters">
-            <input class="tsearch" type="search" placeholder="Search themes…" value={themeQuery} oninput={onThemeSearch} />
+            <input class="tsearch" type="search" placeholder="Search themes…" value={themeQuery} oninput={onThemeSearch} use:noAutofill />
             <div class="chiprow">
               {#each [['all', 'All'], ['dark', 'Dark'], ['light', 'Light'], ['favorites', '♥ Favorites']] as [id, label]}
                 <button type="button" class="chip" class:on={toneFilter === id} onclick={() => setToneFilter(id)}>{label}</button>
@@ -623,6 +624,7 @@
                 bind:value={dInput}
                 onkeydown={(e) => { if (e.key === 'Enter') designSend(); }}
                 disabled={dBusy}
+                use:noAutofill
               />
               <button class="primary" onclick={() => designSend()} disabled={dBusy || !dInput.trim()}>
                 {dBusy ? 'Designing…' : 'Design'}
@@ -635,8 +637,8 @@
         {:else if tab === 'market'}
           <div class="pubbox">
             <div class="pubfields">
-              <input placeholder="theme name" bind:value={pubName} maxlength="40" />
-              <input class="grow" placeholder="one-line description" bind:value={pubBlurb} maxlength="200" />
+              <input placeholder="theme name" bind:value={pubName} maxlength="40" use:noAutofill />
+              <input class="grow" placeholder="one-line description" bind:value={pubBlurb} maxlength="200" use:noAutofill />
               <button class="primary" disabled={publishing || !pubName.trim()} onclick={publishTheme}>
                 <UploadCloud size={14} />{publishing ? 'Publishing…' : 'Publish current look'}
               </button>
@@ -676,7 +678,7 @@
               <em class="tweaked">{Object.keys(theme.colors).length} tweaked</em>{/if}</span>
             <div class="saveas">
               <input placeholder="save as… (name)" bind:value={saveName} maxlength="40"
-                onkeydown={(e) => e.key === 'Enter' && saveAsCustom()} />
+                onkeydown={(e) => e.key === 'Enter' && saveAsCustom()} use:noAutofill />
               <button disabled={!saveName.trim()} onclick={saveAsCustom}>Save theme</button>
             </div>
           </div>
@@ -689,7 +691,7 @@
                     oninput={(e) => setColor(token, e.target.value)} title={`--${token}`} />
                   <span class="toklabel">{label}</span>
                   <input class="hex mono" value={resolved[token]} maxlength="7" spellcheck="false"
-                    onchange={(e) => setColor(token, e.target.value.trim())} />
+                    onchange={(e) => setColor(token, e.target.value.trim())} use:noAutofill />
                   {#if token in theme.colors}
                     <button class="ghost tokreset" onclick={() => resetColor(token)} title="Back to the theme's value">
                       <RotateCcw size={12} />

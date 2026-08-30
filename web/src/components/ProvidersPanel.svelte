@@ -5,6 +5,7 @@
   // list stays readable for every signed-in user.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
+  import { noAutofill } from '../lib/noAutofill.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
@@ -340,9 +341,9 @@
         <h2 class="subhead"><Plus size={13} /> Add a provider</h2>
         <div class="form">
           <input type="text" bind:value={fName} placeholder="Name (optional — auto from URL)"
-            autocomplete="off" spellcheck="false" />
+            use:noAutofill spellcheck="false" />
           <input type="url" bind:value={fUrl} placeholder="https://nano-gpt.com/api/v1"
-            autocomplete="off" spellcheck="false" />
+            use:noAutofill spellcheck="false" />
           <input type="password" bind:value={fKey} placeholder="API key"
             autocomplete="off" />
           <div class="formbtns">
@@ -494,7 +495,7 @@
                   <div class="searchwrap">
                     <Search size={14} />
                     <input class="search" type="search" placeholder="Search this provider's models…"
-                      bind:value={query} oninput={() => onSearch(p)} />
+                      bind:value={query} oninput={() => onSearch(p)} use:noAutofill />
                   </div>
                   <select class="sel" bind:value={showFilter} onchange={() => loadModelsFor(p, true)}>
                     <option value="visible">All visible</option>

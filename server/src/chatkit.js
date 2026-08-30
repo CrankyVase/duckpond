@@ -42,7 +42,12 @@ export function pathToRoot(leafId) {
 
 // Prompt for the model: the active path, minus messages covered by compaction
 // summaries on that path. Compaction nodes become system summaries in place.
-export function buildPrompt(conv, leafId) {
+// slim: true drops the ~2100-token core persona prompt (Dumpling's identity/
+// instructions) — a stopgap for backends where prefill time scales badly with
+// prompt size (Colibri's disk-streaming engines today). Temporary: remove
+// this param and its one caller-side check once that's not true anymore, or
+// once a faster model is the default for those backends.
+export function buildPrompt(conv, leafId, { slim = false } = {}) {
   const path = pathToRoot(leafId);
   const covered = new Set();
   for (const m of path) {
@@ -56,8 +61,10 @@ export function buildPrompt(conv, leafId) {
   const settings = conv._settings;
   const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   sysParts.push(`Today's date is ${todayStr}. Trust this over any date you might otherwise assume from training — use the correct current year (not an older one) when searching the web or reasoning about "latest", "current", "recent", or anything time-sensitive.`);
-  const core = corePrompt();
-  if (core?.trim()) sysParts.push(core);
+  if (!slim) {
+    const core = corePrompt();
+    if (core?.trim()) sysParts.push(core);
+  }
   if (settings.system_prompt?.trim()) sysParts.push(settings.system_prompt);
   const msgs = [];
   for (const m of path) {
@@ -150,10 +157,13 @@ export function persistInterruptedReply(job, conv, promptLeaf, { aborted = false
   }
 
   try {
+    // freeze the trace as "no longer live" — it never got a real 'done' event
+    const search = s.search?.steps?.length ? { ...s.search, active: false, reading: null } : null;
     const asst = insertMessage(conv.id, promptLeaf.id, 'assistant', text, {
       thinking: s.thinking || null,
       modelId: conv.model_id,
       runId: s.run?.id ?? null,
+      searchJson: search ? JSON.stringify(search) : null,
     });
     setLeaf(conv.id, asst.id);
     job.finalMsg = asst;

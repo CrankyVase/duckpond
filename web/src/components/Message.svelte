@@ -6,6 +6,7 @@
   import Duck from './Duck.svelte';
   import RunReplay from './RunReplay.svelte';
   import SearchTrace from './SearchTrace.svelte';
+  import SourcesStrip from './SourcesStrip.svelte';
   import { speech, toggleSpeech } from '../lib/tts.svelte.js';
   import Brain from '@lucide/svelte/icons/brain';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
@@ -68,6 +69,17 @@
     const all = [...(search.sources ?? [])];
     for (const st of search.steps ?? []) for (const site of st.sites) all.push(site);
     return all;
+  });
+  // same set the inline citation pills draw from, deduped for the sources strip
+  const dedupedSources = $derived.by(() => {
+    const seen = new Set();
+    const out = [];
+    for (const s of citeSources) {
+      if (!s.url || seen.has(s.url)) continue;
+      seen.add(s.url);
+      out.push(s);
+    }
+    return out;
   });
   // which model wrote this reply — matters once a chat has switched models
   const modelLabel = $derived.by(() => {
@@ -167,6 +179,7 @@
     <div class="abody">
       {#if search}
         <SearchTrace {search} />
+        {#if dedupedSources.length}<SourcesStrip sources={dedupedSources} />{/if}
       {/if}
       {#if msg.thinking}
         {#if streaming && !msg.content}

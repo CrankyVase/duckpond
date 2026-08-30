@@ -188,13 +188,14 @@ export async function runInlineSearch({
   const mdImgs = [];
   const mdWidgets = [];      // ```duckwidget``` blocks appended to the final message
 
-  const addSite = (title, url, read) => {
+  const addSite = (title, url, read, snippet) => {
     const step = steps[steps.length - 1];
     if (!step) return;
     let site = step.sites.find((s) => s.url === url);
-    if (!site) { site = { title, url, domain: sourceLabel(url), read: false }; step.sites.push(site); }
+    if (!site) { site = { title, url, domain: sourceLabel(url), read: false, snippet: snippet || '' }; step.sites.push(site); }
     if (read) site.read = true;
     if (title && (!site.title || site.title === site.url)) site.title = title;
+    if (snippet && !site.snippet) site.snippet = snippet;
   };
   const addSource = (title, url) => {
     if (seen.has(url)) return;
@@ -235,7 +236,7 @@ export async function runInlineSearch({
             const early = sp ? await sp : null;
             if (early?.ok) log?.info({ query }, 'speculative web_search hit');
             const { results, text } = early?.ok ? early.r : await searchWebStructured(query);
-            for (const r of results) { addSite(r.title, r.url, false); send({ type: 'search', phase: 'site', title: r.title, url: r.url, domain: sourceLabel(r.url), read: false }); }
+            for (const r of results) { addSite(r.title, r.url, false, r.content); send({ type: 'search', phase: 'site', title: r.title, url: r.url, domain: sourceLabel(r.url), read: false, snippet: r.content }); }
             result = text;
           } catch (err) { result = `ERROR: search failed: ${err.message}`; log?.warn?.({ err }, 'web_search failed'); }
         }

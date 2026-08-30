@@ -73,6 +73,7 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
     if (rest === 'themes' || rest === 'theme') return { kind: 'themes', userId, foreign };
     if (rest === 'providers') return { kind: 'providers', userId, foreign };
     if (rest === 'costs') return { kind: 'costs', userId, foreign };
+    if (rest === 'hub') return { kind: 'hub', userId, foreign };
 
     // slug+chatId  or  +chatId  or  bare chatId
     const chat = rest.match(/^(?:(.+)\+)?(\d+)$/);
@@ -96,6 +97,7 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
   if (p === '/themes' || p === '/theme') return { kind: 'themes', legacy: true };
   if (p === '/providers') return { kind: 'providers', legacy: true };
   if (p === '/costs') return { kind: 'costs', legacy: true };
+  if (p === '/hub') return { kind: 'hub', legacy: true };
 
   const legacyChat = p.match(/^\/(?:([^/]+)\+)?(\d+)$/);
   if (legacyChat) {
@@ -127,6 +129,7 @@ export function pathForState({
   if (view === 'files') return userSubpath(uid, 'files');
   if (view === 'providers') return userSubpath(uid, 'providers');
   if (view === 'costs') return userSubpath(uid, 'costs');
+  if (view === 'hub') return userSubpath(uid, 'hub');
   if (conv?.id != null) return chatPath(uid, conv.title, conv.id);
   return userHome(uid);
 }

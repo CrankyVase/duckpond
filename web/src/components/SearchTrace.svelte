@@ -3,12 +3,14 @@
   import Search from '@lucide/svelte/icons/search';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
 
-  // search: { steps:[{query, sites:[{title,url,domain,read}]}], sources:[...], active? }
+  // search: { steps:[{query, sites:[{title,url,domain,read,snippet}]}], sources:[...], active? }
   let { search } = $props();
 
   // open while it's still working; collapsed once done (non-intrusive)
   let open = $state(false);
   $effect(() => { open = !!search?.active; });
+
+  let hovered = $state(null); // the site object under the cursor, or null
 
   const siteCount = $derived(
     (search?.steps ?? []).reduce((n, s) => n + s.sites.length, 0));
@@ -32,12 +34,20 @@
             <div class="query"><Search size={12} /><span>{step.query}</span></div>
             <ul class="sites">
               {#each step.sites.slice(0, 6) as site (site.url)}
-                <li class:read={site.read}>
+                <li class:read={site.read} class="sitewrap"
+                  onmouseenter={() => (hovered = site)} onmouseleave={() => (hovered = null)}>
                   <a href={site.url} target="_blank" rel="noreferrer">
                     <span class="dot"></span>
                     <span class="stitle">{site.title || site.domain}</span>
                     <span class="sdom">{site.domain}</span>
                   </a>
+                  {#if hovered === site && site.snippet}
+                    <div class="hovercard">
+                      <div class="hctitle">{site.title || site.domain}</div>
+                      <div class="hcdom">{site.domain}</div>
+                      <div class="hcsnip">{site.snippet}</div>
+                    </div>
+                  {/if}
                 </li>
               {/each}
               {#if step.sites.length > 6}
@@ -80,6 +90,18 @@
   .query :global(svg) { color: var(--text-faint); flex-shrink: 0; }
   .query span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sites { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+  .sitewrap { position: relative; }
+  .hovercard {
+    position: absolute; left: 0; top: calc(100% + 4px); z-index: 20;
+    width: 280px; max-width: 80vw;
+    background: var(--bg-card); border: 1px solid var(--border-soft);
+    border-radius: calc(10px * var(--rf)); padding: 10px 12px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    font-size: 12px; line-height: 1.45;
+  }
+  .hctitle { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+  .hcdom { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); margin-bottom: 6px; }
+  .hcsnip { color: var(--text-dim); }
   .sites li a {
     display: flex; align-items: center; gap: 7px;
     padding: 3px 8px; border-radius: calc(7px * var(--rf)); text-decoration: none;

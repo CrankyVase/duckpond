@@ -1,6 +1,7 @@
 <script>
   // Always-visible current model, fast searchable switcher with VRAM eject.
   import { api } from '../lib/api.js';
+  import { noAutofill } from '../lib/noAutofill.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Check from '@lucide/svelte/icons/check';
@@ -140,7 +141,7 @@
       <div class="searchrow">
         <Search size={14} />
         <input type="search" name="model-search" bind:this={inputEl} bind:value={search} placeholder="Search models…"
-          autocomplete="off" autocorrect="off" spellcheck="false" onkeydown={keydown} />
+          use:noAutofill autocorrect="off" spellcheck="false" onkeydown={keydown} />
       </div>
       <div class="list">
         {#each groups as g (g.label)}

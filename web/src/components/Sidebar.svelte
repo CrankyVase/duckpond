@@ -1,22 +1,40 @@
+<script module>
+  import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import Download from '@lucide/svelte/icons/download';
+  import Files from '@lucide/svelte/icons/files';
+  import PiggyBank from '@lucide/svelte/icons/piggy-bank';
+
+  // Same idea as Unsloth Studio's "pin to sidebar, rest into More" chat-menu
+  // setting — this list is the single source of truth for both the sidebar
+  // and the Settings toggle list that controls prefs.pinnedNav.
+  export const NAV_ITEMS = [
+    { id: 'files', label: 'Files', icon: Files },
+    { id: 'stats', label: 'Stats', icon: BarChart3 },
+    { id: 'providers', label: 'Providers', icon: Cloud },
+    { id: 'hub', label: 'Model Hub', icon: Download },
+    { id: 'costs', label: 'Costs', icon: PiggyBank },
+  ];
+</script>
+
 <script>
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
+  import { noAutofill } from '../lib/noAutofill.js';
+  import { prefs } from '../lib/prefs.svelte.js';
   import { chatPath, userSubpath } from '../lib/router.js';
   import {
     app, closeSidebarIfMobile, loadConversations, newConversation, openConversation,
   } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
-  import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
-  import Cloud from '@lucide/svelte/icons/cloud';
-  import Files from '@lucide/svelte/icons/files';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Palette from '@lucide/svelte/icons/palette';
   import Pencil from '@lucide/svelte/icons/pencil';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
-  import PiggyBank from '@lucide/svelte/icons/piggy-bank';
   import Search from '@lucide/svelte/icons/search';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
@@ -94,8 +112,14 @@
     app.view = v;
     app.themeStudioOpen = false;
     closeSidebarIfMobile();
+    moreOpen = false;
   }
   const fmtDay = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  const pinnedItems = $derived(NAV_ITEMS.filter((n) => prefs.pinnedNav.includes(n.id)));
+  const overflowItems = $derived(NAV_ITEMS.filter((n) => !prefs.pinnedNav.includes(n.id)));
+  let moreOpen = $state(false);
+  function navHref(id) { return app.user?.id != null ? userSubpath(app.user.id, id) : `/${id}`; }
 
   const groups = $derived.by(() => {
     const now = Date.now() / 1000;
@@ -199,9 +223,9 @@
         <Search size={13} />
         <input type="search" name="chat-search" placeholder="Search chats…"
           title="Type to filter titles · Enter for deep search across messages"
-          bind:value={query}
+          bind:value={query} use:noAutofill
           onkeydown={(e) => { if (e.key === 'Enter') deepSearch(); if (e.key === 'Escape') clearSearch(); }}
-          autocomplete="off" autocorrect="off" spellcheck="false" />
+          autocorrect="off" spellcheck="false" />
         {#if query || deep}
           <button class="clear" onclick={clearSearch} title="Clear"><X size={12} /></button>
         {/if}
@@ -264,30 +288,33 @@
     </nav>
 
     <div class="pages">
-      <a class="page"
-        href={app.user?.id != null ? userSubpath(app.user.id, 'files') : '/files'}
-        onclick={(e) => { e.preventDefault(); goView('files'); }}
-        class:active={app.view === 'files'}>
-        <Files size={14} /> Files
-      </a>
-      <a class="page"
-        href={app.user?.id != null ? userSubpath(app.user.id, 'stats') : '/stats'}
-        onclick={(e) => { e.preventDefault(); goView('stats'); }}
-        class:active={app.view === 'stats'}>
-        <BarChart3 size={14} /> Stats
-      </a>
-      <a class="page"
-        href={app.user?.id != null ? userSubpath(app.user.id, 'providers') : '/providers'}
-        onclick={(e) => { e.preventDefault(); goView('providers'); }}
-        class:active={app.view === 'providers'}>
-        <Cloud size={14} /> Providers
-      </a>
-      <a class="page"
-        href={app.user?.id != null ? userSubpath(app.user.id, 'costs') : '/costs'}
-        onclick={(e) => { e.preventDefault(); goView('costs'); }}
-        class:active={app.view === 'costs'}>
-        <PiggyBank size={14} /> Costs
-      </a>
+      {#each pinnedItems as item (item.id)}
+        <a class="page"
+          href={navHref(item.id)}
+          onclick={(e) => { e.preventDefault(); goView(item.id); }}
+          class:active={app.view === item.id}>
+          <item.icon size={14} /> {item.label}
+        </a>
+      {/each}
+      {#if overflowItems.length}
+        <div class="morewrap">
+          <button class="page" onclick={() => (moreOpen = !moreOpen)}>
+            <Ellipsis size={14} /> More
+          </button>
+          {#if moreOpen}
+            <div class="moredrop">
+              {#each overflowItems as item (item.id)}
+                <a class="moreitem"
+                  href={navHref(item.id)}
+                  onclick={(e) => { e.preventDefault(); goView(item.id); }}
+                  class:active={app.view === item.id}>
+                  <item.icon size={14} /> {item.label}
+                </a>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
       {#if app.user?.role === 'owner'}
         <a class="page control" href={controlUrl()} title="Duck Pond Control — owner/admin only"
           rel="noopener">
@@ -490,6 +517,27 @@
   .page.active { color: var(--text); border-color: var(--border); background: var(--bg-card); }
   .page :global(svg) { color: var(--text-faint); flex-shrink: 0; }
   .page.active :global(svg) { color: var(--text-dim); }
+
+  .morewrap { position: relative; min-width: 0; }
+  .morewrap > .page { width: 100%; }
+  .moredrop {
+    position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 30;
+    background: var(--bg-card); border: 1px solid var(--border-soft);
+    border-radius: calc(9px * var(--rf)); padding: 5px;
+    display: flex; flex-direction: column; gap: 2px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  }
+  .moreitem {
+    all: unset; cursor: pointer; box-sizing: border-box;
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 9px; border-radius: calc(7px * var(--rf));
+    font-size: 12px; font-weight: 500; color: var(--text-dim);
+    text-decoration: none; white-space: nowrap;
+    transition: background 110ms ease, color 110ms ease;
+  }
+  .moreitem:hover { background: var(--bg-hover); color: var(--text); }
+  .moreitem.active { color: var(--text); background: var(--bg-hover); }
+  .moreitem :global(svg) { color: var(--text-faint); flex-shrink: 0; }
 
   .bottom {
     padding: 11px 14px;

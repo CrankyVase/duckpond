@@ -283,8 +283,9 @@
           const step = se.steps[se.steps.length - 1];
           if (step) {
             let site = step.sites.find((x) => x.url === ev.url);
-            if (!site) { site = { title: ev.title, url: ev.url, domain: ev.domain, read: false }; step.sites.push(site); }
+            if (!site) { site = { title: ev.title, url: ev.url, domain: ev.domain, read: false, snippet: ev.snippet || '' }; step.sites.push(site); }
             if (ev.title) site.title = ev.title;
+            if (ev.snippet && !site.snippet) site.snippet = ev.snippet;
             if (ev.read) {
               site.read = true;
               if (!se.sources.find((x) => x.url === ev.url)) se.sources.push({ title: ev.title || ev.url, url: ev.url, domain: ev.domain });
