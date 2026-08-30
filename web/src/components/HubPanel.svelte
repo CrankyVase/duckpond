@@ -14,6 +14,7 @@
   // repo, which for something like MiniMax-M3-GGUF is 6TB across 40 quants.
   import { api } from '../lib/api.js';
   import { noAutofill } from '../lib/noAutofill.js';
+  import { prefs } from '../lib/prefs.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
@@ -23,19 +24,18 @@
   import Search from '@lucide/svelte/icons/search';
   import Square from '@lucide/svelte/icons/square';
 
-  const SORTS = [
-    ['trendingScore', 'Trending'],
-    ['downloads', 'Most downloads'],
-    ['likes', 'Most likes'],
-    ['lastModified', 'Recently updated'],
-  ];
-  const TAGS = [
-    ['', 'All'],
-    ['text-generation', 'Text'],
-    ['text-to-speech', 'Voice'],
-    ['text-to-video', 'Video'],
-    ['text-to-image', 'Image'],
-    ['text-to-audio', 'Music'],
+  // Replaces the old Trending/Most-downloads/Most-likes sort chips — Lewis
+  // doesn't want to think about sorting, he wants "Unsloth's stuff" or "what's
+  // hot right now" as destinations. Unsloth is the default landing tab
+  // (configurable in Settings > Sidebar navigation... > Model Hub); the rest
+  // are fixed server-merged queries — see popularModels()/modalityModels() in
+  // hfHub.js for what each one actually fetches.
+  const TABS = [
+    ['unsloth', 'Unsloth'],
+    ['popular', 'Popular'],
+    ['image', 'Image'],
+    ['audio', 'Audio'],
+    ['video', 'Video'],
   ];
   // one-click jump to the mainstream model families Lewis actually wants —
   // browsing raw trending doesn't surface these reliably by name alone.
@@ -54,8 +54,7 @@
   function ownerOf(id) { return id.includes('/') ? id.split('/')[0] : id; }
 
   let q = $state('');
-  let sort = $state('trendingScore');
-  let tag = $state('');
+  let activeTab = $state(prefs.hubDefaultTab ?? 'unsloth');
   let results = $state([]);
   let searching = $state(false);
   let searched = $state(false);
@@ -79,14 +78,16 @@
   const activeRepo = $derived(selected ? (quantRepo.get(selected) ?? selected) : null);
   const selectedVariants = $derived(activeRepo ? variants.get(activeRepo) : null);
 
-  async function doSearch() {
-    const query = q.trim();
+  function tabEndpoint(tab) {
+    if (tab === 'unsloth') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified' })}`;
+    if (tab === 'popular') return '/api/hf/popular';
+    return `/api/hf/modality/${tab}`;
+  }
+
+  async function runQuery(fetchFn) {
     searching = true;
     try {
-      const params = new URLSearchParams({ sort });
-      if (query) params.set('q', query);
-      if (tag) params.set('pipeline_tag', tag);
-      results = await api(`/api/hf/search?${params}`);
+      results = await fetchFn();
       selected = results[0]?.id ?? null;
       if (selected) void loadQuantizers(selected);
     } catch (e) {
@@ -97,7 +98,19 @@
     searching = false;
     searched = true;
   }
-  void doSearch(); // populate Trending immediately — don't make the user type first
+
+  async function loadTab(tab) {
+    activeTab = tab;
+    q = '';
+    await runQuery(() => api(tabEndpoint(tab)));
+  }
+
+  async function doSearch() {
+    const query = q.trim();
+    if (!query) { await loadTab(activeTab); return; }
+    await runQuery(() => api(`/api/hf/search?${new URLSearchParams({ q: query, sort: 'trendingScore' })}`));
+  }
+  void loadTab(activeTab); // populate the default landing tab immediately
 
   function select(repoId) {
     selected = repoId;
@@ -248,7 +261,7 @@
   </div>
 
   <div class="popular">
-    <span class="plabel">Popular</span>
+    <span class="plabel">Jump to</span>
     {#each POPULAR as name (name)}
       <button class="pchip" onclick={() => { q = name; doSearch(); }}>{name}</button>
     {/each}
@@ -256,21 +269,15 @@
 
   <div class="chiprow">
     <div class="chips">
-      {#each TAGS as [val, label] (val)}
-        <button class="chip" class:active={tag === val}
-          onclick={() => { tag = val; doSearch(); }}>{label}</button>
-      {/each}
-    </div>
-    <div class="chips">
-      {#each SORTS as [val, label] (val)}
-        <button class="chip" class:active={sort === val}
-          onclick={() => { sort = val; doSearch(); }}>{label}</button>
+      {#each TABS as [val, label] (val)}
+        <button class="chip" class:active={activeTab === val && !q.trim()}
+          onclick={() => loadTab(val)}>{label}</button>
       {/each}
     </div>
   </div>
 
   {#if searched && !searching && !results.length}
-    <div class="empty">No models found{#if q.trim()} matching "{q}"{/if}.</div>
+    <div class="empty">No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}</div>
   {/if}
 
   {#if results.length}

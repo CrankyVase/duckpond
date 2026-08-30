@@ -1,6 +1,7 @@
 import { requireAuth } from '../auth.js';
 import {
-  cancelDownload, downloadStatus, findQuantizers, modelInfo, modelVariants, searchModels, startDownload,
+  cancelDownload, downloadStatus, findQuantizers, modalityModels, modelInfo, modelVariants,
+  popularModels, searchModels, startDownload,
 } from '../hfHub.js';
 
 export default async function hfRoutes(app) {
@@ -13,8 +14,23 @@ export default async function hfRoutes(app) {
   app.get('/api/hf/search', async (req, reply) => {
     const q = String(req.query.q ?? '').trim();
     try {
-      return await searchModels(q, { limit: req.query.limit, sort: req.query.sort, pipelineTag: req.query.pipeline_tag });
+      return await searchModels(q, {
+        limit: req.query.limit, sort: req.query.sort, pipelineTag: req.query.pipeline_tag, author: req.query.author,
+      });
     } catch (e) { return reply.code(502).send({ error: e.message }); }
+  });
+
+  // Model Hub tabs: Popular (last ~30 days, big-name owners) and the
+  // Image/Audio/Video modality tabs, both merged from several HF queries
+  // server-side so the client just gets one flat ranked list.
+  app.get('/api/hf/popular', async (req, reply) => {
+    try { return await popularModels({ limit: req.query.limit }); }
+    catch (e) { return reply.code(502).send({ error: e.message }); }
+  });
+
+  app.get('/api/hf/modality/:kind', async (req, reply) => {
+    try { return await modalityModels(req.params.kind, { limit: req.query.limit }); }
+    catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
   });
 
   app.get('/api/hf/models/*', async (req, reply) => {

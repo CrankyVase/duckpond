@@ -733,6 +733,16 @@
       <section id="sec-navigation">
         <div class="stitle"><PanelLeft size={13} />Sidebar navigation</div>
         <div class="hint">Pinned pages show inline; the rest collapse into "More".</div>
+        <div class="row">
+          <div class="rlabel"><div class="rt">Model Hub landing tab</div><div class="rd">which tab opens first when you visit the Hub</div></div>
+          <select value={prefs.hubDefaultTab} onchange={(e) => { prefs.hubDefaultTab = e.target.value; savePrefs(); }}>
+            <option value="unsloth">Unsloth</option>
+            <option value="popular">Popular</option>
+            <option value="image">Image</option>
+            <option value="audio">Audio</option>
+            <option value="video">Video</option>
+          </select>
+        </div>
         {#each NAV_ITEMS as item (item.id)}
           <div class="row">
             <div class="rlabel"><div class="rt"><item.icon size={13} /> {item.label}</div></div>
