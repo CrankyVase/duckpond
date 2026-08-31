@@ -31,20 +31,28 @@ export function assertRepoId(id) {
 
 const SORT_KEYS = new Set(['trendingScore', 'downloads', 'likes', 'lastModified', 'createdAt']);
 
-export async function searchModels(query, { limit = 24, sort, pipelineTag, author } = {}) {
+export async function searchModels(query, { limit = 30, sort, pipelineTag, author, cursor } = {}) {
   const q = String(query ?? '').trim();
   const params = new URLSearchParams({
     search: q,
-    limit: String(Math.min(50, Math.max(1, Number(limit) || 24))),
+    limit: String(Math.min(100, Math.max(1, Number(limit) || 30))),
     full: 'false',
   });
+  if (cursor) params.set('cursor', String(cursor));
   if (sort && SORT_KEYS.has(sort)) { params.set('sort', sort); params.set('direction', '-1'); }
   if (pipelineTag) params.set('pipeline_tag', pipelineTag);
   if (author) params.set('author', author);
   const res = await fetch(`${HF_API}/api/models?${params}`, { signal: AbortSignal.timeout(12_000) });
   if (!res.ok) throw new Error(`huggingface.co ${res.status}`);
+  // HF paginates with a Link header (rel="next") carrying an opaque cursor —
+  // the same mechanism Unsloth's Hub rides for its endless scroll. Pull the
+  // cursor back out so the client can ask the server for the next page.
+  let nextCursor = null;
+  const link = res.headers.get('link') ?? '';
+  const next = link.match(/<([^>]+)>;\s*rel="next"/);
+  if (next) nextCursor = new URL(next[1]).searchParams.get('cursor');
   const data = await res.json();
-  return data.map((m) => ({
+  const models = data.map((m) => ({
     id: m.id,
     likes: m.likes ?? 0,
     downloads: m.downloads ?? 0,
@@ -53,6 +61,7 @@ export async function searchModels(query, { limit = 24, sort, pipelineTag, autho
     private: !!m.private,
     updatedAt: m.lastModified ?? null,
   }));
+  return { models, nextCursor };
 }
 
 // The "big names" allowlist for the Popular tab — owners the mainstream
@@ -66,14 +75,14 @@ const POPULAR_OWNERS = [
 ];
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
-export async function popularModels({ limit = 8, sinceMs = THIRTY_DAYS_MS } = {}) {
+export async function popularModels({ limit = 30, sinceMs = THIRTY_DAYS_MS } = {}) {
   const cutoff = Date.now() - sinceMs;
   const perOwner = await Promise.all(POPULAR_OWNERS.map((author) =>
-    searchModels('', { limit, sort: 'lastModified', author }).catch(() => [])));
+    searchModels('', { limit, sort: 'lastModified', author }).catch(() => ({ models: [] }))));
   const seen = new Set();
   const out = [];
-  for (const list of perOwner) {
-    for (const m of list) {
+  for (const { models } of perOwner) {
+    for (const m of models) {
       if (seen.has(m.id)) continue;
       if (!m.updatedAt || new Date(m.updatedAt).getTime() < cutoff) continue;
       seen.add(m.id);
@@ -81,7 +90,7 @@ export async function popularModels({ limit = 8, sinceMs = THIRTY_DAYS_MS } = {}
     }
   }
   out.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  return out;
+  return { models: out, nextCursor: null };
 }
 
 // Modality tabs (Image/Audio/Video) — HF's pipeline_tag filter only takes one
@@ -98,18 +107,18 @@ export async function modalityModels(modality, { limit = 20 } = {}) {
   const tags = MODALITY_TAGS[modality];
   if (!tags) throw Object.assign(new Error('unknown modality'), { status: 400 });
   const perTag = await Promise.all(tags.map((pipelineTag) =>
-    searchModels('', { limit, sort: 'trendingScore', pipelineTag }).catch(() => [])));
+    searchModels('', { limit, sort: 'trendingScore', pipelineTag }).catch(() => ({ models: [] }))));
   const seen = new Set();
   const out = [];
-  for (const list of perTag) {
-    for (const m of list) {
+  for (const { models } of perTag) {
+    for (const m of models) {
       if (seen.has(m.id)) continue;
       seen.add(m.id);
       out.push(m);
     }
   }
   out.sort((a, b) => b.downloads - a.downloads);
-  return out;
+  return { models: out, nextCursor: null };
 }
 
 // HF tracks "quantized from" as a base_model:quantized:<repo> tag on the

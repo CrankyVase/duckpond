@@ -4,12 +4,12 @@
   // Lewis's school network. Search is open to any logged-in user; actually
   // pulling bytes onto shared disk is owner-only, same gate as Providers.
   //
-  // The quant picker mirrors Unsloth Studio's Hub (their shipped bundle was
-  // the reference): a flat list of quant rows, each with a fit badge (full
-  // GPU offload / might fit / partial offload / won't fit), a size, an
-  // on-disk state, a "~t/s" throughput estimate, and per-row download or
-  // delete. All the fit/TPS/cached-state math happens server-side
-  // (hfHub.js) from live rocm-smi + meminfo; the client just renders it.
+  // The layout, vocabulary and math deliberately mirror Unsloth Studio's
+  // Hub (AGPL-3.0, github.com/unslothai/unsloth — studied from source):
+  // endless scroll via a cursor'd server proxy, result cards with 52px
+  // avatars + status dots, and the quant picker with their exact fit-badge
+  // labels/tooltips and downloaded-first fit/size sort. All data flows
+  // through /api/hf/* — the browser only renders it.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { noAutofill } from '../lib/noAutofill.js';
@@ -18,12 +18,13 @@
   import { toast } from '../lib/toast.svelte.js';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
+  import Info from '@lucide/svelte/icons/info';
   import Search from '@lucide/svelte/icons/search';
   import Square from '@lucide/svelte/icons/square';
   import Trash2 from '@lucide/svelte/icons/trash-2';
 
   // Deterministic per-owner color behind the avatar while it loads (and for
-  // owners with no HF avatar), same idea as Unsloth's colored initials.
+  // owners with no HF avatar) — Unsloth's colored-initial fallback.
   const AVATAR_HUES = [210, 265, 320, 15, 45, 160, 190, 340];
   function avatarStyle(owner) {
     let h = 0;
@@ -52,6 +53,10 @@
   let activeTab = $state(prefs.hubDefaultTab ?? 'unsloth');
   let results = $state([]);
   let searching = $state(false);
+  let loadingMore = $state(false);      // fetching the next cursor page
+  let hasMore = $state(false);          // server still has another page
+  let nextCursor = $state(null);
+  let loadMoreFailed = $state(false);
   let searched = $state(false);
   let job = $state(null); // { repoId, status, line, percent, transferredBytes, totalBytes, speedBytesPerSec, etaSec, error }
   let poll = null;
@@ -72,28 +77,48 @@
   // 12h cache). Owners whose lookup 404s fall back to the colored initial.
   let avatarFail = $state(new Set());
 
+  // Infinite-scroll sentinel: 1px div at the end of the list; when it
+  // intersects, pull the next cursor page (Unsloth's h-px sentinel move).
+  let sentinelEl = $state(null);
+  let scrollEl = $state(null);
+
   const isOwner = $derived(app.user?.role === 'owner');
   const selectedModel = $derived(results.find((m) => m.id === selected) ?? null);
   const selectedQuantizers = $derived(selected ? quantizers.get(selected) : null);
   const activeRepo = $derived(selected ? (quantRepo.get(selected) ?? selected) : null);
   const selectedVariants = $derived(activeRepo ? variants.get(activeRepo) : null);
 
-  function tabEndpoint(tab) {
-    if (tab === 'unsloth') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified' })}`;
+  function tabEndpoint(tab, cursor) {
+    const p = cursor ? { cursor } : {};
+    if (tab === 'unsloth') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified', ...p })}`;
     if (tab === 'popular') return '/api/hf/popular';
     return `/api/hf/modality/${tab}`;
   }
 
+  // The current query as a fetch function — tab browse or text search — so
+  // fetchMore() can re-run it with the cursor for endless scroll.
+  let queryUrl = $state(null);
+  function currentQueryUrl(cursor) {
+    const p = cursor ? { cursor } : {};
+    if (q.trim()) return `/api/hf/search?${new URLSearchParams({ q: q.trim(), sort: 'trendingScore', ...p })}`;
+    return tabEndpoint(activeTab, cursor);
+  }
+
   async function runQuery(fetchFn) {
     searching = true;
+    loadMoreFailed = false;
     try {
-      results = await fetchFn();
+      const { models, nextCursor: nc } = await fetchFn();
+      results = models;
+      nextCursor = nc;
+      hasMore = !!nc;
       selected = results[0]?.id ?? null;
       if (selected) void loadQuantizers(selected);
     } catch (e) {
       toast(e.message ?? 'search failed', 'error');
       results = [];
       selected = null;
+      hasMore = false;
     }
     searching = false;
     searched = true;
@@ -108,9 +133,45 @@
   async function doSearch() {
     const query = q.trim();
     if (!query) { await loadTab(activeTab); return; }
-    await runQuery(() => api(`/api/hf/search?${new URLSearchParams({ q: query, sort: 'trendingScore' })}`));
+    await runQuery(() => api(currentQueryUrl()));
   }
   void loadTab(activeTab); // populate the default landing tab immediately
+
+  // Endless scroll: append the next page when the sentinel shows up. Same
+  // shape as Unsloth's fetchMore — one in-flight guard, results append,
+  // cursor advances, a failure row replaces itself with a Retry button.
+  let fetchingMore = false;
+  async function fetchMore() {
+    if (fetchingMore || !hasMore || searching) return;
+    fetchingMore = true;
+    loadingMore = true;
+    loadMoreFailed = false;
+    try {
+      const { models, nextCursor: nc } = await api(currentQueryUrl(nextCursor));
+      const seen = new Set(results.map((m) => m.id));
+      results = [...results, ...models.filter((m) => !seen.has(m.id))];
+      nextCursor = nc;
+      hasMore = !!nc;
+    } catch (e) {
+      loadMoreFailed = true;
+      hasMore = false; // stop auto-firing; Retry restores it
+    }
+    fetchingMore = false;
+    loadingMore = false;
+  }
+  async function retryFetchMore() {
+    hasMore = true;
+    await fetchMore();
+  }
+
+  $effect(() => {
+    if (!sentinelEl) return;
+    const io = new IntersectionObserver((ents) => {
+      if (ents.some((e) => e.isIntersecting)) fetchMore();
+    }, { root: scrollEl ?? null, rootMargin: '200px' });
+    io.observe(sentinelEl);
+    return () => io.disconnect();
+  });
 
   function select(repoId) {
     selected = repoId;
@@ -178,7 +239,7 @@
   }
 
   // When a download lands, re-read the variant list so the row flips to
-  // "on disk" (and the recommended pick can move past it).
+  // "On device" (and the sort promotes it to the top).
   let lastJobStatus = null;
   $effect(() => {
     const st = job?.status;
@@ -207,8 +268,8 @@
 
   async function deleteVariant(repoId, include, name) {
     const ok = await confirmDialog({
-      title: `Delete ${name}?`,
-      message: 'Removes the files from the shared model cache. Other quants of this repo stay.',
+      title: `Delete quantization?`,
+      message: `This will remove ${name} from disk. You can re-download it later.`,
       confirmLabel: 'Delete',
       danger: true,
     });
@@ -216,7 +277,7 @@
     deleting = include;
     try {
       const r = await api('/api/hf/variants/delete', { method: 'POST', body: { repoId, include } });
-      toast(`deleted ${name} — ${fmtBytes(r.freedBytes)} freed`, 'ok');
+      toast(`Deleted ${name} — ${fmtBytes(r.freedBytes)} freed`, 'ok');
       await loadVariants(repoId, true);
     } catch (e) {
       toast(e.error ?? e.message ?? 'delete failed', 'error');
@@ -252,24 +313,44 @@
     if (!bps) return '';
     return `${fmtBytes(bps)}/s`;
   }
-  // Unsloth's fit vocabulary — same tiers their Hub ships.
+
+  // Unsloth's exact fit-badge vocabulary — labels, tooltips and icon colors
+  // copied from their gguf-download-card.tsx FIT_BADGE table (AGPL).
   const FIT = {
-    fits:    { label: 'fits GPU',   tip: 'Full offload likely possible on this system.' },
-    marginal:{ label: 'might fit',  tip: 'Within the last GB of VRAM headroom — loading can fail if other apps are using the GPU.' },
-    partial: { label: 'partial',    tip: 'Exceeds VRAM but fits with system-RAM offload. Inference will be slower.' },
-    ram:     { label: 'RAM only',   tip: 'No GPU reading available — may run from system RAM, slowly.' },
-    oom:     { label: "won't fit",  tip: 'Exceeds combined VRAM and system RAM budget.' },
+    fits: {
+      label: 'Full GPU offload', icon: 'emerald',
+      tip: 'Full offload likely possible on your system.',
+    },
+    marginal: {
+      label: 'Over budget', icon: 'amber',
+      tip: 'Larger than your VRAM Budget allows, so part of it offloads even on an idle GPU. It is still smaller than the card, so raising the budget can keep it resident.',
+    },
+    partial: {
+      label: 'Partial offload', icon: 'sky',
+      tip: 'Model may not fit but still works with offloading. Expect slower inference.',
+    },
+    ram: {
+      label: 'RAM fallback', icon: 'sky',
+      tip: 'No GPU VRAM detected. This GGUF may run with system RAM and CPU offload. Inference will be slower.',
+    },
+    oom: {
+      label: 'Does not fit', icon: 'rose',
+      tip: 'Model may not fit but still works with offloading. Expect slower inference.',
+    },
   };
-  const FIT_RANK = { fits: 0, marginal: 1, partial: 2, ram: 3, oom: 4 };
-  // Unsloth's sort: fit tier first; within a tier biggest-first (best
-  // quality that fits at the top), except the oom tier where smallest-first.
+  const FIT_RANK = { fits: 0, marginal: 1, partial: 2, ram: 2, oom: 3 };
+  // Unsloth's sortDownloadableGgufVariants: downloaded-first, then fit rank,
+  // then size — biggest-first within a tier, smallest-first in "does not fit".
+  function downloadRank(v) { return v.downloaded ? 0 : 2; }
   function sortedVariants(v) {
     if (!v?.variants) return [];
     return [...v.variants].sort((a, b) => {
+      const sd = downloadRank(a) - downloadRank(b);
+      if (sd !== 0) return sd;
       const ra = FIT_RANK[a.fit] ?? 3;
       const rb = FIT_RANK[b.fit] ?? 3;
       if (ra !== rb) return ra - rb;
-      return ra >= 4 ? a.size - b.size : b.size - a.size;
+      return ra === 3 ? a.size - b.size : b.size - a.size;
     });
   }
   const pickedVariant = (v) => v?.variants?.find((x) => x.include === v.pick) ?? null;
@@ -284,7 +365,7 @@
   }
 </script>
 
-<div class="hub panel-scroll">
+<div class="hub panel-scroll" bind:this={scrollEl}>
   <div class="head">
     <div class="title">
       <h1>Model Hub</h1>
@@ -319,8 +400,7 @@
 
   <div class="searchwrap surface">
     <Search size={14} />
-    <input placeholder="Search Hugging Face models… (e.g. mistralai/Voxtral-4B-TTS-2603)"
-      bind:value={q} use:noAutofill
+    <input placeholder="Search all models…" bind:value={q} use:noAutofill
       onkeydown={(e) => { if (e.key === 'Enter') doSearch(); }} />
     <button class="primary" disabled={searching || !q.trim()} onclick={doSearch}>
       {searching ? 'Searching…' : 'Search'}
@@ -343,7 +423,13 @@
     </div>
   </div>
 
-  {#if searched && !searching && !results.length}
+  {#if searching}
+    <div class="skeleton-list">
+      {#each Array(6) as _, i (i)}
+        <div class="skeleton-row"><div class="sk avatar-sk"></div><div class="sk-lines"><div class="sk w40"></div><div class="sk w70"></div></div></div>
+      {/each}
+    </div>
+  {:else if searched && !results.length}
     <div class="empty">No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}</div>
   {/if}
 
@@ -360,15 +446,37 @@
               <span class="initial">{ownerOf(m.id)[0]?.toUpperCase()}</span>
             </span>
             <span class="rinfo">
-              <span class="rname">{m.id.split('/').pop()}</span>
-              <span class="rowner">{ownerOf(m.id)}{#if m.pipelineTag} · {m.pipelineTag}{/if}</span>
-            </span>
-            <span class="rstats">
-              <span><Heart size={10} /> {fmtN(m.likes)}</span>
-              <span><Download size={10} /> {fmtN(m.downloads)}</span>
+              <span class="rname">
+                {m.id.split('/').pop()}
+                <span class="dots">
+                  {#if m.id.toLowerCase().includes('gguf')}<span class="dot gguf" title="GGUF"></span>{/if}
+                  {#if m.gated}<span class="dot warn" title="Gated repo — access request needed"></span>{/if}
+                </span>
+              </span>
+              <span class="rowner">{ownerOf(m.id)}{#if ownerOf(m.id).toLowerCase() === 'unsloth'}<span class="verified" title="Verified Unsloth">✓</span>{/if}</span>
+              <span class="rmeta">
+                {#if m.updatedAt}Updated {fmtAgo(m.updatedAt)} · {/if}
+                <Download size={10} /> {fmtN(m.downloads)} ·
+                <Heart size={10} /> {fmtN(m.likes)}
+              </span>
             </span>
           </button>
         {/each}
+
+        {#if loadingMore}
+          <div class="loading-more">
+            {#each Array(3) as _, i (i)}
+              <div class="skeleton-row"><div class="sk avatar-sk"></div><div class="sk-lines"><div class="sk w40"></div><div class="sk w70"></div></div></div>
+            {/each}
+          </div>
+        {/if}
+        {#if loadMoreFailed}
+          <div class="morerr">
+            <span>Couldn't load more.</span>
+            <button class="ghost" onclick={retryFetchMore}>Retry</button>
+          </div>
+        {/if}
+        <div bind:this={sentinelEl} class="sentinel"></div>
       </div>
 
       <div class="detail surface">
@@ -396,7 +504,7 @@
 
           {@const qz = selectedQuantizers}
           {#if qz?.loading}
-            <div class="qmrow"><span class="qmhint">looking for GGUF quantizations…</span></div>
+            <div class="qmrow"><span class="qmhint">Loading available quantizations…</span></div>
           {:else if qz?.list?.length}
             <div class="qmrow">
               <span class="qmlabel">Quant maker</span>
@@ -417,7 +525,7 @@
 
           <div class="varbar">
             {#if v?.loading}
-              <span class="vhint">loading files…</span>
+              <span class="vhint">Loading available quantizations…</span>
             {:else if v?.error}
               <span class="vhint err">{v.error}</span>
             {:else if v}
@@ -425,14 +533,15 @@
               <div class="vhead">
                 <span class="vpicklabel">
                   {#if picked}
-                    <span class="qbadge mono big">{picked.quant ?? picked.name}</span>
-                    <span class="mono vsize">{fmtBytes(picked.size)}</span>
-                    {#if picked.fit && FIT[picked.fit]}
-                      <span class="fitpill {picked.fit}" title={FIT[picked.fit].tip}>{FIT[picked.fit].label}</span>
-                    {/if}
+                    <span class="qtrigger" class:active={picked.downloaded}>
+                      <span class="fiticon {FIT[picked.fit]?.icon ?? 'sky'}" title={FIT[picked.fit]?.tip ?? ''}><Info size={13} /></span>
+                      <span class="mono">{picked.quant ?? picked.name}</span>
+                    </span>
+                    {#if picked.downloaded}<span class="dottag success"><span class="dot"></span>On device</span>{/if}
+                    {#if picked.fit && FIT[picked.fit]}<span class="fitpill {picked.fit}" title={FIT[picked.fit].tip}>{FIT[picked.fit].label}</span>{/if}
                     {#if picked.tps}<span class="tps mono" title="Estimated decode speed on this GPU (9070 XT) at the current free VRAM — rough order-of-magnitude">~{picked.tps} t/s</span>{/if}
                   {:else}
-                    <span class="vhint">pick a quant below</span>
+                    <span class="vhint">Select quantization</span>
                   {/if}
                 </span>
                 {#if isOwner}
@@ -444,37 +553,43 @@
               </div>
               <div class="qlist">
                 {#each sortedVariants(v) as row (row.include ?? row.name)}
-                  <div class="qrow" class:sel={v.pick === row.include}
+                  <div class="qrow" class:sel={v.pick === row.include} class:loaded={row.downloaded}
                     onclick={() => pickVariant(activeRepo, row.include)}
                     role="button" tabindex="0"
                     onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && pickVariant(activeRepo, row.include)}>
-                    <span class="qbadge mono">{row.quant ?? row.name}</span>
-                    {#if row.fit && FIT[row.fit]}
-                      <span class="fitpill {row.fit}" title={FIT[row.fit].tip}>{FIT[row.fit].label}</span>
-                    {/if}
-                    {#if row.downloaded}
-                      <span class="diskpill" title="Already in the shared model cache">on disk</span>
-                    {:else if row.tps}
-                      <span class="tps mono" title="Estimated decode speed on this GPU at the current free VRAM">~{row.tps} t/s</span>
-                    {/if}
-                    <span class="qsize mono">{fmtBytes(row.size)}</span>
-                    {#if isOwner && row.include != null}
+                    <span class="qleft">
+                      <span class="fiticon {FIT[row.fit]?.icon ?? 'sky'}" title={FIT[row.fit]?.tip ?? ''}><Info size={13} /></span>
+                      <span class="mono qname">{row.quant ?? row.name}</span>
                       {#if row.downloaded}
-                        <button class="qdel" disabled={deleting === row.include}
-                          onclick={(e) => { e.stopPropagation(); deleteVariant(activeRepo, row.include, row.name); }}
-                          title="Delete this quant from the shared cache">
-                          <Trash2 size={12} />
-                        </button>
-                      {:else}
-                        <button class="qdl" disabled={job?.status === 'running'}
-                          onclick={(e) => { e.stopPropagation(); download(activeRepo, row.include); }}
-                          title={`Download ${row.name}`}>
-                          <Download size={12} />
-                        </button>
+                        <span class="dottag success"><span class="dot"></span>On device</span>
                       {/if}
-                    {:else}
-                      <span class="qspacer"></span>
-                    {/if}
+                    </span>
+                    <span class="qright">
+                      {#if row.fit && FIT[row.fit]}
+                        <span class="fitpill {row.fit}" title={FIT[row.fit].tip}>{FIT[row.fit].label}</span>
+                      {/if}
+                      {#if row.tps && !row.downloaded}
+                        <span class="tps mono" title="Estimated decode speed on this GPU at the current free VRAM">~{row.tps} t/s</span>
+                      {/if}
+                      <span class="qsize mono">{fmtBytes(row.size)}</span>
+                      {#if isOwner && row.include != null}
+                        {#if row.downloaded}
+                          <button class="qdel" disabled={deleting === row.include}
+                            onclick={(e) => { e.stopPropagation(); deleteVariant(activeRepo, row.include, row.name); }}
+                            title="Delete">
+                            <Trash2 size={13} />
+                          </button>
+                        {:else}
+                          <button class="qdl" disabled={job?.status === 'running'}
+                            onclick={(e) => { e.stopPropagation(); download(activeRepo, row.include); }}
+                            title={`Download ${row.name}`}>
+                            <Download size={13} />
+                          </button>
+                        {/if}
+                      {:else}
+                        <span class="qspacer"></span>
+                      {/if}
+                    </span>
                   </div>
                 {/each}
               </div>
@@ -554,52 +669,84 @@
 
   .empty { padding: 40px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
+  /* skeleton loaders — Unsloth's hub loading state */
+  @keyframes pulse { 50% { opacity: 0.45; } }
+  .sk { background: var(--bg-hover); border-radius: 7px; animation: pulse 1.4s ease infinite; }
+  .skeleton-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+  .skeleton-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; }
+  .avatar-sk { width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0; }
+  .sk-lines { flex: 1; display: flex; flex-direction: column; gap: 7px; }
+  .sk.w40 { height: 12px; width: 40%; }
+  .sk.w70 { height: 10px; width: 70%; }
+  .loading-more { display: flex; flex-direction: column; gap: 4px; }
+
   /* master/detail split, same shape as Unsloth's Hub tab */
   .split { display: flex; gap: 16px; align-items: flex-start; }
   .list {
-    flex: 0 0 340px; display: flex; flex-direction: column; gap: 4px;
-    max-height: 640px; overflow-y: auto; padding-right: 2px;
+    flex: 0 0 360px; display: flex; flex-direction: column; gap: 4px;
   }
+  .sentinel { height: 1px; }
+  .morerr {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 10px 12px; border-radius: calc(9px * var(--rf));
+    border: 1px solid color-mix(in srgb, var(--yellow, #c9a227) 35%, transparent);
+    background: color-mix(in srgb, var(--yellow, #c9a227) 8%, transparent);
+    font-size: 12px; color: var(--text-dim); margin-top: 4px;
+  }
+
+  /* Unsloth's result card: 52px avatar, name + dots, owner, meta line */
   .rrow {
-    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-    padding: 9px 10px; border-radius: calc(10px * var(--rf)); border: 1px solid transparent;
+    display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+    padding: 10px 12px; border-radius: calc(12px * var(--rf)); border: 1px solid transparent;
     background: none;
   }
   .rrow:hover { background: var(--bg-card); }
   .rrow.active { background: var(--bg-card); border-color: var(--border-soft); }
 
   .avatar {
-    width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+    width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: 13px; font-weight: 700;
+    font-size: 16px; font-weight: 700;
     overflow: hidden; position: relative;
   }
-  .avatar.big { width: 44px; height: 44px; border-radius: 11px; font-size: 18px; }
+  .avatar.big { width: 56px; height: 56px; border-radius: 16px; font-size: 20px; }
   .avatar img {
     position: absolute; inset: 0; width: 100%; height: 100%;
     object-fit: cover; border-radius: inherit; display: block;
   }
   .avatar .initial { position: relative; }
 
-  .rinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .rname { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rowner { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
-  .rstats {
-    display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
-    font-size: 10.5px; color: var(--text-faint); flex-shrink: 0;
+  .rinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .rname {
+    font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; display: flex; align-items: center; gap: 6px;
   }
-  .rstats span { display: flex; align-items: center; gap: 3px; }
+  .dots { display: inline-flex; gap: 4px; flex-shrink: 0; }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+  }
+  .dot.gguf { background: #7c6ff0; }
+  .dot.warn { background: var(--yellow, #c9a227); }
+  .rowner {
+    font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; display: flex; align-items: center; gap: 4px;
+  }
+  .verified { color: var(--green); font-weight: 700; }
+  .rmeta {
+    font-size: 11px; color: var(--text-faint); display: flex; align-items: center; gap: 3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
   .detail { flex: 1; min-width: 0; padding: 20px; }
   .dhead { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
   .dtitle { min-width: 0; }
   h2 { margin: 0; font-size: 17px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .downer { font-size: 12px; color: var(--text-faint); text-transform: capitalize; }
+  .downer { font-size: 12px; color: var(--text-faint); }
 
   .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
   .badge {
     padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
-    background: var(--bg-hover, var(--border-soft)); color: var(--text-dim); text-transform: capitalize;
+    background: var(--bg-hover, var(--border-soft)); color: var(--text-dim);
   }
   .badge.warn { color: var(--red); }
 
@@ -623,50 +770,61 @@
   .vhint { font-size: 12.5px; color: var(--text-faint); }
   .vhint.err { color: var(--red); }
 
-  /* Unsloth-style quant list: one row per quant, fit badge + size + action */
+  /* Unsloth-style quant picker: selected row header + one row per quant */
   .vhead {
     display: flex; align-items: center; gap: 10px;
     padding-bottom: 10px; margin-bottom: 8px;
     border-bottom: 1px solid var(--border-soft);
   }
   .vpicklabel { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .qbadge {
-    font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
-    padding: 3px 9px; border-radius: 7px;
-    background: var(--bg-hover); color: var(--text);
-    border: 1px solid var(--border-soft);
-    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  .qtrigger {
+    display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+    font-size: 12.5px; font-weight: 500;
   }
-  .qbadge.big { font-size: 12px; }
-  .vsize { font-size: 12px; color: var(--text-dim); }
+  .qtrigger.active { color: var(--accent); }
+  .fiticon { display: inline-flex; align-items: center; cursor: help; }
+  .fiticon.emerald { color: #34d399; }
+  .fiticon.amber { color: var(--yellow, #c9a227); }
+  .fiticon.sky { color: #7dd3fc; }
+  .fiticon.rose { color: var(--red); }
+  .dottag {
+    display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+    height: 20px; padding: 0 8px; border-radius: 999px;
+    border: 1px solid var(--border); font-size: 11px; font-weight: 500; color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .dottag .dot { width: 6px; height: 6px; }
+  .dottag.success .dot { background: var(--green); }
   .fitpill {
     font-size: 10.5px; font-weight: 600; white-space: nowrap;
     padding: 2px 8px; border-radius: 999px; border: 1px solid transparent;
   }
   .fitpill.fits     { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); background: color-mix(in srgb, var(--green) 9%, transparent); }
   .fitpill.marginal { color: var(--yellow, #c9a227); border-color: color-mix(in srgb, var(--yellow, #c9a227) 40%, transparent); background: color-mix(in srgb, var(--yellow, #c9a227) 9%, transparent); }
-  .fitpill.partial  { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-glow); }
-  .fitpill.ram      { color: var(--text-dim); border-color: var(--border); background: var(--bg-hover); }
+  .fitpill.partial  { color: #7dd3fc; border-color: color-mix(in srgb, #7dd3fc 40%, transparent); background: color-mix(in srgb, #7dd3fc 9%, transparent); }
+  .fitpill.ram      { color: #7dd3fc; border-color: color-mix(in srgb, #7dd3fc 40%, transparent); background: color-mix(in srgb, #7dd3fc 9%, transparent); }
   .fitpill.oom      { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); background: color-mix(in srgb, var(--red) 9%, transparent); }
   .tps {
     font-size: 11px; color: var(--text-faint); white-space: nowrap;
   }
-  .diskpill {
-    font-size: 10.5px; font-weight: 600; color: var(--green); white-space: nowrap;
-    padding: 2px 8px; border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--green) 40%, transparent);
-    background: color-mix(in srgb, var(--green) 9%, transparent);
-  }
-  .qlist { display: flex; flex-direction: column; gap: 2px; max-height: 340px; overflow-y: auto; }
+  .qlist { display: flex; flex-direction: column; gap: 2px; max-height: 360px; overflow-y: auto; }
   .qrow {
     display: flex; align-items: center; gap: 8px;
-    padding: 7px 9px; border-radius: calc(9px * var(--rf));
+    padding: 8px 10px; border-radius: calc(11px * var(--rf));
     cursor: pointer; border: 1px solid transparent;
   }
   .qrow:hover { background: var(--bg-hover); }
   .qrow.sel { background: var(--bg-hover); border-color: var(--border-soft); }
-  .qrow .qbadge { flex-shrink: 0; min-width: 64px; text-align: center; }
-  .qsize { margin-left: auto; font-size: 11.5px; color: var(--text-faint); flex-shrink: 0; }
+  .qleft { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+  .qname {
+    font-size: 12.5px; font-weight: 500; letter-spacing: -0.01em; flex-shrink: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px;
+  }
+  .qright { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
+  .qsize {
+    font-size: 11.5px; color: var(--text-dim); flex-shrink: 0;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border-soft);
+  }
   .qdl, .qdel {
     all: unset; cursor: pointer; flex-shrink: 0;
     display: grid; place-items: center;
