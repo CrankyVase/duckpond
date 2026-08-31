@@ -79,14 +79,23 @@
 
   // Infinite-scroll sentinel: 1px div at the end of the list; when it
   // intersects, pull the next cursor page (Unsloth's h-px sentinel move).
+  // Root is the list pane itself — the list scrolls, not the page.
   let sentinelEl = $state(null);
-  let scrollEl = $state(null);
+  let listEl = $state(null);
 
   const isOwner = $derived(app.user?.role === 'owner');
   const selectedModel = $derived(results.find((m) => m.id === selected) ?? null);
   const selectedQuantizers = $derived(selected ? quantizers.get(selected) : null);
   const activeRepo = $derived(selected ? (quantRepo.get(selected) ?? selected) : null);
   const selectedVariants = $derived(activeRepo ? variants.get(activeRepo) : null);
+  // Live VRAM readout from whichever variant payload last landed — Unsloth's
+  // header stat pill.
+  const vramLabel = $derived.by(() => {
+    const b = selectedVariants?.vramFreeBytes;
+    if (b == null) return null;
+    const gb = b / 1024 ** 3;
+    return gb >= 10 ? `${Math.round(gb)} GB` : gb.toFixed(1);
+  });
 
   function tabEndpoint(tab, cursor) {
     const p = cursor ? { cursor } : {};
@@ -168,7 +177,7 @@
     if (!sentinelEl) return;
     const io = new IntersectionObserver((ents) => {
       if (ents.some((e) => e.isIntersecting)) fetchMore();
-    }, { root: scrollEl ?? null, rootMargin: '200px' });
+    }, { root: listEl ?? null, rootMargin: '400px' });
     io.observe(sentinelEl);
     return () => io.disconnect();
   });
@@ -365,17 +374,18 @@
   }
 </script>
 
-<div class="hub panel-scroll" bind:this={scrollEl}>
+<div class="hub">
   <div class="head">
     <div class="title">
       <h1>Model Hub</h1>
       <p>Search &amp; download Hugging Face models through the server — your browser
         never has to reach huggingface.co directly.</p>
     </div>
+    {#if vramLabel}<span class="hwchip">{vramLabel} VRAM free</span>{/if}
   </div>
 
   {#if job && job.status && job.status !== 'idle'}
-    <div class="jobbar surface" class:err={job.status === 'error'} class:done={job.status === 'done'}>
+    <div class="jobbar" class:err={job.status === 'error'} class:done={job.status === 'done'}>
       <div class="jtop">
         <span class="jrepo mono">{job.repoId}</span>
         {#if job.variant && job.status === 'running'}<span class="jvariant mono">{job.variant}</span>{/if}
@@ -398,13 +408,22 @@
     </div>
   {/if}
 
-  <div class="searchwrap surface">
-    <Search size={14} />
-    <input placeholder="Search all models…" bind:value={q} use:noAutofill
-      onkeydown={(e) => { if (e.key === 'Enter') doSearch(); }} />
-    <button class="primary" disabled={searching || !q.trim()} onclick={doSearch}>
-      {searching ? 'Searching…' : 'Search'}
-    </button>
+  <div class="toolbar">
+    <div class="searchwrap">
+      <Search size={15} />
+      <input placeholder="Search all models…" bind:value={q} use:noAutofill
+        onkeydown={(e) => { if (e.key === 'Enter') doSearch(); }} />
+      {#if q}<button class="clearb ghost" onclick={() => { q = ''; loadTab(activeTab); }} title="Clear">×</button>{/if}
+      <button class="primary" disabled={searching || !q.trim()} onclick={doSearch}>
+        {searching ? 'Searching…' : 'Search'}
+      </button>
+    </div>
+    <div class="tabs">
+      {#each TABS as [val, label] (val)}
+        <button class="tab" class:active={activeTab === val && !q.trim()}
+          onclick={() => loadTab(val)}>{label}</button>
+      {/each}
+    </div>
   </div>
 
   <div class="popular">
@@ -414,15 +433,6 @@
     {/each}
   </div>
 
-  <div class="chiprow">
-    <div class="chips">
-      {#each TABS as [val, label] (val)}
-        <button class="chip" class:active={activeTab === val && !q.trim()}
-          onclick={() => loadTab(val)}>{label}</button>
-      {/each}
-    </div>
-  </div>
-
   {#if searching}
     <div class="skeleton-list">
       {#each Array(6) as _, i (i)}
@@ -430,12 +440,13 @@
       {/each}
     </div>
   {:else if searched && !results.length}
-    <div class="empty">No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}</div>
+    <div class="empty nodetail">No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}</div>
   {/if}
 
-  {#if results.length}
+  {#if results.length || (!searching && searched)}
     <div class="split">
-      <div class="list">
+      <div class="list" bind:this={listEl}>
+        <div class="lhead">Model</div>
         {#each results as m (m.id)}
           <button class="rrow" class:active={selected === m.id} onclick={() => select(m.id)}>
             <span class="avatar" style={avatarStyle(ownerOf(m.id))}>
@@ -479,7 +490,7 @@
         <div bind:this={sentinelEl} class="sentinel"></div>
       </div>
 
-      <div class="detail surface">
+      <div class="detail">
         {#if selectedModel}
           {@const v = selectedVariants}
           <div class="dhead">
@@ -492,7 +503,7 @@
             </span>
             <div class="dtitle">
               <h2>{selectedModel.id.split('/').pop()}</h2>
-              <span class="downer">{ownerOf(selectedModel.id)}</span>
+              <span class="downer">{selectedModel.id}</span>
             </div>
           </div>
 
@@ -525,7 +536,11 @@
 
           <div class="varbar">
             {#if v?.loading}
-              <span class="vhint">Loading available quantizations…</span>
+              <div class="qskeleton">
+                {#each Array(3) as _, i (i)}
+                  <div class="skeleton-row qsk"><div class="sk wq"></div><div class="sk wsize"></div></div>
+                {/each}
+              </div>
             {:else if v?.error}
               <span class="vhint err">{v.error}</span>
             {:else if v}
@@ -615,23 +630,40 @@
 </div>
 
 <style>
+  /* Unsloth Hub layout: the panel is a fixed frame — header + toolbar stay
+     pinned, only the two columns scroll. No page-level scrolling at all. */
   .hub {
-    flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
-    padding: 22px 28px 48px; max-width: 1240px; width: 100%; margin: 0 auto;
-    padding-bottom: max(48px, calc(24px + env(safe-area-inset-bottom)));
+    flex: 1; min-height: 0; display: flex; flex-direction: column;
+    max-width: 1400px; width: 100%; margin: 0 auto;
+    padding: 18px 24px 10px;
+    padding-bottom: max(10px, calc(10px + env(safe-area-inset-bottom)));
     box-sizing: border-box;
   }
-  .head { margin-bottom: 20px; }
-  h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
-  .title p { margin: 5px 0 0; font-size: 13px; color: var(--text-dim); max-width: 640px; }
 
-  .surface {
-    background: var(--bg-card); border: 1px solid var(--border-soft);
-    border-radius: calc(14px * var(--rf));
-    padding: 12px 16px; margin-bottom: 14px;
+  .head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; margin-bottom: 14px; flex-shrink: 0;
+  }
+  h1 { margin: 0; font-size: 21px; font-weight: 650; letter-spacing: -0.02em; }
+  .title p { margin: 5px 0 0; font-size: 12.5px; color: var(--text-dim); max-width: 560px; }
+  .hwchip {
+    flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-weight: 600; color: var(--text-dim);
+    padding: 5px 12px; border-radius: 999px;
+    border: 1px solid var(--border-soft); background: var(--bg-card);
+    white-space: nowrap; margin-top: 2px;
+  }
+  .hwchip::before {
+    content: ''; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green);
   }
 
-  .jobbar { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+  /* download job bar — floats above the split, full-width surface */
+  .jobbar {
+    flex-shrink: 0; display: flex; flex-direction: column; gap: 7px; font-size: 12.5px;
+    background: var(--bg-card); border: 1px solid var(--border-soft);
+    border-radius: calc(12px * var(--rf)); padding: 11px 15px; margin-bottom: 12px;
+  }
   .jobbar.err { border-color: var(--red); color: var(--red); }
   .jobbar.done { border-color: color-mix(in srgb, var(--green) 50%, transparent); }
   .jtop { display: flex; align-items: center; gap: 10px; }
@@ -644,89 +676,111 @@
   .jbar { height: 4px; border-radius: 999px; background: var(--bg-hover); overflow: hidden; }
   .jfill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 1s linear; }
 
-  .searchwrap { display: flex; align-items: center; gap: 10px; }
-  .searchwrap input { flex: 1; border: none; background: none; font-size: 13.5px; }
+  .toolbar {
+    flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+    flex-wrap: wrap; margin-bottom: 12px;
+  }
+  /* Unsloth's field-soft: borderless soft fill, no outline ring */
+  .searchwrap {
+    flex: 1 1 320px; display: flex; align-items: center; gap: 10px;
+    height: 40px; padding: 0 8px 0 14px; border-radius: 999px;
+    background: var(--bg-hover); color: var(--text-faint);
+    transition: background 160ms ease;
+  }
+  .searchwrap:focus-within { background: var(--bg-card); box-shadow: 0 0 0 1px var(--border); }
+  .searchwrap input { flex: 1; border: none; background: none; font-size: 13.5px; color: var(--text); min-width: 0; }
+  .searchwrap input::placeholder { color: var(--text-faint); }
   .searchwrap input:focus { outline: none; }
+  .clearb { flex-shrink: 0; font-size: 15px; line-height: 1; padding: 2px 7px; border-radius: 999px; }
+  .tabs {
+    display: flex; gap: 2px; padding: 3px; border-radius: 999px;
+    background: var(--bg-hover); flex-shrink: 0;
+  }
+  .tab {
+    padding: 6px 16px; border-radius: 999px; border: none; background: none;
+    font-size: 12.5px; font-weight: 500; color: var(--text-faint);
+    transition: color 140ms ease, background 140ms ease;
+  }
+  .tab:hover { color: var(--text-dim); }
+  .tab.active { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
 
-  .popular { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -4px 0 14px; }
+  .popular { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; flex-shrink: 0; }
   .plabel { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-faint); margin-right: 2px; }
   .pchip {
     padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border-soft);
-    font-size: 11.5px; color: var(--text-dim); background: var(--bg-card);
+    font-size: 11.5px; color: var(--text-dim); background: none;
   }
   .pchip:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border); }
 
-  .chiprow {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    flex-wrap: wrap; margin-bottom: 16px;
-  }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
-  .chip {
-    padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-soft);
-    font-size: 11.5px; color: var(--text-dim); background: none;
-  }
-  .chip.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg, #fff); }
-
   .empty { padding: 40px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
-  /* skeleton loaders — Unsloth's hub loading state */
   @keyframes pulse { 50% { opacity: 0.45; } }
   .sk { background: var(--bg-hover); border-radius: 7px; animation: pulse 1.4s ease infinite; }
-  .skeleton-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
-  .skeleton-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; }
+  .skeleton-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .skeleton-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; }
   .avatar-sk { width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0; }
   .sk-lines { flex: 1; display: flex; flex-direction: column; gap: 7px; }
   .sk.w40 { height: 12px; width: 40%; }
   .sk.w70 { height: 10px; width: 70%; }
-  .loading-more { display: flex; flex-direction: column; gap: 4px; }
+  .loading-more { display: flex; flex-direction: column; gap: 6px; }
 
-  /* master/detail split, same shape as Unsloth's Hub tab */
-  .split { display: flex; gap: 16px; align-items: flex-start; }
+  /* Two panes, each with its own scrollbar — the page never scrolls. */
+  .split { flex: 1; min-height: 0; display: flex; gap: 14px; align-items: stretch; }
   .list {
-    flex: 0 0 360px; display: flex; flex-direction: column; gap: 4px;
+    flex: 0 0 380px; min-height: 0; display: flex; flex-direction: column; gap: 4px;
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 2px 4px 16px 2px; -webkit-overflow-scrolling: touch;
   }
-  .sentinel { height: 1px; }
+  .lhead {
+    flex-shrink: 0; font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.07em; color: var(--text-faint); padding: 0 12px 4px;
+    position: sticky; top: 0; background: var(--bg); z-index: 1;
+  }
+  .sentinel { height: 1px; flex-shrink: 0; }
   .morerr {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 10px 12px; border-radius: calc(9px * var(--rf));
-    border: 1px solid color-mix(in srgb, var(--yellow, #c9a227) 35%, transparent);
-    background: color-mix(in srgb, var(--yellow, #c9a227) 8%, transparent);
+    padding: 10px 12px; border-radius: calc(9px * var(--rf)); flex-shrink: 0;
+    border: 1px solid color-mix(in srgb, var(--yellow) 35%, transparent);
+    background: color-mix(in srgb, var(--yellow) 8%, transparent);
     font-size: 12px; color: var(--text-dim); margin-top: 4px;
   }
 
-  /* Unsloth's result card: 52px avatar, name + dots, owner, meta line */
+  /* Unsloth's result card: flat raised surface, hover lift */
   .rrow {
     display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
-    padding: 10px 12px; border-radius: calc(12px * var(--rf)); border: 1px solid transparent;
-    background: none;
+    padding: 10px 12px; border-radius: calc(13px * var(--rf)); border: 1px solid transparent;
+    background: var(--bg-raised); flex-shrink: 0;
+    transition: background 140ms ease, border-color 140ms ease, transform 160ms ease;
   }
-  .rrow:hover { background: var(--bg-card); }
-  .rrow.active { background: var(--bg-card); border-color: var(--border-soft); }
+  .rrow:hover { background: var(--bg-hover); }
+  .rrow.active {
+    background: var(--bg-hover); border-color: var(--accent-dim);
+    box-shadow: inset 2px 0 0 0 var(--accent);
+  }
 
   .avatar {
     width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
     font-size: 16px; font-weight: 700;
     overflow: hidden; position: relative;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   }
-  .avatar.big { width: 56px; height: 56px; border-radius: 16px; font-size: 20px; }
+  .avatar.big { width: 56px; height: 56px; border-radius: 15px; font-size: 20px; }
   .avatar img {
     position: absolute; inset: 0; width: 100%; height: 100%;
     object-fit: cover; border-radius: inherit; display: block;
   }
   .avatar .initial { position: relative; }
 
-  .rinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .rinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2.5px; }
   .rname {
     font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; display: flex; align-items: center; gap: 6px;
   }
   .dots { display: inline-flex; gap: 4px; flex-shrink: 0; }
-  .dot {
-    width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0;
-  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .dot.gguf { background: #7c6ff0; }
-  .dot.warn { background: var(--yellow, #c9a227); }
+  .dot.warn { background: var(--yellow); }
   .rowner {
     font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; display: flex; align-items: center; gap: 4px;
@@ -734,23 +788,29 @@
   .verified { color: var(--green); font-weight: 700; }
   .rmeta {
     font-size: 11px; color: var(--text-faint); display: flex; align-items: center; gap: 3px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums;
   }
 
-  .detail { flex: 1; min-width: 0; padding: 20px; }
+  /* detail pane scrolls on its own */
+  .detail {
+    flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    background: var(--bg-card); border: 1px solid var(--border-soft);
+    border-radius: calc(16px * var(--rf)); padding: 22px;
+    -webkit-overflow-scrolling: touch;
+  }
   .dhead { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
   .dtitle { min-width: 0; }
-  h2 { margin: 0; font-size: 17px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  h2 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -0.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .downer { font-size: 12px; color: var(--text-faint); }
 
-  .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
   .badge {
     padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
-    background: var(--bg-hover, var(--border-soft)); color: var(--text-dim);
+    background: var(--bg-hover); color: var(--text-dim);
   }
   .badge.warn { color: var(--red); }
 
-  .qmrow { margin-bottom: 12px; }
+  .qmrow { margin-bottom: 14px; }
   .qmlabel {
     display: block; font-size: 10.5px; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.07em; color: var(--text-faint); margin-bottom: 6px;
@@ -758,19 +818,23 @@
   .qmchips { display: flex; gap: 6px; flex-wrap: wrap; }
   .qmchip {
     padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-soft);
-    font-size: 11.5px; font-family: var(--mono); color: var(--text-dim); background: var(--bg-card);
+    font-size: 11.5px; font-family: var(--mono); color: var(--text-dim); background: none;
   }
   .qmchip:hover { color: var(--text); border-color: var(--border); }
-  .qmchip.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg, #fff); }
+  .qmchip.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
   .qmhint { font-size: 12px; color: var(--text-faint); }
   .qmhint.err { color: var(--red); }
-  .fromrepo { font-size: 10.5px; color: var(--text-faint); margin: -8px 0 14px; }
+  .fromrepo { font-size: 10.5px; color: var(--text-faint); margin: -6px 0 14px; }
 
   .varbar { margin-bottom: 14px; }
   .vhint { font-size: 12.5px; color: var(--text-faint); }
   .vhint.err { color: var(--red); }
+  .qskeleton { display: flex; flex-direction: column; gap: 6px; }
+  .qsk { justify-content: space-between; padding: 12px 10px; }
+  .sk.wq { height: 14px; width: 30%; }
+  .sk.wsize { height: 14px; width: 64px; }
 
-  /* Unsloth-style quant picker: selected row header + one row per quant */
+  /* Unsloth-style quant picker */
   .vhead {
     display: flex; align-items: center; gap: 10px;
     padding-bottom: 10px; margin-bottom: 8px;
@@ -779,12 +843,12 @@
   .vpicklabel { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .qtrigger {
     display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
-    font-size: 12.5px; font-weight: 500;
+    font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
   }
   .qtrigger.active { color: var(--accent); }
   .fiticon { display: inline-flex; align-items: center; cursor: help; }
   .fiticon.emerald { color: #34d399; }
-  .fiticon.amber { color: var(--yellow, #c9a227); }
+  .fiticon.amber { color: var(--yellow); }
   .fiticon.sky { color: #7dd3fc; }
   .fiticon.rose { color: var(--red); }
   .dottag {
@@ -797,17 +861,15 @@
   .dottag.success .dot { background: var(--green); }
   .fitpill {
     font-size: 10.5px; font-weight: 600; white-space: nowrap;
-    padding: 2px 8px; border-radius: 999px; border: 1px solid transparent;
+    padding: 2px 9px; border-radius: 999px; border: 1px solid transparent;
   }
   .fitpill.fits     { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); background: color-mix(in srgb, var(--green) 9%, transparent); }
-  .fitpill.marginal { color: var(--yellow, #c9a227); border-color: color-mix(in srgb, var(--yellow, #c9a227) 40%, transparent); background: color-mix(in srgb, var(--yellow, #c9a227) 9%, transparent); }
+  .fitpill.marginal { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); background: color-mix(in srgb, var(--yellow) 9%, transparent); }
   .fitpill.partial  { color: #7dd3fc; border-color: color-mix(in srgb, #7dd3fc 40%, transparent); background: color-mix(in srgb, #7dd3fc 9%, transparent); }
   .fitpill.ram      { color: #7dd3fc; border-color: color-mix(in srgb, #7dd3fc 40%, transparent); background: color-mix(in srgb, #7dd3fc 9%, transparent); }
   .fitpill.oom      { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); background: color-mix(in srgb, var(--red) 9%, transparent); }
-  .tps {
-    font-size: 11px; color: var(--text-faint); white-space: nowrap;
-  }
-  .qlist { display: flex; flex-direction: column; gap: 2px; max-height: 360px; overflow-y: auto; }
+  .tps { font-size: 11px; color: var(--text-faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .qlist { display: flex; flex-direction: column; gap: 2px; }
   .qrow {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 10px; border-radius: calc(11px * var(--rf));
@@ -822,30 +884,43 @@
   }
   .qright { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
   .qsize {
-    font-size: 11.5px; color: var(--text-dim); flex-shrink: 0;
-    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border-soft);
+    font-size: 11px; color: var(--text-dim); flex-shrink: 0; font-variant-numeric: tabular-nums;
+    padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-soft);
   }
   .qdl, .qdel {
     all: unset; cursor: pointer; flex-shrink: 0;
     display: grid; place-items: center;
-    width: 26px; height: 24px; border-radius: calc(7px * var(--rf));
+    width: 28px; height: 26px; border-radius: calc(8px * var(--rf));
     color: var(--text-dim);
   }
   .qdl:hover { color: var(--accent); background: var(--accent-glow); }
   .qdel:hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
   .qdl:disabled, .qdel:disabled { opacity: 0.35; cursor: default; }
-  .qspacer { width: 26px; flex-shrink: 0; }
+  .qspacer { width: 28px; flex-shrink: 0; }
 
   .dlbtn {
-    display: flex; align-items: center; gap: 6px; padding: 8px 14px;
-    border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg, #fff);
-    border-radius: calc(10px * var(--rf)); font-size: 12.5px; white-space: nowrap;
+    display: flex; align-items: center; gap: 7px; padding: 9px 16px;
+    border: 1px solid var(--accent-deep); background: var(--accent-deep); color: var(--on-accent);
+    border-radius: 999px; font-size: 12.5px; font-weight: 600; white-space: nowrap;
   }
+  .dlbtn:hover:not(:disabled) { background: var(--accent); }
+  .dlbtn:disabled { opacity: 0.5; cursor: default; }
 
-  .stats { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .stats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
   .stat {
-    display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-faint);
+    display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-faint);
     padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border-soft);
+    font-variant-numeric: tabular-nums;
   }
   .mono { font-family: var(--mono); }
+
+  .empty.nodetail { flex: 1; display: flex; align-items: center; justify-content: center; }
+
+  @media (max-width: 900px) {
+    .hub { padding: 14px 14px 10px; }
+    .split { flex-direction: column; overflow-y: auto; }
+    .list { flex: 0 0 auto; max-height: 46vh; }
+    .detail { overflow-y: visible; min-height: 0; }
+    .head { flex-direction: column; gap: 8px; }
+  }
 </style>
