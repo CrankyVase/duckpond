@@ -1,6 +1,8 @@
 <script>
-  // Always-visible current model, fast searchable switcher with VRAM eject.
+  // Always-visible current model, fast searchable switcher with VRAM eject
+  // and (owner-only) disk delete.
   import { api } from '../lib/api.js';
+  import { confirmDialog } from '../lib/confirm.svelte.js';
   import { noAutofill } from '../lib/noAutofill.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
@@ -10,12 +12,15 @@
   import Power from '@lucide/svelte/icons/power';
   import Search from '@lucide/svelte/icons/search';
   import Star from '@lucide/svelte/icons/star';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
 
   let search = $state('');
   let inputEl = $state(null);
   let hoverIdx = $state(0);
   let unloading = $state(null);   // model id mid-unload
+  let deleting = $state(null);    // model id mid-delete
 
+  const isOwner = $derived(app.user?.role === 'owner');
   const current = $derived(app.models.find((m) => m.id === app.conv?.model_id));
 
   // Remote ids look like `r{providerId}:{model_id}` — show just the model part.
@@ -124,6 +129,46 @@
       loadModels();
     }
   }
+
+  async function removeModel(m, e) {
+    e.stopPropagation();
+    const ok = await confirmDialog({
+      title: `Delete ${m.id}?`,
+      message: 'Removes the whole model repo from the shared cache (every quant) and the router preset. Other users lose it too.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    deleting = m.id;
+    try {
+      const r = await api(`/api/models/${m.id}`, { method: 'DELETE' });
+      toast(`deleted — ${fmtBytes(r.freedBytes)} freed`, 'ok');
+      // if this chat was pointed at the deleted model, fall back to the
+      // default (or first remaining) so the next send doesn't 404
+      if (app.conv?.model_id === m.id) {
+        const next = app.user?.default_model_id
+          ?? app.models.find((x) => x.id !== m.id && !x.remote)?.id
+          ?? app.models.find((x) => x.id !== m.id)?.id ?? null;
+        app.conv.model_id = next;
+        if (app.conv.id && next) {
+          await api(`/api/conversations/${app.conv.id}`, { method: 'PATCH', body: { model_id: next } });
+        }
+      }
+    } catch (err) {
+      toast(String(err.message ?? err), 'error');
+    } finally {
+      deleting = null;
+      loadModels();
+    }
+  }
+
+  function fmtBytes(n) {
+    if (!n) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0; let v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+    return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+  }
 </script>
 
 <div class="picker">
@@ -201,6 +246,12 @@
                 <button class="eject" onclick={(e) => unload(m, e)} disabled={unloading === m.id}
                   title="Unload from VRAM">
                   <Power size={13} />
+                </button>
+              {/if}
+              {#if isOwner && !m.remote}
+                <button class="eject del" onclick={(e) => removeModel(m, e)} disabled={deleting === m.id}
+                  title="Delete from the shared model cache (frees disk)">
+                  <Trash2 size={13} />
                 </button>
               {/if}
               {#if m.id === app.conv?.model_id}
@@ -336,6 +387,8 @@
   }
   .eject:hover { background: rgba(192, 96, 79, 0.16); color: var(--red); }
   .eject:disabled { opacity: 0.4; cursor: default; }
+  .eject.del { color: var(--text-faint); }
+  .eject.del:hover { background: rgba(192, 96, 79, 0.16); color: var(--red); }
   .empty { padding: 14px; color: var(--text-faint); text-align: center; font-size: 13px; }
   .foot {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;

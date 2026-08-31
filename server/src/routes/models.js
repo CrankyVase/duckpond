@@ -5,6 +5,7 @@ import { ctxBlurb, describeModel } from '../modelDescribe.js';
 import { cardFor, queueCardFetch } from '../modelCards.js';
 import { isRemoteId, parseCaps, parseRemoteId, syncStaleProviders } from '../providers.js';
 import { TOOL_CATALOG } from '../toolCatalog.js';
+import { deleteModelRepoByPath, removeRouterPresetSections } from '../hfHub.js';
 
 // Defaults per spec §1; overridable per model, stored in model_settings.
 export const DEFAULT_SETTINGS = {
@@ -125,6 +126,36 @@ export default async function modelRoutes(app) {
     if (isRemoteId(req.params.id)) return reply.code(400).send({ error: 'remote models run on the provider — nothing to unload' });
     await unloadModel(req.params.id);
     return { ok: true };
+  });
+
+  // Delete a local model from disk: unload if resident, then remove the HF
+  // cache repo dir the router's --model path points into (all quants of that
+  // GGUF repo), then strip matching sections from the router preset ini so
+  // the aliases stop showing up. Owner-only — it frees real gigabytes.
+  // (Wildcard like the PUT below: find-my-way only allows '*' last, and this
+  // sits next to it; local ids never contain slashes anyway.)
+  app.delete('/api/models/*', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    const id = req.params['*'];
+    if (isRemoteId(id)) return reply.code(400).send({ error: 'remote models run on the provider — nothing to delete locally' });
+    let modelPath = null;
+    try {
+      const models = await listModels();
+      const m = models.find((x) => x.id === id);
+      if (m) {
+        const i = (m.args ?? []).indexOf('--model');
+        modelPath = i >= 0 ? m.args[i + 1] : null;
+      }
+    } catch { /* router down — can't resolve the file path */ }
+    if (!modelPath) return reply.code(404).send({ error: 'router does not report a file path for this model' });
+    await unloadModel(id).catch(() => {});   // release the mmap before rm
+    let del;
+    try { del = deleteModelRepoByPath(modelPath); }
+    catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
+    let presetRemoved = 0;
+    try { presetRemoved = removeRouterPresetSections(del.repoDir); }
+    catch (e) { req.log.warn({ err: e }, 'could not update router preset after model delete'); }
+    return { ok: true, repoId: del.repoId, freedBytes: del.freedBytes, presetRemoved };
   });
 
   // Remote ids can contain slashes (e.g. r1:anthropic/claude-3.5), and

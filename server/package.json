@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs"
+    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

@@ -1,7 +1,7 @@
 import { requireAuth } from '../auth.js';
 import {
-  cancelDownload, downloadStatus, findQuantizers, modalityModels, modelInfo, modelVariants,
-  popularModels, searchModels, startDownload,
+  cancelDownload, deleteVariant, downloadStatus, findQuantizers, modalityModels, modelInfo,
+  modelVariants, ownerAvatar, popularModels, searchModels, startDownload,
 } from '../hfHub.js';
 
 export default async function hfRoutes(app) {
@@ -57,9 +57,28 @@ export default async function hfRoutes(app) {
 
   app.post('/api/hf/download', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
-    const { repoId, include } = req.body ?? {};
-    try { return startDownload(repoId, { include }); }
+    const { repoId, include, variant } = req.body ?? {};
+    try { return startDownload(repoId, { include, variant }); }
     catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
+  });
+
+  // Free the disk bytes one downloaded variant occupies (other quants stay).
+  app.post('/api/hf/variants/delete', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    const { repoId, include } = req.body ?? {};
+    try { return deleteVariant(repoId, { include }); }
+    catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
+  });
+
+  // Org/user profile picture, resolved through the server (browser never
+  // reaches huggingface.co) and cached in memory for 12h. 404 → the client
+  // keeps its colored-initial square.
+  app.get('/api/hf/avatar/:owner', async (req, reply) => {
+    try {
+      const url = await ownerAvatar(req.params.owner);
+      if (!url) return reply.code(404).send();
+      return reply.redirect(302, url);
+    } catch { return reply.code(404).send(); }
   });
 
   app.post('/api/hf/download/cancel', async (req, reply) => {

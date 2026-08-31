@@ -3,32 +3,40 @@
 Requested 2026-08-30, biggest first. `HubPanel.svelte` + `hfHub.js` /
 `routes/hf.js` unless noted.
 
-## 1. Projected TPS based on hardware
-Before download, estimate tokens/sec for the picked quant on this box's
-actual hardware (VRAM free, GPU model, RAM) — same idea as LlamaDash's TPS
-predictor (see `moe_offload_tuning.md` / `speculative_decoding.md` /
-`llamadash_tps_calibration.md` memory notes for the model that already
-exists there; check whether its logic/data is reusable or needs its own
-simpler heuristic here since DuckPond doesn't have LlamaDash's calibration
-harness). Show as a stat chip next to the VRAM-fit warning in the variant
-picker.
-
-## 2. Model card avatars (org/user PFP, not screenshots)
-Replace the colored-initial squares with the real HF avatar image.
-Confirmed working endpoints (tested live 2026-08-30):
-- Org: `GET https://huggingface.co/api/organizations/{owner}/overview` →
-  `avatarUrl`
-- User: `GET https://huggingface.co/api/users/{owner}/overview` →
-  `avatarUrl`
-Try org first, fall back to user, fall back to the current colored-initial
-square if both 404 (private/deleted accounts, edge cases). Needs a small
-server-side proxy/cache route (same "browser never talks to
-huggingface.co directly" reason as everything else in `hfHub.js`) —
-`GET /api/hf/avatar/:owner` returning the image or a redirect, with an
-in-memory or short-TTL cache per owner so the list view isn't firing N
-avatar lookups on every render.
+## Open
+- **Held-out TPS calibration** — the `~t/s` chip runs LlamaDash's physics
+  (t_token = weights/bandwidth × 1.18 + 5ms) on this box's measured numbers
+  (9070 XT 600 GB/s, DDR5 53.6 GB/s) but with no calibration harness.
+  LlamaDash got MdAPE 9.8% after fitting per-model scales from real
+  generations; DuckPond's `messages` don't store per-turn timings against a
+  model size yet. If the estimates feel off, log `tokens_out/tok_s` +
+  model size per turn and fit a global scale — that's the cheap 80%.
 
 ## Done
+- ~~Unsloth-style quant picker~~ — shipped 2026-08-31, borrowed from their
+  shipped bundle: flat quant rows with fit badges (fits / might fit /
+  partial / won't fit — same thresholds: 97% VRAM budget, +15% overhead,
+  partial = VRAM + 50% available RAM), size, on-disk state, `~t/s` estimate
+  chip, per-row download AND delete, recommended default pre-picked
+  (largest quant that fits), rows sorted fit-tier then size. All the math
+  is server-side (`fitTier()` / `estimateTps()` in `hfHub.js`) from live
+  rocm-smi + /proc/meminfo; the browser never talks to huggingface.co.
+- ~~Projected TPS based on hardware~~ — shipped 2026-08-31 as the `~t/s`
+  chip (see Open note for calibration follow-up).
+- ~~Model card avatars~~ — shipped 2026-08-31: `GET /api/hf/avatar/:owner`
+  resolves org → user overview, 12h in-memory cache, 302 redirect; the
+  colored initial stays as the onerror fallback.
+- ~~Structured download progress~~ — shipped 2026-08-31: jobbar parses the
+  hf CLI's tqdm line into percent / transferred / total / speed / ETA and
+  draws a real progress bar; variant label shown; done/error states
+  distinct.
+- ~~Delete models~~ — shipped 2026-08-31, two levels: (a) Model Picker
+  trash button (owner-only, confirm dialog) → unload + `rm -rf` the whole
+  `models--*` cache dir + strip matching sections from the router preset
+  ini (`LLAMA_ROUTER_INI`, default
+  `/home/lewis/llama-router-bazzite-vulkan.ini`); conversation falls back
+  to the default model. (b) Hub quant-row delete → unlinks just that
+  variant's snapshot blobs, other quants stay.
 - ~~Tab-based browsing instead of sort chips~~ — shipped 2026-08-30: Unsloth
   (default landing tab, configurable in Settings > Sidebar navigation) /
   Popular (last 30d, big-name owner allowlist, merged+deduped server-side in

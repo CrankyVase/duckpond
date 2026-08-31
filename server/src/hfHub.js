@@ -3,11 +3,24 @@
 // Lewis's school network — see notes/2026-08-29 handoff). The `hf` CLI does
 // the actual transfer straight into HF_HOME, the same cache the llama router
 // and Unsloth Studio already share.
+//
+// The variant/quant picker deliberately borrows Unsloth Studio's Hub UX
+// (quant-per-file rows, fit badges, on-device states, recommended pick) —
+// verified against their shipped bundle — but everything here runs on the
+// server: HF API calls, the local-cache scan, VRAM fit math and the TPS
+// estimate. The browser only ever talks to /api/hf/*.
 import { spawn } from 'node:child_process';
+import {
+  existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  unlinkSync, writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
 import { gpuVram } from './llama.js';
+import { modelParamsB } from './modelDescribe.js';
 
 const HF_API = 'https://huggingface.co';
 const HF_CLI = process.env.HF_CLI ?? '/home/cranky/.local/bin/hf';
+const HF_HOME = process.env.HF_HOME ?? '/var/mnt/modelnvme/ai/huggingface';
 // owner/repo, or a bare repo id for legacy no-namespace repos (e.g. "gpt2").
 const REPO_ID_RE = /^[\w.-]+(\/[\w.-]+)?$/;
 
@@ -147,6 +160,151 @@ export async function modelInfo(repoId) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Local HF cache scan — "is this quant already on disk?" without asking HF.
+// The cache layout is models--<owner>--<repo>/snapshots/<sha>/<file>, where
+// snapshot entries are symlinks into blobs/. A blob present and fully-sized
+// (no .incomplete sibling in blobs/) means that file is downloaded.
+// ---------------------------------------------------------------------------
+
+const cacheDir = (repoId) =>
+  join(HF_HOME, 'hub', `models--${String(repoId).replace('/', '--')}`);
+
+/** @returns {string|null} snapshot dir for the repo's main ref, or null */
+function mainSnapshotDir(repoId) {
+  const root = cacheDir(repoId);
+  try {
+    const ref = readFileSync(join(root, 'refs', 'main'), 'utf8').trim();
+    const dir = join(root, 'snapshots', ref);
+    return existsSync(dir) ? dir : null;
+  } catch { return null; }
+}
+
+/**
+ * Bytes on disk for one cached file, or null when not cached. Follows the
+ * snapshot symlink to its blob; a blob missing or zero-sized means partial.
+ */
+function cachedFileBytes(snapshotDir, relPath) {
+  try {
+    const p = join(snapshotDir, relPath);
+    if (!existsSync(p)) return null;
+    return statSync(realpathSync(p)).size;
+  } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// Hardware: VRAM (rocm-smi via llama.js) + RAM. Bandwidth constants are this
+// box's own measured numbers (RX 9070 XT ~600 GB/s VRAM, DDR5 ~54 GB/s RAM,
+// NVMe ~5-13 GB/s) — see the tps-predictor fio/clpeak/stress-ng run
+// 2026-08-10. Good enough for a chip on the variant picker, cheap to compute.
+// ---------------------------------------------------------------------------
+const HW = {
+  gpuBwGBs: 600,   // clpeak global-memory bandwidth, RADV
+  ramBwGBs: 53.6,  // stress-ng STREAM
+  gpuOsOverheadGB: 0.6,
+  ramReservedGB: 6, // OS + llama.cpp + browser headroom
+  nvmeGBs: 5,      // modelnvme sequential read, cold
+};
+
+async function hardwareSnapshot() {
+  const vram = await gpuVram().catch(() => null);
+  let ramTotalBytes = 0;
+  let ramAvailableBytes = 0;
+  try {
+    const mi = readFileSync('/proc/meminfo', 'utf8');
+    ramTotalBytes = Number(mi.match(/MemTotal:\s+(\d+)/)?.[1] ?? 0) * 1024;
+    ramAvailableBytes = Number(mi.match(/MemAvailable:\s+(\d+)/)?.[1] ?? 0) * 1024;
+  } catch { /* meminfo unreadable — fit math degrades to VRAM-only */ }
+  const gpuTotalBytes = vram ? vram.totalBytes : null;
+  const gpuFreeBytes = vram ? Math.max(0, vram.totalBytes - vram.usedBytes) : null;
+  return {
+    gpuTotalBytes, gpuFreeBytes,
+    gpuTotalGB: gpuTotalBytes ? gpuTotalBytes / 1024 ** 3 : null,
+    gpuFreeGB: gpuFreeBytes ? gpuFreeBytes / 1024 ** 3 : null,
+    ramTotalGB: ramTotalBytes ? ramTotalBytes / 1024 ** 3 : null,
+    ramAvailableGB: ramAvailableBytes ? ramAvailableBytes / 1024 ** 3 : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fit tiers — same buckets & thresholds Unsloth Studio ships (verified
+// against their bundle: fits ≤ 97% VRAM, marginal ≤ VRAM, partial ≤
+// VRAM + 50% RAM, else oom), computed on the server from live rocm-smi +
+// meminfo. Reported RAM headroom is what's actually *available*, not total.
+// ---------------------------------------------------------------------------
+export function fitTier(sizeBytes, { gpuTotalGB, ramAvailableGB }) {
+  if (!gpuTotalGB || gpuTotalGB <= 0) {
+    return ramAvailableGB && sizeBytes / 1024 ** 3 <= ramAvailableGB * 0.5 ? 'ram' : 'oom';
+  }
+  // +15% load overhead (KV+activations estimate) — Unsloth's constant.
+  const needGB = sizeBytes / 1024 ** 3 * 1.15 + 1;
+  const budgetGB = gpuTotalGB * 0.97;
+  if (needGB <= budgetGB) return 'fits';
+  if (needGB <= gpuTotalGB) return 'marginal';
+  if (needGB <= budgetGB + (ramAvailableGB ?? 0) * 0.5) return 'partial';
+  return 'oom';
+}
+
+// ---------------------------------------------------------------------------
+// TPS estimate — a one-tier simplification of LlamaDash's physics model
+// (t_token = weights/bandwidth * compute_factor + overhead), using the
+// measured bandwidths above and params parsed from the repo name. MoE
+// active-params handling included (Qwen "35b-a3b" style). Uncalibrated on
+// purpose: it's an order-of-magnitude chip, not a promise.
+// ---------------------------------------------------------------------------
+const COMPUTE_FACTOR = 1.18;
+const FIXED_OH_S = 0.005;
+
+export function estimateTps(sizeBytes, repoIdOrName, { gpuFreeGB, ramAvailableGB }) {
+  const { totalB, activeB, moe } = modelParamsB(repoIdOrName);
+  if (!totalB) return null;
+  const modelGB = sizeBytes / 1024 ** 3;
+  // bits-per-weight from real file size; clamps catch shard sets/mmproj noise
+  const bpw = Math.min(18, Math.max(1.5, modelGB * 8 / totalB));
+  const activeRatio = moe && activeB ? Math.min(1, activeB / totalB) : 1;
+  const effGB = Math.max(0.05, modelGB * activeRatio);
+
+  const vramGB = Math.min(effGB, gpuFreeGB ?? 0);
+  const restGB = effGB - vramGB;
+  const ramGB = Math.min(restGB, Math.max(0, (ramAvailableGB ?? 0) - HW.ramReservedGB));
+  const nvmeGB = Math.max(0, restGB - ramGB);
+  let t = 0;
+  if (vramGB > 0) t += vramGB / HW.gpuBwGBs;
+  if (ramGB > 0) t += ramGB / HW.ramBwGBs;
+  if (nvmeGB > 0) t += nvmeGB / HW.nvmeGBs;
+  const tTok = t * COMPUTE_FACTOR + FIXED_OH_S;
+  return tTok > 0 ? Math.max(0.5, Math.round(1 / tTok)) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Quant labels — "Q4_K_M" / "IQ2_XS" / "F16" / "dynamic" from a GGUF
+// filename, with Unsloth's display_label convention (UD-* → "dynamic").
+// ---------------------------------------------------------------------------
+// A quant token: optional I/Q/T/MX prefix family, then digits, then
+// dash/underscore-joined sub-tokens (K_S, K_XL, XXS, NL, 0, 1...). Requires
+// the token to start at a path/filename boundary so words like "Fable" or
+// "qwen" never match. Shard digits ("-00001-of-00003") are stripped
+// separately so "Q4_K_M_00001_OF_00003" still reads as Q4_K_M.
+const QUANT_RE = /(?:^|[-_.])(I?Q\d(?:[_-]?(?:K|MS|S|M|L|XS|XXS|XL|NL|[0-9]))*|TQ\d(?:[_-]?[012])*|MXFP4(?:[_-]?[012])*|BF16|F16|F32|UD[_-][\w-]+)/i;
+const SHARD_RE = /[_-]?\d{5}$/;
+export function quantLabel(filename) {
+  const base = String(filename).split('/').pop();
+  const m = base.match(QUANT_RE);
+  if (!m) return null;
+  let q = m[1].toUpperCase().replace(/-/g, '_');
+  if (/^UD_/.test(q)) return 'dynamic';
+  if (/^BF?16$|^F32$/.test(q)) return q;
+  if (!/\d/.test(q)) return null;
+  // "Q4_K_M_00001" (first shard of a set) reads as plain Q4_K_M
+  return q.replace(SHARD_RE, '').replace(/[_-]+$/, '');
+}
+
+// ---------------------------------------------------------------------------
+// Variant grouping — same three repo shapes as before (quant-per-file,
+// quant-per-subfolder, flat), now enriched per variant with quant label,
+// cached bytes, fit tier and TPS so the UI can render Unsloth-style rows.
+// ---------------------------------------------------------------------------
+
 // The distinctive Unsloth-Hub move: a GGUF repo ships every quant as its own
 // file (or shard set) in one flat repo, so "download" needs to mean "download
 // the ONE variant I picked", not the whole multi-hundred-GB repo. This groups
@@ -207,6 +365,18 @@ export function groupVariants(entries) {
   return { kind: 'flat', total, variants: [{ name: 'everything', size: total, include: null }] };
 }
 
+// Recommended default variant: prefer the largest quant that still fits in
+// free VRAM (Unsloth's "default_variant" behaviour — best quality that
+// runs entirely on the GPU). Falls back to the smallest variant overall so
+// the button always points at something sane.
+function recommendVariant(variants, gpuFreeGB) {
+  if (!variants.length) return null;
+  if (gpuFreeGB == null) return variants[0];
+  const usable = gpuFreeGB * 0.9;
+  const fitting = variants.filter((v) => v.size / 1024 ** 3 <= usable);
+  return (fitting.length ? fitting : [variants[0]]).reduce((a, b) => (b.size > a.size ? b : a));
+}
+
 export async function modelVariants(repoId) {
   assertRepoId(repoId);
   const res = await fetch(`${HF_API}/api/models/${repoId}/tree/main?recursive=true`, { signal: AbortSignal.timeout(15_000) });
@@ -215,14 +385,59 @@ export async function modelVariants(repoId) {
   const tree = await res.json();
   const entries = tree.filter((e) => e.type === 'file').map((e) => ({ path: e.path, size: e.size ?? 0 }));
   const grouped = groupVariants(entries);
-  // free VRAM, so the UI can flag a quant that won't fit (Unsloth's OOM tag)
-  // — best-effort, rocm-smi failures just mean no fit hint, not an error.
-  const vram = await gpuVram().catch(() => null);
-  const vramFreeBytes = vram ? Math.max(0, vram.totalBytes - vram.usedBytes) : null;
-  return { ...grouped, vramFreeBytes };
+
+  const hw = await hardwareSnapshot();
+  const snapDir = mainSnapshotDir(repoId);
+
+  // Skip mmproj (vision adapters) when ranking for the recommended pick —
+  // they're tiny but never the model itself.
+  const enriched = grouped.variants.map((v) => {
+    const cachedBytes = v.include && snapDir && !v.include.includes('*')
+      ? cachedFileBytes(snapDir, v.include)
+      : null;
+    return {
+      ...v,
+      quant: quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null),
+      cachedBytes,
+      downloaded: cachedBytes != null && cachedBytes >= v.size * 0.999,
+      fit: fitTier(v.size, hw),
+      tps: estimateTps(v.size, repoId, hw),
+    };
+  });
+
+  return {
+    ...grouped,
+    variants: enriched,
+    recommended: recommendVariant(enriched.filter((v) => !/mmproj/i.test(v.name ?? '')), hw.gpuFreeGB)?.include ?? null,
+    vramFreeBytes: hw.gpuFreeBytes != null ? Math.round(hw.gpuFreeBytes) : null,
+    vramTotalBytes: hw.gpuTotalBytes != null ? Math.round(hw.gpuTotalBytes) : null,
+    ramAvailableBytes: hw.ramAvailableBytes != null ? Math.round(hw.ramAvailableBytes) : null,
+  };
 }
 
-/** @type {{ repoId: string, status: 'running'|'done'|'error', line: string, startedAt: number, finishedAt: number|null, error: string|null } | null} */
+// ---------------------------------------------------------------------------
+// Download job — single job, structured progress parsed out of the hf CLI's
+// tqdm output (percent, transferred/total bytes, speed, ETA), Unsloth-style.
+// ---------------------------------------------------------------------------
+const PROGRESS_RE = /(\d{1,3})%\|[^|]*\|?\s*([\d.]+\s*[GMkB])\/([\d.]+\s*[GMkB])?\s*\[(\d+:)?(\d+)<(\d+:)?(\d+)/;
+
+function parseBytes(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/^([\d.]+)\s*([GMkB])/);
+  if (!m) return null;
+  const mult = { B: 1, k: 1024, M: 1024 ** 2, G: 1024 ** 3 }[m[2]] ?? 1;
+  return Math.round(parseFloat(m[1]) * mult);
+}
+
+function hmsToSec(s) {
+  const parts = String(s).split(':').map(Number);
+  if (parts.some(Number.isNaN)) return null;
+  return parts.reduce((acc, p) => acc * 60 + p, 0);
+}
+
+/** @type {{ repoId: string, status: string, line: string, startedAt: number, finishedAt: number|null, error: string|null,
+ *            variant: string|null, percent: number|null, transferredBytes: number|null, totalBytes: number|null,
+ *            speedBytesPerSec: number|null, etaSec: number|null } | null} */
 let job = null;
 let child = null;
 
@@ -241,23 +456,48 @@ function lastLine(buf) {
   return parts.length ? parts[parts.length - 1] : '';
 }
 
-export function startDownload(repoId, { include } = {}) {
+function applyProgress(line) {
+  if (!job || !line) return;
+  const m = line.match(PROGRESS_RE);
+  if (m) {
+    const pct = Number(m[1]);
+    const transferred = parseBytes(m[2]);
+    const total = parseBytes(m[3]);
+    if (Number.isFinite(pct)) job.percent = Math.max(0, Math.min(100, pct));
+    if (transferred) job.transferredBytes = transferred;
+    if (total) job.totalBytes = total;
+    const speed = parseBytes((line.match(/,\s*([\d.]+\s*[GMkB])/)?.[1] ?? ''));
+    if (speed) job.speedBytesPerSec = speed;
+    const eta = hmsToSec(m[5]);
+    if (eta != null) job.etaSec = eta;
+  }
+}
+
+export function startDownload(repoId, { include, variant } = {}) {
   assertRepoId(repoId);
   if (downloadBusy()) throw Object.assign(new Error('a download is already running'), { status: 409 });
 
   const args = ['download', repoId];
   if (include) args.push('--include', include);
 
-  job = { repoId, status: 'running', line: 'starting…', startedAt: Date.now(), finishedAt: null, error: null };
+  job = {
+    repoId, status: 'running', line: 'starting…', startedAt: Date.now(), finishedAt: null, error: null,
+    variant: variant ?? include ?? null, percent: null, transferredBytes: null, totalBytes: null,
+    speedBytesPerSec: null, etaSec: null,
+  };
   child = spawn(HF_CLI, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  const onData = (d) => { job.line = lastLine(d.toString('utf8')) || job.line; };
+  const onData = (d) => {
+    const line = lastLine(d.toString('utf8'));
+    if (line) job.line = line;
+    applyProgress(line);
+  };
   child.stdout.on('data', onData);
   child.stderr.on('data', onData);
 
   child.on('close', (code) => {
     job.finishedAt = Date.now();
-    if (code === 0) { job.status = 'done'; job.line = 'done'; }
+    if (code === 0) { job.status = 'done'; job.line = 'done'; job.percent = 100; }
     else { job.status = 'error'; job.error = `hf download exited ${code}`; }
     child = null;
   });
@@ -267,4 +507,150 @@ export function startDownload(repoId, { include } = {}) {
 
 export function cancelDownload() {
   if (child) { child.kill('SIGTERM'); }
+}
+
+// ---------------------------------------------------------------------------
+// Variant delete — remove one variant's blobs from the HF cache so the row
+// flips back to "not downloaded" without nuking the whole repo (other quants
+// stay). Resolves snapshot symlinks and unlinks their blob targets.
+// ---------------------------------------------------------------------------
+
+// Variant include patterns are glob-ish (`dir/*`, `base-*-of-00003.gguf`, a
+// plain path). We match them against the snapshot's real file list.
+function includeMatches(include, path) {
+  if (!include) return true; // whole-repo variant: caller handles separately
+  const re = new RegExp('^' + include.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
+  return re.test(path);
+}
+
+export function deleteVariant(repoId, { include } = {}) {
+  assertRepoId(repoId);
+  if (downloadBusy() && job.repoId === repoId) {
+    throw Object.assign(new Error('download running for this repo'), { status: 409 });
+  }
+  const snapDir = mainSnapshotDir(repoId);
+  if (!snapDir) throw Object.assign(new Error('not found in local cache'), { status: 404 });
+  const names = readdirSync(snapDir);
+  const targets = names.filter((n) => includeMatches(include, n));
+  if (!targets.length) throw Object.assign(new Error('variant not found in local cache'), { status: 404 });
+  let freedBytes = 0;
+  const deleted = [];
+  for (const name of targets) {
+    const p = join(snapDir, name);
+    try {
+      const st = statSync(p);
+      let blob = p;
+      if (st.isSymbolicLink()) blob = realpathSync(p);
+      const size = statSync(blob).size;
+      unlinkSync(blob);
+      try { unlinkSync(p); } catch { /* snapshot entry already gone */ }
+      freedBytes += size;
+      deleted.push(name);
+    } catch { /* snapshot entry vanished mid-delete — skip */ }
+  }
+  return { freedBytes, deleted };
+}
+
+// ---------------------------------------------------------------------------
+// Whole-model delete — the Model Picker's trash button. A local model's
+// router entry points at a file inside the HF cache, so "delete this model"
+// means: drop the whole models--* repo dir (all quants of that GGUF repo)
+// and remove any router-preset sections that pointed into it. Refuses
+// anything outside HF_HOME.
+// ---------------------------------------------------------------------------
+
+const ROUTER_INI = process.env.LLAMA_ROUTER_INI ?? '/home/lewis/llama-router-bazzite-vulkan.ini';
+
+function dirSize(dir) {
+  let total = 0;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) total += dirSize(p);
+    else if (e.isSymbolicLink()) {
+      try { total += statSync(realpathSync(p)).size; } catch { /* dangling */ }
+    } else {
+      try { total += statSync(p).size; } catch { /* vanished */ }
+    }
+  }
+  return total;
+}
+
+export function deleteModelRepoByPath(modelPath) {
+  const hub = join(HF_HOME, 'hub');
+  const p = String(modelPath ?? '');
+  if (!p.startsWith(`${hub}/`)) {
+    throw Object.assign(new Error('model file lives outside the HF cache — delete it manually'), { status: 400 });
+  }
+  const dirName = p.slice(hub.length + 1).split('/')[0];
+  if (!/^models--[\w.-]+$/.test(dirName)) {
+    throw Object.assign(new Error('unexpected cache layout — refusing to delete'), { status: 400 });
+  }
+  const repoDir = join(hub, dirName);
+  if (!existsSync(repoDir)) {
+    throw Object.assign(new Error('cache directory already gone'), { status: 404 });
+  }
+  const freedBytes = dirSize(repoDir);
+  rmSync(repoDir, { recursive: true, force: true });
+  return {
+    repoDir,
+    repoId: dirName.replace(/^models--/, '').replace('--', '/'),
+    freedBytes,
+  };
+}
+
+// Strip every preset section whose `model =` points into the deleted repo
+// dir, so the router stops listing aliases whose files no longer exist.
+// Returns how many sections were removed; the ini is rewritten atomically.
+export function removeRouterPresetSections(repoDir) {
+  if (!existsSync(ROUTER_INI)) return 0;
+  const raw = readFileSync(ROUTER_INI, 'utf8');
+  const blocks = raw.split(/(?=^\[)/m);
+  const kept = [];
+  let removed = 0;
+  for (const block of blocks) {
+    const model = block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim();
+    if (model && model.startsWith(`${repoDir}/`)) { removed += 1; continue; }
+    kept.push(block);
+  }
+  if (removed > 0) {
+    const tmp = `${ROUTER_INI}.tmp`;
+    writeFileSync(tmp, kept.join(''));
+    renameSync(tmp, ROUTER_INI);
+  }
+  return removed;
+}
+
+// ---------------------------------------------------------------------------
+// Avatar proxy — org/user profile pictures from HF, cached in memory with a
+// 12h TTL (they basically never change) so a list view of N models costs at
+// most one lookup per owner. Falls through org → user → 404; the client
+// renders the colored-initial square on 404.
+// ---------------------------------------------------------------------------
+const avatarCache = new Map(); // owner -> { url, at }
+const AVATAR_TTL_MS = 12 * 60 * 60 * 1000;
+
+export async function ownerAvatar(owner) {
+  if (!/^[\w.-]+$/.test(String(owner ?? ''))) return null;
+  const key = String(owner);
+  const hit = avatarCache.get(key);
+  if (hit) {
+    if (hit.url === null && Date.now() - hit.at < AVATAR_TTL_MS) return null; // negative cache
+    if (hit.url) return hit.url;
+  }
+  for (const kind of ['organizations', 'users']) {
+    try {
+      const res = await fetch(`${HF_API}/api/${kind}/${encodeURIComponent(key)}/overview`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) continue;
+      const j = await res.json();
+      if (j.avatarUrl) {
+        const url = j.avatarUrl.startsWith('http') ? j.avatarUrl : `${HF_API}${j.avatarUrl}`;
+        avatarCache.set(key, { url, at: Date.now() });
+        return url;
+      }
+    } catch { /* try next kind */ }
+  }
+  avatarCache.set(key, { url: null, at: Date.now() });
+  return null;
 }
