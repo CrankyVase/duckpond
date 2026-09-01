@@ -4,12 +4,14 @@
   import Download from '@lucide/svelte/icons/download';
   import Files from '@lucide/svelte/icons/files';
   import PiggyBank from '@lucide/svelte/icons/piggy-bank';
+  import Clapperboard from '@lucide/svelte/icons/clapperboard';
 
   // Same idea as Unsloth Studio's "pin to sidebar, rest into More" chat-menu
   // setting — this list is the single source of truth for both the sidebar
   // and the Settings toggle list that controls prefs.pinnedNav.
   export const NAV_ITEMS = [
     { id: 'files', label: 'Files', icon: Files },
+    { id: 'media', label: 'Media', icon: Clapperboard },
     { id: 'stats', label: 'Stats', icon: BarChart3 },
     { id: 'providers', label: 'Providers', icon: Cloud },
     { id: 'hub', label: 'Model Hub', icon: Download },

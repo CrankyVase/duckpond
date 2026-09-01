@@ -14,7 +14,7 @@ const DEFAULTS = {
   caret: 'beam',             // beam | block | dot — streaming typing caret style
   // sidebar nav ids pinned inline; anything else collapses into "More" —
   // same idea as Unsloth Studio's "pin to chat's + side menu" setting.
-  pinnedNav: ['files', 'stats', 'providers', 'hub', 'costs'],
+  pinnedNav: ['files', 'media', 'stats', 'providers', 'hub', 'costs'],
   // Model Hub landing tab — unsloth | popular | image | audio | video.
   hubDefaultTab: 'unsloth',
 };

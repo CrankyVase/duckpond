@@ -4,6 +4,8 @@
 > remote-providers + cost-saver program (see §9 for that history). Stages 14–19
 > are the agentic-coding program: model curation, thinking mode, context
 > compression, tool permissions, GitHub, and the UI for all of it.
+> **Stage 20 = Model Hub 2 + Media Studio** — see `notes/HUB-2.md` for the
+> full handoff (download manager, media bridge, MediaPanel, search-bar removal).
 
 ## 0. Golden workflow rule (from the user)
 
@@ -11,11 +13,15 @@
 Commit to the working branch as version-history log entries (`stage X: …`),
 one commit per file or per small logical unit. Merge to `main` only when a
 stage is complete and verified — the production site deploys from `main`
-(auto-deploy timer + `deploy.sh`).
+(auto-deploy timer + `deploy.sh`). **Since 2026-08-31: push to `main` as
+soon as a feature lands, even if the feature isn't "finished" — the user
+wants to watch progress live.**
 
 ## 1. Current state: SHIPPED ✅
 
-Stages 1–13 (remote providers + cost saver) and 14–19 (agentic coding).
+Stages 1–13 (remote providers + cost saver), 14–19 (agentic coding), and
+stage 20 (Model Hub 2 + media studio — see `notes/HUB-2.md` for that
+program's full handoff).
 
 | Stage | Content |
 |---|---|
@@ -25,6 +31,7 @@ Stages 1–13 (remote providers + cost saver) and 14–19 (agentic coding).
 | 17 | Tool permissions — risk tiers, approval for every tool, audit log |
 | 18 | GitHub — read, pull, branch, commit/push, open PR |
 | 19 | UI for all of it + version stamp |
+| 20 | Model Hub 2 — search bars removed (password-autofill), multi-job download manager, image/video/audio bridge, Media Studio (`notes/HUB-2.md`) |
 
 ## 2. Verification checklist after deploying
 

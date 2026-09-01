@@ -4,6 +4,13 @@ Requested 2026-08-30, biggest first. `HubPanel.svelte` + `hfHub.js` /
 `routes/hf.js` unless noted.
 
 ## Open
+- **Media e2e test** — video/audio generation through the Media Studio UI
+  hasn't been exercised yet (bridge health + PyAV encode smoke-tested only).
+  First video run may pull VAE/text-encoder subfolders; watch the jobbar.
+- **Voice + music UI** — SpeechT5/VITS/Bark (voice) and MusicGen (music) are
+  wired in the bridge task map but MediaPanel's audio tab has no dedicated
+  controls (speaker ref, melody prompt) yet.
+- **i2v** — image-to-video isn't in the bridge task map (t2v only).
 - **Held-out TPS calibration** — the `~t/s` chip runs LlamaDash's physics
   (t_token = weights/bandwidth × 1.18 + 5ms) on this box's measured numbers
   (9070 XT 600 GB/s, DDR5 53.6 GB/s) but with no calibration harness.
@@ -13,6 +20,22 @@ Requested 2026-08-30, biggest first. `HubPanel.svelte` + `hfHub.js` /
   model size per turn and fit a global scale — that's the cheap 80%.
 
 ## Done
+- ~~Multi-job download manager~~ — shipped 2026-08-31: server-side registry
+  (`server/src/downloadManager.js`), one `hf download` worker subprocess per
+  repo, concurrent repos, disk-scan progress (survives restarts), claim/adopt,
+  cancel (SIGTERM→SIGKILL), boot-time orphan reap, state in
+  `$HF_HOME/.duckpond-downloads/`. Routes: `/api/hf/downloads`,
+  `/download`, `/download/cancel`, `/downloads/clear`.
+- ~~Media Studio (image/video/audio)~~ — shipped 2026-08-31: bridge.py
+  rewritten for multi-task generation under Unsloth's venv (systemd service
+  `image-gen-bridge-8765`), models discovered from the shared HF cache,
+  video encoded with PyAV, audio with soundfile. `MediaPanel.svelte` — task
+  tabs, per-task model picker, SSE progress, gallery + lightbox. Sidebar
+  nav item "Media". See `notes/HUB-2.md`.
+- ~~Search bars removed~~ — shipped 2026-08-31 everywhere (Sidebar,
+  ModelPicker, Hub, Settings, Providers, Themes): password managers
+  autofilled into them. Paste-repo row + curated chips instead.
+  Do not re-add free-text inputs.
 - ~~Unsloth-style quant picker~~ — shipped 2026-08-31, borrowed from their
   shipped bundle: flat quant rows with fit badges (fits / might fit /
   partial / won't fit — same thresholds: 97% VRAM budget, +15% overhead,
