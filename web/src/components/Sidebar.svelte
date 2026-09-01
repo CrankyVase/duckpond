@@ -20,7 +20,6 @@
 <script>
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
-  import { noAutofill } from '../lib/noAutofill.js';
   import { prefs } from '../lib/prefs.svelte.js';
   import { chatPath, userSubpath } from '../lib/router.js';
   import {
@@ -35,7 +34,6 @@
   import Palette from '@lucide/svelte/icons/palette';
   import Pencil from '@lucide/svelte/icons/pencil';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
-  import Search from '@lucide/svelte/icons/search';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
 
@@ -62,28 +60,9 @@
     return `${protocol}//${hostname}:8082`;
   }
 
-  let query = $state('');
-  // deep search: Enter runs hybrid semantic+exact search over all message
-  // content (typing still filters titles instantly, like before)
-  let deep = $state(null);      // { q, results, semanticOk } | null
-  let searching = $state(false);
-
-  async function deepSearch() {
-    const q = query.trim();
-    if (!q) return;
-    searching = true;
-    try {
-      const r = await api(`/api/search?q=${encodeURIComponent(q)}`);
-      deep = { q, ...r };
-    } catch { deep = { q, results: [], semanticOk: false }; }
-    searching = false;
-  }
-  function clearSearch() { query = ''; deep = null; }
-  async function openResult(r) {
-    app.view = 'chat';
-    await openConversation(r.conv_id);
-    closeSidebarIfMobile();
-  }
+  // Chats stay grouped by recency below. (There used to be a title/deep-search
+  // bar here — removed: it's where Chrome kept autofilling passwords, and the
+  // grouped list + Ctrl+K model picker covers the use.)
 
   async function openChat(id) {
     app.view = 'chat';
@@ -114,7 +93,6 @@
     closeSidebarIfMobile();
     moreOpen = false;
   }
-  const fmtDay = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
   const pinnedItems = $derived(NAV_ITEMS.filter((n) => prefs.pinnedNav.includes(n.id)));
   const overflowItems = $derived(NAV_ITEMS.filter((n) => !prefs.pinnedNav.includes(n.id)));
@@ -131,10 +109,8 @@
       { label: 'Previous 7 days', test: (t) => t >= startToday - 7 * day },
       { label: 'Older', test: () => true },
     ];
-    const q = query.trim().toLowerCase();
     const out = buckets.map((b) => ({ label: b.label, items: [] }));
     for (const c of app.conversations) {
-      if (q && !c.title.toLowerCase().includes(q)) continue;
       const idx = buckets.findIndex((b) => b.test(c.updated_at));
       out[idx].items.push(c);
     }
@@ -219,39 +195,9 @@
         <SquarePen size={15} />
         <span>New chat</span>
       </button>
-      <div class="search">
-        <Search size={13} />
-        <input type="search" name="chat-search" placeholder="Search chats…"
-          title="Type to filter titles · Enter for deep search across messages"
-          bind:value={query} use:noAutofill
-          onkeydown={(e) => { if (e.key === 'Enter') deepSearch(); if (e.key === 'Escape') clearSearch(); }}
-          autocorrect="off" spellcheck="false" />
-        {#if query || deep}
-          <button class="clear" onclick={clearSearch} title="Clear"><X size={12} /></button>
-        {/if}
-      </div>
     </div>
 
     <nav>
-      {#if deep}
-        <div class="group">
-          {searching ? 'Searching…' : `Found in messages${deep.semanticOk ? '' : ' (exact match only)'}`}
-        </div>
-        {#each deep.results as r (r.message_id)}
-          <div class="item result" onclick={() => openResult(r)} role="button" tabindex="0"
-            onkeydown={(e) => e.key === 'Enter' && openResult(r)}>
-            <div class="rhead">
-              <span class="rtitle">{r.conv_title}</span>
-              <span class="rdate">{fmtDay(r.created_at)}</span>
-            </div>
-            <div class="rsnip">{r.snippet}</div>
-          </div>
-        {:else}
-          {#if !searching}
-            <div class="none">Nothing found for “{deep.q}”.</div>
-          {/if}
-        {/each}
-      {:else}
       {#each groups as g (g.label)}
         <div class="group">{g.label}</div>
         {#each g.items as c (c.id)}
@@ -282,9 +228,8 @@
           </a>
         {/each}
       {:else}
-        <div class="none">{query ? 'No chats match.' : 'No chats yet.'}</div>
+        <div class="none">No chats yet.</div>
       {/each}
-      {/if}
     </nav>
 
     <div class="pages">
@@ -423,18 +368,6 @@
     background: var(--bg-raised); box-sizing: border-box;
   }
   .new :global(svg) { color: var(--text-dim); flex-shrink: 0; }
-  .search {
-    display: flex; align-items: center; gap: 8px;
-    padding: 0 11px; border-radius: calc(10px * var(--rf));
-    background: var(--bg-input); border: 1px solid var(--border-soft);
-    color: var(--text-faint); min-width: 0;
-  }
-  .search input {
-    flex: 1; min-width: 0; background: none; border: none; box-shadow: none;
-    padding: 7px 0; font-size: 13px;
-  }
-  .clear { all: unset; cursor: pointer; display: grid; place-items: center; color: var(--text-faint); flex-shrink: 0; }
-  .clear:hover { color: var(--text); }
 
   nav {
     flex: 1 1 auto; min-height: 0;
@@ -648,13 +581,6 @@
       padding: 11px 14px;
       font-size: 14.5px;
     }
-    .search { padding: 0 10px; }
-    .search input {
-      padding: 11px 0;
-      font-size: 16px; /* no iOS zoom */
-    }
-    /* shorter placeholder so it doesn't clip as badly */
-    .search input::placeholder { letter-spacing: -0.01em; }
 
     nav {
       flex: 1 1 auto;

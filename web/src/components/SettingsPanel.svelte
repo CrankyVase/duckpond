@@ -1,7 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
-  import { noAutofill } from '../lib/noAutofill.js';
   import { applyPrefs, prefs, resetPrefs, savePrefs } from '../lib/prefs.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { applyTheme, persistTheme, sanitizeEffects, theme } from '../lib/theme.svelte.js';
@@ -21,7 +20,6 @@
   import PlugZap from '@lucide/svelte/icons/plug-zap';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Save from '@lucide/svelte/icons/save';
-  import Search from '@lucide/svelte/icons/search';
   import Shield from '@lucide/svelte/icons/shield';
   import ShieldCheck from '@lucide/svelte/icons/shield-check';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
@@ -443,52 +441,21 @@
     }
     activeSec = cur;
   }
-
-  // ---- searchable settings: filter both the section nav and the section
-  // cards by the section's own rendered text, like VS Code's settings search.
-  let query = $state('');
-  let noResults = $state(false);
-  let matchedIds = $state(null); // null = no filter active, else Set of visible section ids
-  $effect(() => {
-    const q = query.trim().toLowerCase();
-    if (!contentEl) return;
-    let anyVisible = false;
-    const ids = new Set();
-    for (const sec of contentEl.querySelectorAll(':scope > section')) {
-      const show = !q || sec.textContent.toLowerCase().includes(q);
-      sec.hidden = !show;
-      if (show) { anyVisible = true; ids.add(sec.id.replace(/^sec-/, '')); }
-    }
-    matchedIds = q ? ids : null;
-    noResults = q !== '' && !anyVisible;
-  });
 </script>
 
 <div class="page">
   <div class="wrap">
     <nav class="secnav" aria-label="Settings sections">
       <div class="navhead">Settings</div>
-      <div class="navsearch">
-        <Search size={13} />
-        <input type="text" placeholder="Search…" bind:value={query} use:noAutofill />
-        {#if query}
-          <button class="clearq" onclick={() => (query = '')} title="Clear"><X size={12} /></button>
-        {/if}
-      </div>
       {#each SECTIONS as s (s.id)}
-        {#if !matchedIds || matchedIds.has(s.id)}
-          <button type="button" class="navitem" class:on={activeSec === s.id} onclick={() => jump(s.id)}>
-            <s.icon size={14} />
-            <span>{s.label}</span>
-          </button>
-        {/if}
+        <button type="button" class="navitem" class:on={activeSec === s.id} onclick={() => jump(s.id)}>
+          <s.icon size={14} />
+          <span>{s.label}</span>
+        </button>
       {/each}
     </nav>
 
     <div class="content" bind:this={contentEl} onscroll={onSpy}>
-      {#if noResults}
-        <div class="noresults">No settings match &ldquo;{query}&rdquo;.</div>
-      {/if}
       <!-- connection -->
       <section id="sec-connection">
         <div class="stitle"><Plug size={13} />Connection</div>
@@ -1092,21 +1059,6 @@
   }
   .navitem :global(svg) { color: var(--text-faint); flex-shrink: 0; transition: color 120ms ease; }
   .navitem.on :global(svg) { color: var(--accent); }
-
-  .navsearch {
-    display: flex; align-items: center; gap: 7px;
-    margin: 2px 2px 10px; padding: 7px 10px;
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    border-radius: calc(9px * var(--rf));
-  }
-  .navsearch :global(svg) { color: var(--text-faint); flex-shrink: 0; }
-  .navsearch input { all: unset; flex: 1; min-width: 0; font-size: 12.5px; color: var(--text); }
-  .clearq {
-    all: unset; cursor: pointer; display: grid; place-items: center; flex-shrink: 0;
-    color: var(--text-faint); padding: 2px;
-  }
-  .clearq:hover { color: var(--text); }
-  .noresults { font-size: 13px; color: var(--text-faint); text-align: center; padding: 24px 0; }
 
   .content {
     flex: 1; min-width: 0;

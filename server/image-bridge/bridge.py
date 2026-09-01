@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Local OpenAI-compatible image generation bridge for DuckPond.
+"""Local OpenAI-compatible media generation bridge for DuckPond.
 
-Runs under Unsloth Studio's own venv (torch+ROCm+diffusers already
-installed and GPU-verified there — see ~/.unsloth/studio/unsloth_studio),
+Runs under Unsloth Studio's own venv (torch+ROCm+diffusers+transformers
+already installed and GPU-verified there — see ~/.unsloth/studio/unsloth_studio),
 so there's no separate container or dependency set to maintain. Models are
 discovered straight out of the shared HF cache (HF_HOME) that `hf download`
 (DuckPond's Model Hub), the llama router, and Unsloth Studio all already
-write to — download a diffusers-format or single-file image checkpoint
-through the Hub's Image tab and it shows up here with no extra wiring.
+write to — download a diffusers-format or single-file checkpoint through the
+Hub's Image/Video/Audio tabs and it shows up here with no extra wiring.
 
 Contract (matches server/src/imagegen.js in the duckpond repo):
   GET  /health                     -> {ok, models:{id:{ready,kind}}, default_model}
   GET  /v1/progress?since=N        -> current job's progress
   POST /v1/images/generations      -> blocks until done, {data:[{b64_json}], ...}
+  POST /v1/videos/generations      -> blocks until done, {data:[{b64_json}] , ...}
+  POST /v1/audio/generations       -> blocks until done, {data:[{b64_json}] , ...}
+  POST /v1/audio/speech            -> blocks until done, {data:[{b64_json}] , ...}
 """
 import base64
 import io
@@ -26,6 +29,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import torch
+import numpy as np
 
 HF_HOME = Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
 HUB_DIR = HF_HOME / "hub"
@@ -39,7 +43,7 @@ STATE = {"tag": None, "active": False, "phase": None, "step": None, "steps": Non
          "image": None, "n": None, "enhanced_prompt": None}
 CANCEL_TAGS = set()  # tags a client has asked to stop — checked between denoise steps
 
-_loaded = {"id": None, "pipe": None}
+_loaded = {"id": None, "pipe": None, "kind": None}
 
 
 class JobCancelled(Exception):
@@ -48,7 +52,7 @@ class JobCancelled(Exception):
 
 # ---------------------------------------------------------------- discovery
 def discover_models():
-    """Scan HF_HOME for anything that looks like a text-to-image checkpoint.
+    """Scan HF_HOME for anything that looks like a media checkpoint.
     diffusers-format repo (model_index.json with a *Pipeline that isn't purely
     text) or a single big .safetensors file at the repo root (Civitai-style
     single-file SDXL/SD checkpoints)."""
@@ -72,21 +76,37 @@ def discover_models():
                 cls = json.loads(idx.read_text()).get("_class_name", "")
             except Exception:
                 cls = ""
-            if "Pipeline" in cls and "Image" in cls or cls.endswith("XLPipeline") or "Diffusion" in cls:
-                models[model_id] = {"ready": True, "kind": "diffusers", "path": str(snap)}
+            # classify by pipeline class name
+            if "Pipeline" in cls:
+                kind = "diffusers"
+                lower = cls.lower()
+                if "video" in lower or "ltx" in lower or "wan" in lower or "cogvideo" in lower or "hunyuan" in lower or "mochi" in lower or "allegro" in lower:
+                    task = "video"
+                elif "audio" in lower or "music" in lower or "stableaudio" in lower or "audioldm" in lower:
+                    task = "audio"
+                elif "image" in lower or "text2image" in lower or "xl" in lower or "flux" in lower or "sd" in lower:
+                    task = "image"
+                else:
+                    task = "image"  # default to image for unknown pipelines
+                models[model_id] = {"ready": True, "kind": kind, "task": task, "path": str(snap), "class": cls}
             continue
         top_level_safetensors = [f for f in snap.glob("*.safetensors") if f.stat().st_size > 500_000_000]
         if top_level_safetensors:
-            models[model_id] = {"ready": True, "kind": "single_file", "path": str(top_level_safetensors[0])}
+            models[model_id] = {"ready": True, "kind": "single_file", "task": "image", "path": str(top_level_safetensors[0])}
     return models
 
 
-def resolve_model(requested):
+def resolve_model(requested, task=None):
     models = discover_models()
     if not models:
-        raise RuntimeError("no image models downloaded yet — grab one from Model Hub > Image tab")
+        raise RuntimeError(f"no {task or 'media'} models downloaded yet — grab one from Model Hub")
     if requested and requested != "auto" and requested in models:
         return requested, models[requested]
+    # filter by task if given
+    if task:
+        task_models = {k: v for k, v in models.items() if v.get("task") == task}
+        if task_models:
+            models = task_models
     if DEFAULT_MODEL and DEFAULT_MODEL in models:
         return DEFAULT_MODEL, models[DEFAULT_MODEL]
     first_id = next(iter(models))
@@ -96,7 +116,7 @@ def resolve_model(requested):
 def load_pipeline(model_id, info):
     if _loaded["id"] == model_id and _loaded["pipe"] is not None:
         return _loaded["pipe"]
-    from diffusers import AutoPipelineForText2Image
+    from diffusers import AutoPipelineForText2Image, AutoPipelineForText2Audio
 
     if _loaded["pipe"] is not None:
         del _loaded["pipe"]
@@ -105,10 +125,33 @@ def load_pipeline(model_id, info):
             torch.cuda.empty_cache()
 
     dtype = torch.float16 if DEVICE == "cuda" else torch.float32
-    if info["kind"] == "diffusers":
-        pipe = AutoPipelineForText2Image.from_pretrained(info["path"], torch_dtype=dtype)
+    task = info.get("task", "image")
+
+    if task == "audio":
+        if info["kind"] == "diffusers":
+            pipe = AutoPipelineForText2Audio.from_pretrained(info["path"], torch_dtype=dtype)
+        else:
+            raise RuntimeError("single-file audio checkpoints not supported")
+    elif task == "video":
+        # video pipelines are loaded via their own class names
+        cls_name = info.get("class", "")
+        if not cls_name:
+            raise RuntimeError("video pipeline class unknown")
+        import diffusers
+        pipe_cls = getattr(diffusers, cls_name, None)
+        if pipe_cls is None:
+            raise RuntimeError(f"pipeline class {cls_name} not available in diffusers {diffusers.__version__}")
+        if info["kind"] == "diffusers":
+            pipe = pipe_cls.from_pretrained(info["path"], torch_dtype=dtype)
+        else:
+            raise RuntimeError("single-file video checkpoints not supported")
     else:
-        pipe = AutoPipelineForText2Image.from_single_file(info["path"], torch_dtype=dtype)
+        # image
+        if info["kind"] == "diffusers":
+            pipe = AutoPipelineForText2Image.from_pretrained(info["path"], torch_dtype=dtype)
+        else:
+            pipe = AutoPipelineForText2Image.from_single_file(info["path"], torch_dtype=dtype)
+
     # Keeps only the active submodule resident on GPU — this card is shared
     # with the llama router, so a full `.to("cuda")` load risks OOMing
     # whatever LLM is already loaded.
@@ -118,6 +161,7 @@ def load_pipeline(model_id, info):
         pipe.to(DEVICE)
     _loaded["id"] = model_id
     _loaded["pipe"] = pipe
+    _loaded["kind"] = task
     return pipe
 
 
@@ -125,14 +169,21 @@ def load_pipeline(model_id, info):
 def run_job(body, tag):
     prompt = body["prompt"]
     model_req = body.get("model") or "auto"
+    task = body.get("task", "image")  # image | video | audio
     size = body.get("size", "1024x1024")
-    w, h = (int(x) for x in size.lower().split("x"))
+    w, h = (int(x) for x in size.lower().split("x")) if "x" in size.lower() else (1024, 1024)
     n = max(1, min(4, int(body.get("n", 1))))
     steps = int(body.get("steps") or 25)
     negative = body.get("negative_prompt") or None
     seed = body.get("seed")
+    # video-specific
+    num_frames = int(body.get("num_frames") or 25)
+    fps = int(body.get("fps") or 8)
+    # audio-specific
+    audio_duration = float(body.get("audio_duration") or 10.0)
+    sample_rate = int(body.get("sample_rate") or 44100)
 
-    model_id, info = resolve_model(model_req)
+    model_id, info = resolve_model(model_req, task=task)
     pipe = load_pipeline(model_id, info)
 
     generator = None
@@ -146,32 +197,60 @@ def run_job(body, tag):
             STATE.update(phase="denoising", step=step + 1, steps=steps)
         return kwargs
 
-    images_b64 = []
+    results_b64 = []
     for i in range(n):
         if tag in CANCEL_TAGS:
             raise JobCancelled(tag)
         with STATE_LOCK:
             STATE.update(phase="generating", image=i + 1, n=n, step=0, steps=steps)
-        result = pipe(
-            prompt=prompt, negative_prompt=negative,
-            num_inference_steps=steps, width=w, height=h,
-            generator=generator,
-            callback_on_step_end=on_step,
-        )
-        img = result.images[0]
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        images_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+
+        if task == "audio":
+            result = pipe(
+                prompt=prompt, negative_prompt=negative,
+                num_inference_steps=steps,
+                audio_length_in_s=audio_duration,
+                generator=generator,
+            )
+            audio = result.audios[0] if hasattr(result, 'audios') else result[0]
+            buf = io.BytesIO()
+            import soundfile as sf
+            sf.write(buf, audio.T if audio.ndim > 1 else audio, sample_rate, format='WAV')
+            results_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+        elif task == "video":
+            result = pipe(
+                prompt=prompt, negative_prompt=negative,
+                num_inference_steps=steps,
+                num_frames=num_frames,
+                generator=generator,
+            )
+            frames = result.frames[0] if hasattr(result, 'frames') else result[0]
+            buf = io.BytesIO()
+            import imageio
+            imageio.mimsave(buf, frames, format='mp4', fps=fps)
+            results_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+        else:
+            result = pipe(
+                prompt=prompt, negative_prompt=negative,
+                num_inference_steps=steps, width=w, height=h,
+                generator=generator,
+                callback_on_step_end=on_step,
+            )
+            img = result.images[0]
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            results_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+
         with STATE_LOCK:
             STATE.update(phase="image_done")
 
     return {
-        "data": [{"b64_json": b} for b in images_b64],
+        "data": [{"b64_json": b} for b in results_b64],
         "prompt_enhanced": None,
         "model_used": model_id,
         "steps_used": steps,
         "steps_requested": steps,
         "steps_capped": False,
+        "task": task,
     }
 
 
@@ -215,8 +294,16 @@ class Handler(BaseHTTPRequestHandler):
                 CANCEL_TAGS.add(tag)
             return self._json(200, {"ok": True})
 
-        if parsed.path != "/v1/images/generations":
+        if parsed.path not in ("/v1/images/generations", "/v1/videos/generations", "/v1/audio/generations", "/v1/audio/speech"):
             return self._json(404, {"error": "not found"})
+
+        task_map = {
+            "/v1/images/generations": "image",
+            "/v1/videos/generations": "video",
+            "/v1/audio/generations": "audio",
+            "/v1/audio/speech": "audio",
+        }
+        body["task"] = task_map.get(parsed.path, "image")
 
         tag = body.get("tag") or str(time.time())
         with GEN_LOCK:

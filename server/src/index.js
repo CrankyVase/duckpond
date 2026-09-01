@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './db.js';
+import { reapOrphans } from './downloadManager.js';
 import { reapIdleModels } from './llama.js';
 import { backfillMissing, pruneMemories } from './memory.js';
 import { syncStaleProviders } from './providers.js';
@@ -103,5 +104,9 @@ try {
   const n = reclaimOrphanRuns({ log: app.log });
   if (n) app.log.info({ n }, 'reclaimed orphan agent runs on boot');
 } catch (err) { app.log.warn({ err }, 'orphan run reclaim failed'); }
+
+// Kill any download workers orphaned by a previous DuckPond process, and
+// re-adopt their job records so the UI shows them as cancelled, not "running".
+try { reapOrphans(); } catch (err) { app.log.warn({ err }, 'download orphan reap failed'); }
 
 await app.listen({ port: PORT, host: HOST });

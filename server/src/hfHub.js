@@ -9,7 +9,6 @@
 // verified against their shipped bundle — but everything here runs on the
 // server: HF API calls, the local-cache scan, VRAM fit math and the TPS
 // estimate. The browser only ever talks to /api/hf/*.
-import { spawn } from 'node:child_process';
 import {
   existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
   unlinkSync, writeFileSync,
@@ -17,6 +16,7 @@ import {
 import { join } from 'node:path';
 import { gpuVram } from './llama.js';
 import { modelParamsB } from './modelDescribe.js';
+import { downloadBusy } from './downloadManager.js';
 
 const HF_API = 'https://huggingface.co';
 const HF_CLI = process.env.HF_CLI ?? '/home/cranky/.local/bin/hf';
@@ -425,100 +425,6 @@ export async function modelVariants(repoId) {
 }
 
 // ---------------------------------------------------------------------------
-// Download job — single job, structured progress parsed out of the hf CLI's
-// tqdm output (percent, transferred/total bytes, speed, ETA), Unsloth-style.
-// ---------------------------------------------------------------------------
-const PROGRESS_RE = /(\d{1,3})%\|[^|]*\|?\s*([\d.]+\s*[GMkB])\/([\d.]+\s*[GMkB])?\s*\[(\d+:)?(\d+)<(\d+:)?(\d+)/;
-
-function parseBytes(s) {
-  if (!s) return null;
-  const m = String(s).trim().match(/^([\d.]+)\s*([GMkB])/);
-  if (!m) return null;
-  const mult = { B: 1, k: 1024, M: 1024 ** 2, G: 1024 ** 3 }[m[2]] ?? 1;
-  return Math.round(parseFloat(m[1]) * mult);
-}
-
-function hmsToSec(s) {
-  const parts = String(s).split(':').map(Number);
-  if (parts.some(Number.isNaN)) return null;
-  return parts.reduce((acc, p) => acc * 60 + p, 0);
-}
-
-/** @type {{ repoId: string, status: string, line: string, startedAt: number, finishedAt: number|null, error: string|null,
- *            variant: string|null, percent: number|null, transferredBytes: number|null, totalBytes: number|null,
- *            speedBytesPerSec: number|null, etaSec: number|null } | null} */
-let job = null;
-let child = null;
-
-export function downloadStatus() {
-  return job;
-}
-
-export function downloadBusy() {
-  return job?.status === 'running';
-}
-
-// tqdm repaints one line with \r; keep only the latest so the UI shows the
-// current transfer speed/percent instead of a scrollback of every tick.
-function lastLine(buf) {
-  const parts = buf.split(/\r|\n/).map((s) => s.trim()).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : '';
-}
-
-function applyProgress(line) {
-  if (!job || !line) return;
-  const m = line.match(PROGRESS_RE);
-  if (m) {
-    const pct = Number(m[1]);
-    const transferred = parseBytes(m[2]);
-    const total = parseBytes(m[3]);
-    if (Number.isFinite(pct)) job.percent = Math.max(0, Math.min(100, pct));
-    if (transferred) job.transferredBytes = transferred;
-    if (total) job.totalBytes = total;
-    const speed = parseBytes((line.match(/,\s*([\d.]+\s*[GMkB])/)?.[1] ?? ''));
-    if (speed) job.speedBytesPerSec = speed;
-    const eta = hmsToSec(m[5]);
-    if (eta != null) job.etaSec = eta;
-  }
-}
-
-export function startDownload(repoId, { include, variant } = {}) {
-  assertRepoId(repoId);
-  if (downloadBusy()) throw Object.assign(new Error('a download is already running'), { status: 409 });
-
-  const args = ['download', repoId];
-  if (include) args.push('--include', include);
-
-  job = {
-    repoId, status: 'running', line: 'starting…', startedAt: Date.now(), finishedAt: null, error: null,
-    variant: variant ?? include ?? null, percent: null, transferredBytes: null, totalBytes: null,
-    speedBytesPerSec: null, etaSec: null,
-  };
-  child = spawn(HF_CLI, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-  const onData = (d) => {
-    const line = lastLine(d.toString('utf8'));
-    if (line) job.line = line;
-    applyProgress(line);
-  };
-  child.stdout.on('data', onData);
-  child.stderr.on('data', onData);
-
-  child.on('close', (code) => {
-    job.finishedAt = Date.now();
-    if (code === 0) { job.status = 'done'; job.line = 'done'; job.percent = 100; }
-    else { job.status = 'error'; job.error = `hf download exited ${code}`; }
-    child = null;
-  });
-
-  return job;
-}
-
-export function cancelDownload() {
-  if (child) { child.kill('SIGTERM'); }
-}
-
-// ---------------------------------------------------------------------------
 // Variant delete — remove one variant's blobs from the HF cache so the row
 // flips back to "not downloaded" without nuking the whole repo (other quants
 // stay). Resolves snapshot symlinks and unlinks their blob targets.
@@ -534,7 +440,7 @@ function includeMatches(include, path) {
 
 export function deleteVariant(repoId, { include } = {}) {
   assertRepoId(repoId);
-  if (downloadBusy() && job.repoId === repoId) {
+  if (downloadBusy(repoId, include)) {
     throw Object.assign(new Error('download running for this repo'), { status: 409 });
   }
   const snapDir = mainSnapshotDir(repoId);

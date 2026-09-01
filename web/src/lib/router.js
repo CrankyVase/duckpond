@@ -69,6 +69,7 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
     if (rest === 'stats') return { kind: 'stats', userId, foreign };
     if (rest === 'speech') return { kind: 'speech', userId, foreign };
     if (rest === 'files' || rest === 'images') return { kind: 'files', userId, foreign };
+    if (rest === 'media') return { kind: 'media', userId, foreign };
     if (rest === 'settings') return { kind: 'settings', userId, foreign };
     if (rest === 'themes' || rest === 'theme') return { kind: 'themes', userId, foreign };
     if (rest === 'providers') return { kind: 'providers', userId, foreign };
@@ -93,6 +94,7 @@ export function parsePath(pathname, { selfUserId = null } = {}) {
   if (p === '/stats') return { kind: 'stats', legacy: true };
   if (p === '/speech') return { kind: 'speech', legacy: true };
   if (p === '/files' || p === '/images') return { kind: 'files', legacy: true };
+  if (p === '/media') return { kind: 'media', legacy: true };
   if (p === '/settings') return { kind: 'settings', legacy: true };
   if (p === '/themes' || p === '/theme') return { kind: 'themes', legacy: true };
   if (p === '/providers') return { kind: 'providers', legacy: true };
@@ -127,6 +129,7 @@ export function pathForState({
   if (view === 'stats') return userSubpath(uid, 'stats');
   if (view === 'speech') return userSubpath(uid, 'speech');
   if (view === 'files') return userSubpath(uid, 'files');
+  if (view === 'media') return userSubpath(uid, 'media');
   if (view === 'providers') return userSubpath(uid, 'providers');
   if (view === 'costs') return userSubpath(uid, 'costs');
   if (view === 'hub') return userSubpath(uid, 'hub');

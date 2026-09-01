@@ -1,23 +1,26 @@
-// Image studio routes. The heavy lifting (bridge POST + progress polling +
-// saving) lives in ../imagegen.js, shared with the in-chat generate_image tool.
+// Media studio routes (image + video + audio). The heavy lifting (bridge
+// POST + progress polling + saving) lives in ../imagegen.js, shared with the
+// in-chat generate_image tool.
 import { createReadStream, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { checkUserContent } from '../contentFilter.js';
-import { bridgeGet, generateViaBridge, getUserImagePrefs, IMAGES_DIR, stepsForQuality } from '../imagegen.js';
+import { bridgeGet, generateViaBridge, getUserImagePrefs, IMAGES_DIR, MEDIA_DIR, stepsForQuality } from '../imagegen.js';
 import { acquireGpu } from '../gpuqueue.js';
+
+const MIME = { png: 'image/png', mp4: 'video/mp4', wav: 'audio/wav' };
 
 export default async function imageRoutes(app) {
   app.addHook('preHandler', requireAuth);
 
-  // model list for the picker: auto + every ready model on the bridge
+  // model list for the picker: auto + every ready model on the bridge, grouped by task
   app.get('/api/images/models', async () => {
     const health = await bridgeGet('/health').catch(() => null);
     if (!health?.ok) return { available: false, models: [] };
     const models = [{ id: 'auto' }];
     for (const [id, info] of Object.entries(health.models ?? {})) {
-      if (info.ready) models.push({ id });
+      if (info.ready) models.push({ id, task: info.task ?? 'image' });
     }
     return { available: true, models, default_model: health.default_model ?? 'auto' };
   });
@@ -26,15 +29,18 @@ export default async function imageRoutes(app) {
     SELECT id, prompt, enhanced_prompt, model, size, steps, created_at
     FROM images WHERE user_id = ? ORDER BY id DESC LIMIT 200`).all(req.user.id));
 
+  // One file endpoint for images AND media (video/audio) — the images table
+  // stores the filename; the dir is picked by extension.
   app.get('/api/images/:id/file', async (req, reply) => {
     const row = db.prepare('SELECT file FROM images WHERE id = ?').get(Number(req.params.id));
     if (!row) return reply.code(404).send({ error: 'not found' });
-    // Short private cache + ?v= bust on the client — never immutable (id reuse
-    // used to leave deleted NSFW thumbs stuck in the browser forever).
+    const ext = row.file.split('.').pop()?.toLowerCase() ?? 'png';
+    const dir = ext === 'png' ? IMAGES_DIR : MEDIA_DIR;
     reply.header('cache-control', 'private, max-age=60, must-revalidate');
     reply.header('pragma', 'no-cache');
     reply.header('vary', 'Cookie');
-    return reply.type('image/png').send(createReadStream(join(IMAGES_DIR, row.file)));
+    return reply.type(MIME[ext] ?? 'application/octet-stream')
+      .send(createReadStream(join(dir, row.file)));
   });
 
   app.delete('/api/images/:id', async (req, reply) => {
@@ -65,6 +71,7 @@ export default async function imageRoutes(app) {
     const {
       prompt, model = 'auto', size = '1024x1024', steps = null, n = 1,
       negative = '', enhance = true, seed = null, quality = null,
+      task = 'image', numFrames = null, fps = null, audioDuration = null,
     } = req.body ?? {};
     if (!prompt?.trim()) return reply.code(400).send({ error: 'prompt required' });
 
@@ -111,7 +118,8 @@ export default async function imageRoutes(app) {
       const r = await generateViaBridge({
         userId: req.user.id, prompt, model, size,
         steps: resolvedSteps,
-        n, negative, enhance, seed,
+        n, negative, enhance, seed, task,
+        numFrames, fps, audioDuration,
         onProgress: send, signal: abort.signal,
       });
       send({
@@ -124,7 +132,7 @@ export default async function imageRoutes(app) {
         steps_capped: r.steps_capped,
       });
     } catch (e) {
-      req.log.error({ err: e }, 'image generation failed');
+      req.log.error({ err: e }, `${task} generation failed`);
       send({ type: 'error', message: e.message });
     } finally {
       releaseGpu?.();

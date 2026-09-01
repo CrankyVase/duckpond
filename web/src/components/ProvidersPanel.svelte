@@ -18,7 +18,6 @@
   import PlugZap from '@lucide/svelte/icons/plug-zap';
   import Plus from '@lucide/svelte/icons/plus';
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
-  import Search from '@lucide/svelte/icons/search';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import Star from '@lucide/svelte/icons/star';
   import Trash2 from '@lucide/svelte/icons/trash-2';
@@ -161,10 +160,9 @@
   let countsByProv = $state({});     // id -> { total, on, hidden, favorites }
   let rowSaving = $state({});        // `${pid}:${model_id}` -> bool
   let bulkBusy = $state({});         // provider id -> bool
-  // Catalog filters. Searching server-side matters here: one key can import
-  // 400+ models and re-filtering that in the browser on every keystroke is the
-  // difference between usable and not.
-  let query = $state('');
+  // Catalog filters — dropdowns + capability chips only (the old text search
+  // is gone: password managers autofilled into it, and chips cover the
+  // curation use just as well).
   let showFilter = $state('visible'); // visible | on | off | hidden | all
   let capFilter = $state('');
 
@@ -178,7 +176,7 @@
   async function toggleExpand(p) {
     if (expanded === p.id) { expanded = null; return; }
     expanded = p.id;
-    query = ''; showFilter = 'visible'; capFilter = '';
+    showFilter = 'visible'; capFilter = '';
     await loadModelsFor(p, true);
   }
 
@@ -187,7 +185,6 @@
     modelsByProv = { ...modelsByProv, [p.id]: 'loading' };
     try {
       const qs = new URLSearchParams();
-      if (query.trim()) qs.set('q', query.trim());
       if (showFilter) qs.set('show', showFilter);
       if (capFilter) qs.set('cap', capFilter);
       const r = await api(`/api/providers/${p.id}/models?${qs}`);
@@ -197,13 +194,6 @@
       modelsByProv = { ...modelsByProv, [p.id]: 'error' };
       toast(`Couldn't load catalog: ${e.error ?? e.message ?? e}`, 'error');
     }
-  }
-
-  // Debounced so typing in the search box doesn't fire a request per keystroke.
-  let searchTimer = null;
-  function onSearch(p) {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => loadModelsFor(p, true), 220);
   }
 
   /**
@@ -217,7 +207,6 @@
       const body = { action };
       if (filtered) {
         body.filter = {
-          q: query.trim() || undefined,
           cap: capFilter || undefined,
           show: showFilter === 'visible' || showFilter === 'all' ? undefined : showFilter,
         };
@@ -492,11 +481,6 @@
                    that turn "400 models imported" into "the six I use". -->
               <div class="curate">
                 <div class="cline">
-                  <div class="searchwrap">
-                    <Search size={14} />
-                    <input class="search" type="search" placeholder="Search this provider's models…"
-                      bind:value={query} oninput={() => onSearch(p)} use:noAutofill />
-                  </div>
                   <select class="sel" bind:value={showFilter} onchange={() => loadModelsFor(p, true)}>
                     <option value="visible">All visible</option>
                     <option value="on">On in picker</option>
@@ -543,7 +527,7 @@
                 <div class="empty">Couldn't load the catalog — try Sync now.</div>
               {:else if !modelsByProv[p.id].length}
                 <div class="empty">
-                  {query || capFilter || showFilter !== 'visible'
+                  {capFilter || showFilter !== 'visible'
                     ? 'Nothing matches those filters.'
                     : 'No models in the catalog — try Sync now.'}
                 </div>
@@ -796,16 +780,6 @@
     background: color-mix(in srgb, var(--bg-card) 60%, transparent);
   }
   .cline { display: flex; align-items: center; gap: calc(8px * var(--rf)); flex-wrap: wrap; }
-  .searchwrap {
-    display: flex; align-items: center; gap: 6px; flex: 1 1 220px;
-    padding: 0 calc(9px * var(--rf)); border: 1px solid var(--border);
-    border-radius: 8px; background: var(--bg-input, var(--bg-card));
-    color: var(--text-faint);
-  }
-  .search {
-    flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text);
-    padding: calc(7px * var(--rf)) 0; font-size: calc(13px * var(--rf)); outline: none;
-  }
   .sel {
     padding: calc(6px * var(--rf)) calc(8px * var(--rf));
     border: 1px solid var(--border); border-radius: 8px;

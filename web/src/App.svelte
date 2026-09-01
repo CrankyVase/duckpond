@@ -8,6 +8,7 @@
   import HubPanel from './components/HubPanel.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
+  import MediaPanel from './components/MediaPanel.svelte';
   import ProvidersPanel from './components/ProvidersPanel.svelte';
   import SettingsPanel from './components/SettingsPanel.svelte';
   import Sidebar from './components/Sidebar.svelte';
@@ -70,6 +71,8 @@
         app.view = 'speech';
       } else if (route.kind === 'files') {
         app.view = 'files';
+      } else if (route.kind === 'media') {
+        app.view = 'media';
       } else if (route.kind === 'providers') {
         app.view = 'providers';
       } else if (route.kind === 'costs') {
@@ -265,6 +268,8 @@
           <div class="panel-enter view-panel"><SpeechPanel /></div>
         {:else if app.view === 'files'}
           <div class="panel-enter view-panel"><FilesPanel /></div>
+        {:else if app.view === 'media'}
+          <div class="panel-enter view-panel"><MediaPanel /></div>
         {:else if app.view === 'providers'}
           <div class="panel-enter view-panel"><ProvidersPanel /></div>
         {:else if app.view === 'costs'}

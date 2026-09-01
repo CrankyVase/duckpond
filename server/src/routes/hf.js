@@ -1,7 +1,10 @@
 import { requireAuth } from '../auth.js';
 import {
-  cancelDownload, deleteVariant, downloadStatus, findQuantizers, modalityModels, modelInfo,
-  modelVariants, ownerAvatar, popularModels, searchModels, startDownload,
+  cancelDownload, clearFinished, downloadStatus, listDownloads, startDownload,
+} from '../downloadManager.js';
+import {
+  deleteVariant, findQuantizers, modalityModels, modelInfo,
+  modelVariants, ownerAvatar, popularModels, searchModels,
 } from '../hfHub.js';
 
 // Org/user profile picture, resolved through the server (browser never
@@ -74,12 +77,16 @@ export default async function hfRoutes(app) {
     catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
   });
 
-  app.get('/api/hf/download', async () => downloadStatus() ?? { status: 'idle' });
+  // All in-flight + recent downloads (the Download Manager panel polls this).
+  app.get('/api/hf/downloads', async () => ({ jobs: listDownloads() }));
+
+  // Single job status, keyed by repo+include. Polled by the variant card.
+  app.get('/api/hf/download', async (req) => downloadStatus(req.query.repoId, req.query.include));
 
   app.post('/api/hf/download', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
-    const { repoId, include, variant } = req.body ?? {};
-    try { return startDownload(repoId, { include, variant }); }
+    const { repoId, include, variant, totalBytes } = req.body ?? {};
+    try { return startDownload(repoId, { include, variant, totalBytes }); }
     catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
   });
 
@@ -93,7 +100,14 @@ export default async function hfRoutes(app) {
 
   app.post('/api/hf/download/cancel', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
-    cancelDownload();
+    const { repoId, include } = req.body ?? {};
+    return cancelDownload(repoId, include);
+  });
+
+  // Clear finished/error/cancelled rows from the manager panel.
+  app.post('/api/hf/downloads/clear', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    clearFinished();
     return { ok: true };
   });
 }

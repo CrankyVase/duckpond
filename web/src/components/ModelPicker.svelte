@@ -1,21 +1,18 @@
 <script>
-  // Always-visible current model, fast searchable switcher with VRAM eject
-  // and (owner-only) disk delete.
+  // Always-visible current model, grouped switcher with VRAM eject and
+  // (owner-only) disk delete. No search box — password managers kept
+  // autofilling into it. Grouped list + Ctrl+K gets you there just as fast.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
-  import { noAutofill } from '../lib/noAutofill.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Info from '@lucide/svelte/icons/info';
   import Power from '@lucide/svelte/icons/power';
-  import Search from '@lucide/svelte/icons/search';
   import Star from '@lucide/svelte/icons/star';
   import Trash2 from '@lucide/svelte/icons/trash-2';
 
-  let search = $state('');
-  let inputEl = $state(null);
   let hoverIdx = $state(0);
   let unloading = $state(null);   // model id mid-unload
   let deleting = $state(null);    // model id mid-delete
@@ -43,12 +40,8 @@
     return s;
   }
 
-  const filtered = $derived.by(() => {
-    const q = search.trim().toLowerCase();
-    return app.models.filter((m) => !q
-      || m.id.toLowerCase().includes(q)
-      || (m.remote && (m.provider?.name ?? '').toLowerCase().includes(q)));
-  });
+  // Whole list, in the grouped order below. No text filter.
+  const filtered = $derived(app.models);
 
   // Favorites first (stars from Providers curation + your default), then Local,
   // then one group per provider — providers + their models alphabetically.
@@ -74,14 +67,28 @@
   });
 
   $effect(() => {
-    if (app.modelPickerOpen && inputEl) {
-      search = '';
-      hoverIdx = 0;
-      // focus after the flush — synchronous focus() here dispatches focusin
-      // into document listeners while Svelte is mid-flush (unsafe mutation)
-      const el = inputEl;
-      queueMicrotask(() => el.focus());
+    if (app.modelPickerOpen) {
+      hoverIdx = filtered.findIndex((m) => m.id === app.conv?.model_id);
+      if (hoverIdx < 0) hoverIdx = 0;
     }
+  });
+
+  // Keyboard nav lives on the window while open — there's no input to
+  // capture focus anymore, and window-level means Ctrl+K/Escape/arrows all
+  // work regardless of what has focus.
+  let listEl = $state(null);
+  $effect(() => {
+    if (!app.modelPickerOpen) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') { app.modelPickerOpen = false; e.preventDefault(); }
+      else if (e.key === 'ArrowDown') { hoverIdx = Math.min(hoverIdx + 1, filtered.length - 1); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { hoverIdx = Math.max(hoverIdx - 1, 0); e.preventDefault(); }
+      else if (e.key === 'Enter' && filtered[hoverIdx]) { pick(filtered[hoverIdx]); e.preventDefault(); }
+      else return;
+      listEl?.querySelector('.opt.hover')?.scrollIntoView({ block: 'nearest' });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   });
 
   async function pick(m) {
@@ -90,13 +97,6 @@
     app.conv.model_id = m.id;
     await api(`/api/conversations/${app.conv.id}`, { method: 'PATCH', body: { model_id: m.id } });
     loadModels();
-  }
-
-  function keydown(e) {
-    if (e.key === 'Escape') app.modelPickerOpen = false;
-    else if (e.key === 'ArrowDown') { hoverIdx = Math.min(hoverIdx + 1, filtered.length - 1); e.preventDefault(); }
-    else if (e.key === 'ArrowUp') { hoverIdx = Math.max(hoverIdx - 1, 0); e.preventDefault(); }
-    else if (e.key === 'Enter' && filtered[hoverIdx]) pick(filtered[hoverIdx]);
   }
 
   function dot(status) {
@@ -183,12 +183,7 @@
     <div class="backdrop" onclick={() => (app.modelPickerOpen = false)}
       role="presentation"></div>
     <div class="menu slide-up">
-      <div class="searchrow">
-        <Search size={14} />
-        <input type="search" name="model-search" bind:this={inputEl} bind:value={search} placeholder="Search models…"
-          use:noAutofill autocorrect="off" spellcheck="false" onkeydown={keydown} />
-      </div>
-      <div class="list">
+      <div class="list" bind:this={listEl} role="listbox">
         {#each groups as g (g.label)}
           {#if groups.length > 1}
             <div class="gh">{g.label}</div>
@@ -317,15 +312,7 @@
     }
     .opt { min-height: 48px; padding: 10px 12px; }
     .info, .star, .eject { opacity: 0.85; width: 32px; height: 32px; }
-    .searchrow input { font-size: 16px; padding: 10px 0; }
   }
-  .searchrow {
-    display: flex; align-items: center; gap: 8px;
-    padding: 0 10px; margin-bottom: 6px;
-    background: var(--bg-input); border: 1px solid var(--border); border-radius: calc(10px * var(--rf));
-    color: var(--text-faint);
-  }
-  .searchrow input { flex: 1; background: none; border: none; box-shadow: none; padding: 8px 0; }
   .list { overflow-y: auto; }
   .gh {
     font-size: 10.5px; color: var(--text-faint); font-weight: 600;

@@ -50,10 +50,10 @@
   let saveName = $state('');
   let cssDraft = $state('');
 
-  // gallery filters (Dark / Light → color group + search)
+  // gallery filters (Dark / Light → color group). No text search — that's
+  // where the password manager kept autofilling.
   let toneFilter = $state('dark');   // all | dark | light | favorites
   let colorFilter = $state('all');   // all | blue | purple | …
-  let themeQuery = $state('');
   let themeLimit = $state(PAGE_SIZE);
 
   // market
@@ -110,7 +110,6 @@
 
   function setToneFilter(v) { toneFilter = v; themeLimit = PAGE_SIZE; }
   function setColorFilter(v) { colorFilter = v; themeLimit = PAGE_SIZE; }
-  function onThemeSearch(e) { themeQuery = e.target.value; themeLimit = PAGE_SIZE; }
 
   function onHeart(e, id) {
     e.stopPropagation();
@@ -164,9 +163,9 @@
           list = [...list, { id: c.id, name: c.name, colors: customResolved(c), blurb: 'your theme', dark: true, group: 'mono' }];
         }
       }
-      return filterPresets(list, { mode: 'all', group: colorFilter, q: themeQuery });
+      return filterPresets(list, { mode: 'all', group: colorFilter });
     }
-    return filterPresets(list, { mode: toneFilter, group: colorFilter, q: themeQuery });
+    return filterPresets(list, { mode: toneFilter, group: colorFilter });
   });
   const visibleBrowse = $derived(filteredBrowse.slice(0, themeLimit));
   const groupCounts = $derived.by(() => {
@@ -177,7 +176,7 @@
       const set = new Set(theme.favorites ?? []);
       list = ALL_PRESETS.filter((p) => set.has(p.id));
     }
-    const base = filterPresets(list, { mode, group: 'all', q: themeQuery });
+    const base = filterPresets(list, { mode, group: 'all' });
     const m = { all: base.length };
     for (const [id] of COLOR_GROUPS) m[id] = 0;
     for (const p of base) m[p.group || 'mono'] = (m[p.group || 'mono'] || 0) + 1;
@@ -530,7 +529,6 @@
 
           <div class="subhead">Browse · {filteredBrowse.length} themes</div>
           <div class="tfilters">
-            <input class="tsearch" type="search" placeholder="Search themes…" value={themeQuery} oninput={onThemeSearch} use:noAutofill />
             <div class="chiprow">
               {#each [['all', 'All'], ['dark', 'Dark'], ['light', 'Light'], ['favorites', '♥ Favorites']] as [id, label]}
                 <button type="button" class="chip" class:on={toneFilter === id} onclick={() => setToneFilter(id)}>{label}</button>
@@ -982,12 +980,6 @@
   .subhead:first-child, .gallery:first-child { margin-top: 0; }
 
   .tfilters { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-  .tsearch {
-    width: 100%; font-size: 12.5px; padding: 8px 12px;
-    border-radius: calc(10px * var(--rf)); border: 1px solid var(--border-soft);
-    background: var(--bg-input); color: var(--text);
-  }
-  .tsearch::placeholder { color: var(--text-faint); }
   .chiprow { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
   .chiprow.wrap { flex-wrap: wrap; overflow: visible; }
   .chip {
@@ -1427,7 +1419,6 @@
     .foot .grow { display: none; } /* free space between buttons on phone */
     .pubfields { flex-direction: column; }
     .pubfields .grow { min-width: 0; width: 100%; }
-    .tsearch { font-size: 16px; box-sizing: border-box; }
     .cssbox { min-height: 160px; max-width: 100%; box-sizing: border-box; }
   }
 

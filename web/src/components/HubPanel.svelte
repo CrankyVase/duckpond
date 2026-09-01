@@ -12,16 +12,16 @@
   // through /api/hf/* — the browser only renders it.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
-  import { noAutofill } from '../lib/noAutofill.js';
+  import { downloads, getJob, jobKey, optimisticallyAdd, cancelJob, startPolling, stopPolling } from '../lib/downloads.svelte.js';
   import { prefs } from '../lib/prefs.svelte.js';
   import { app } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import Info from '@lucide/svelte/icons/info';
-  import Search from '@lucide/svelte/icons/search';
   import Square from '@lucide/svelte/icons/square';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import X from '@lucide/svelte/icons/x';
 
   // Deterministic per-owner color behind the avatar while it loads (and for
   // owners with no HF avatar) — Unsloth's colored-initial fallback.
@@ -58,12 +58,16 @@
   let nextCursor = $state(null);
   let loadMoreFailed = $state(false);
   let searched = $state(false);
-  let job = $state(null); // { repoId, status, line, percent, transferredBytes, totalBytes, speedBytesPerSec, etaSec, error }
-  let poll = null;
+  // Downloads now live in the shared store — every variant button and the
+  // manager panel read from the same place. startPolling on mount.
+  startPolling();
 
   let selected = $state(null); // repoId of the model shown in the detail pane
   let variants = $state(new Map()); // repoId -> { loading, kind, total, variants, pick, recommended, error }
   let deleting = $state(null);      // include pattern mid-delete
+  // "Paste a repo id to add" — the one text field we keep (no search → no
+  // autofill, and it's the fastest way to pull a specific model).
+  let pasteId = $state('');
   // A mainstream base model (moonshotai/Kimi-K2-Instruct) almost never ships
   // GGUF itself — unsloth, bartowski, mradermacher etc. each publish their
   // own separate "-GGUF" repo for it. quantizers = who did that for the
@@ -237,42 +241,50 @@
     variants = new Map(variants);
   }
 
-  async function refreshJob() {
-    try { job = await api('/api/hf/download'); }
-    catch { /* transient — next tick retries */ }
-    if (job?.status === 'running') {
-      if (!poll) poll = setInterval(refreshJob, 1200);
-    } else if (poll) {
-      clearInterval(poll); poll = null;
-    }
-  }
-
-  // When a download lands, re-read the variant list so the row flips to
-  // "On device" (and the sort promotes it to the top).
-  let lastJobStatus = null;
+  // Re-read variants whenever any download for the current repo finishes so
+  // the row flips to "On device". The store's polling drives this.
+  let lastDlState = '';
   $effect(() => {
-    const st = job?.status;
-    if (lastJobStatus === 'running' && st === 'done') {
-      toast(`${job.repoId} downloaded`, 'ok');
-      if (activeRepo) void loadVariants(activeRepo, true);
+    if (!activeRepo) return;
+    for (const [key, j] of downloads) {
+      if (j.repoId !== activeRepo) continue;
+      if (lastDlState === 'running' && j.state === 'done') {
+        toast(`${j.variant ?? j.repoId} downloaded`, 'ok');
+        void loadVariants(activeRepo, true);
+      }
+      lastDlState = j.state;
     }
-    lastJobStatus = st;
   });
 
-  async function download(repoId, include) {
+  async function download(repoId, include, variant) {
     const v = variants.get(repoId);
-    const label = v?.variants?.find((x) => x.include === include)?.name ?? include;
+    const label = variant ?? v?.variants?.find((x) => x.include === include)?.name ?? include;
+    const totalBytes = v?.variants?.find((x) => x.include === include)?.size ?? null;
     try {
-      job = await api('/api/hf/download', { method: 'POST', body: { repoId, include, variant: label } });
+      optimisticallyAdd(repoId, { include, variant: label, totalBytes });
+      await api('/api/hf/download', { method: 'POST', body: { repoId, include, variant: label, totalBytes } });
       toast(`downloading ${label}…`, 'ok');
-      if (!poll) poll = setInterval(refreshJob, 1200);
     } catch (e) {
       toast(e.error ?? e.message ?? 'download failed to start', 'error');
     }
   }
 
-  async function cancel() {
-    await api('/api/hf/download/cancel', { method: 'POST' }).catch(() => {});
+  async function cancel(repoId, include) {
+    await cancelJob(repoId, include);
+  }
+
+  /** Paste any `owner/repo` into the hub — validates and opens it directly. */
+  async function addRepo() {
+    const id = pasteId.trim().replace(/^https?:\/\/huggingface\.co\//, '').replace(/\/$/, '');
+    if (!id || !id.includes('/')) { toast('Paste a repo id like unsloth/Qwen3-8B-GGUF', 'error'); return; }
+    try {
+      await api(`/api/hf/models/${id}`);
+      q = id;
+      await doSearch();
+      pasteId = '';
+    } catch (e) {
+      toast(e.message ?? 'repo not found', 'error');
+    }
   }
 
   async function deleteVariant(repoId, include, name) {
@@ -296,8 +308,7 @@
   }
 
   $effect(() => {
-    refreshJob();
-    return () => { if (poll) clearInterval(poll); };
+    return () => stopPolling();
   });
 
   function fmtN(n) {
@@ -384,53 +395,54 @@
     {#if vramLabel}<span class="hwchip">{vramLabel} VRAM free</span>{/if}
   </div>
 
-  {#if job && job.status && job.status !== 'idle'}
-    <div class="jobbar" class:err={job.status === 'error'} class:done={job.status === 'done'}>
-      <div class="jtop">
-        <span class="jrepo mono">{job.repoId}</span>
-        {#if job.variant && job.status === 'running'}<span class="jvariant mono">{job.variant}</span>{/if}
-        <span class="jline mono">
-          {#if job.status === 'error'}
-            {job.error}
-          {:else if job.status === 'running' && job.percent != null}
-            {Math.round(job.percent)}% · {fmtBytes(job.transferredBytes)}{job.totalBytes ? ` / ${fmtBytes(job.totalBytes)}` : ''}{job.speedBytesPerSec ? ` · ${fmtSpeed(job.speedBytesPerSec)}` : ''}{job.etaSec != null ? ` · ${fmtEta(job.etaSec)} left` : ''}
-          {:else}
-            {job.line}
+  {#if [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
+    <div class="jobbar-stack">
+      {#each [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled') as j (j.key)}
+        <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'}>
+          <div class="jtop">
+            <span class="jrepo mono">{j.repoId}</span>
+            {#if j.variant && j.state === 'running'}<span class="jvariant mono">{j.variant}</span>{/if}
+            <span class="jline mono">
+              {#if j.state === 'error'}
+                {j.error}
+              {:else if j.state === 'running' && j.downloadedBytes > 0}
+                {fmtBytes(j.downloadedBytes)}{j.totalBytes ? ` / ${fmtBytes(j.totalBytes)}` : ''}{j.speedBytesPerSec ? ` · ${fmtSpeed(j.speedBytesPerSec)}` : ''}{j.etaSec != null ? ` · ${fmtEta(j.etaSec)} left` : ''}
+              {:else}
+                {j.state === 'cancelling' ? 'cancelling…' : 'starting…'}
+              {/if}
+            </span>
+            {#if j.state === 'running' || j.state === 'cancelling'}
+              <button class="ghost" onclick={() => cancel(j.repoId, j.include)} title="Cancel"><Square size={13} /></button>
+            {/if}
+          </div>
+          {#if j.state === 'running' && j.totalBytes}
+            <div class="jbar"><div class="jfill" style="width:{Math.min(100, (j.downloadedBytes / j.totalBytes) * 100)}%"></div></div>
+          {:else if j.state === 'running'}
+            <div class="jbar indeterminate"></div>
           {/if}
-        </span>
-        {#if job.status === 'running'}
-          <button class="ghost" onclick={cancel} title="Cancel"><Square size={13} /></button>
-        {/if}
-      </div>
-      {#if job.status === 'running' && job.percent != null}
-        <div class="jbar"><div class="jfill" style="width:{job.percent}%"></div></div>
-      {/if}
+        </div>
+      {/each}
     </div>
   {/if}
 
   <div class="toolbar">
-    <div class="searchwrap">
-      <Search size={15} />
-      <input placeholder="Search all models…" bind:value={q} use:noAutofill
-        onkeydown={(e) => { if (e.key === 'Enter') doSearch(); }} />
-      {#if q}<button class="clearb ghost" onclick={() => { q = ''; loadTab(activeTab); }} title="Clear">×</button>{/if}
-      <button class="primary" disabled={searching || !q.trim()} onclick={doSearch}>
-        {searching ? 'Searching…' : 'Search'}
-      </button>
-    </div>
     <div class="tabs">
       {#each TABS as [val, label] (val)}
         <button class="tab" class:active={activeTab === val && !q.trim()}
           onclick={() => loadTab(val)}>{label}</button>
       {/each}
     </div>
-  </div>
-
-  <div class="popular">
-    <span class="plabel">Jump to</span>
-    {#each POPULAR as name (name)}
-      <button class="pchip" onclick={() => { q = name; doSearch(); }}>{name}</button>
-    {/each}
+    <div class="popular">
+      <span class="plabel">Jump to</span>
+      {#each POPULAR as name (name)}
+        <button class="pchip" onclick={() => { q = name; doSearch(); }}>{name}</button>
+      {/each}
+    </div>
+    <div class="pasterow">
+      <input class="paste" placeholder="Paste owner/repo to add…" bind:value={pasteId}
+        onkeydown={(e) => { if (e.key === 'Enter') addRepo(); }} />
+      <button class="ghost" onclick={addRepo} title="Open repo">Add</button>
+    </div>
   </div>
 
   {#if searching}
@@ -560,10 +572,24 @@
                   {/if}
                 </span>
                 {#if isOwner}
-                  <button class="dlbtn" disabled={job?.status === 'running'}
-                    onclick={() => download(activeRepo, v.pick)}>
-                    <Download size={13} /> Download
-                  </button>
+                  {@const dlJob = getJob(activeRepo, v.pick)}
+                  {#if dlJob?.state === 'running' || dlJob?.state === 'cancelling'}
+                    <button class="dlbtn running" disabled>
+                      <span class="spinner"></span>
+                      {dlJob.downloadedBytes > 0 ? `${fmtBytes(dlJob.downloadedBytes)}…` : 'starting…'}
+                    </button>
+                    <button class="dlbtn cancel" onclick={() => cancel(activeRepo, v.pick)} title="Cancel">
+                      <X size={13} />
+                    </button>
+                  {:else if dlJob?.state === 'done'}
+                    <button class="dlbtn done" disabled>
+                      <Download size={13} /> On device
+                    </button>
+                  {:else}
+                    <button class="dlbtn" onclick={() => download(activeRepo, v.pick)}>
+                      <Download size={13} /> Download
+                    </button>
+                  {/if}
                 {/if}
               </div>
               <div class="qlist">
@@ -589,17 +615,32 @@
                       <span class="qsize mono">{fmtBytes(row.size)}</span>
                       {#if isOwner && row.include != null}
                         {#if row.downloaded}
+                          <span class="qdl done" title="On device">
+                            <Download size={13} />
+                          </span>
                           <button class="qdel" disabled={deleting === row.include}
                             onclick={(e) => { e.stopPropagation(); deleteVariant(activeRepo, row.include, row.name); }}
                             title="Delete">
                             <Trash2 size={13} />
                           </button>
                         {:else}
-                          <button class="qdl" disabled={job?.status === 'running'}
-                            onclick={(e) => { e.stopPropagation(); download(activeRepo, row.include); }}
-                            title={`Download ${row.name}`}>
-                            <Download size={13} />
-                          </button>
+                          {@const rowJob = getJob(activeRepo, row.include)}
+                          {#if rowJob?.state === 'running' || rowJob?.state === 'cancelling'}
+                            <button class="qdl running" disabled title="Downloading…">
+                              <span class="spinner"></span>
+                            </button>
+                            <button class="qdl cancel"
+                              onclick={(e) => { e.stopPropagation(); cancel(activeRepo, row.include); }}
+                              title="Cancel">
+                              <X size={13} />
+                            </button>
+                          {:else}
+                            <button class="qdl"
+                              onclick={(e) => { e.stopPropagation(); download(activeRepo, row.include, row.name); }}
+                              title={`Download ${row.name}`}>
+                              <Download size={13} />
+                            </button>
+                          {/if}
                         {/if}
                       {:else}
                         <span class="qspacer"></span>
@@ -666,6 +707,7 @@
   }
   .jobbar.err { border-color: var(--red); color: var(--red); }
   .jobbar.done { border-color: color-mix(in srgb, var(--green) 50%, transparent); }
+  .jobbar-stack { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
   .jtop { display: flex; align-items: center; gap: 10px; }
   .jrepo { font-weight: 600; }
   .jvariant {
@@ -675,23 +717,18 @@
   .jline { flex: 1; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .jbar { height: 4px; border-radius: 999px; background: var(--bg-hover); overflow: hidden; }
   .jfill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 1s linear; }
+  .jbar.indeterminate { position: relative; }
+  .jbar.indeterminate::after {
+    content: ''; position: absolute; top: 0; height: 100%;
+    width: 30%; border-radius: 999px; background: var(--accent);
+    animation: indeterminate 1.2s ease-in-out infinite;
+  }
+  @keyframes indeterminate { 0% { left: -30%; } 100% { left: 100%; } }
 
   .toolbar {
     flex-shrink: 0; display: flex; align-items: center; gap: 12px;
     flex-wrap: wrap; margin-bottom: 12px;
   }
-  /* Unsloth's field-soft: borderless soft fill, no outline ring */
-  .searchwrap {
-    flex: 1 1 320px; display: flex; align-items: center; gap: 10px;
-    height: 40px; padding: 0 8px 0 14px; border-radius: 999px;
-    background: var(--bg-hover); color: var(--text-faint);
-    transition: background 160ms ease;
-  }
-  .searchwrap:focus-within { background: var(--bg-card); box-shadow: 0 0 0 1px var(--border); }
-  .searchwrap input { flex: 1; border: none; background: none; font-size: 13.5px; color: var(--text); min-width: 0; }
-  .searchwrap input::placeholder { color: var(--text-faint); }
-  .searchwrap input:focus { outline: none; }
-  .clearb { flex-shrink: 0; font-size: 15px; line-height: 1; padding: 2px 7px; border-radius: 999px; }
   .tabs {
     display: flex; gap: 2px; padding: 3px; border-radius: 999px;
     background: var(--bg-hover); flex-shrink: 0;
@@ -711,6 +748,14 @@
     font-size: 11.5px; color: var(--text-dim); background: none;
   }
   .pchip:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border); }
+  .pasterow { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .paste {
+    width: 220px; font-size: 12px; padding: 7px 12px;
+    border-radius: 999px; border: 1px solid var(--border-soft);
+    background: var(--bg-raised); color: var(--text);
+  }
+  .paste::placeholder { color: var(--text-faint); }
+  .paste:focus { outline: none; border-color: var(--accent-dim); }
 
   .empty { padding: 40px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
@@ -896,6 +941,10 @@
   .qdl:hover { color: var(--accent); background: var(--accent-glow); }
   .qdel:hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
   .qdl:disabled, .qdel:disabled { opacity: 0.35; cursor: default; }
+  .qdl.done { color: var(--green); }
+  .qdl.running { color: var(--text-faint); }
+  .qdl.cancel { color: var(--red); }
+  .qdl.cancel:hover { background: color-mix(in srgb, var(--red) 12%, transparent); }
   .qspacer { width: 28px; flex-shrink: 0; }
 
   .dlbtn {
@@ -905,6 +954,12 @@
   }
   .dlbtn:hover:not(:disabled) { background: var(--accent); }
   .dlbtn:disabled { opacity: 0.5; cursor: default; }
+  .dlbtn.running { background: var(--bg-hover); border-color: var(--border); color: var(--text-dim); }
+  .dlbtn.done { background: var(--green); border-color: var(--green); color: #0d0d0d; }
+  .dlbtn.cancel { background: none; border-color: var(--red); color: var(--red); padding: 9px 10px; }
+  .dlbtn.cancel:hover { background: color-mix(in srgb, var(--red) 12%, transparent); }
+  .spinner { width: 12px; height: 12px; border: 2px solid var(--text-faint); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   .stats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
   .stat {

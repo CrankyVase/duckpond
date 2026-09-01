@@ -1,8 +1,8 @@
-// Shared image-generation client for the local bridge on :8765 (OpenAI-style,
+// Shared media-generation client for the local bridge on :8765 (OpenAI-style,
 // blocking, one job at a time). Used by the image studio route, the in-chat
 // generate_image tool, and agent runs. POSTs with a unique `tag`, polls
 // GET /v1/progress while the job runs, and reports phase/step/preview frames
-// through onProgress. Finished images are always saved to data/images/ + the
+// through onProgress. Finished media is always saved to data/media/ + the
 // images table — even if whoever asked has already disconnected.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
@@ -14,6 +14,8 @@ import { db } from './db.js';
 const BRIDGE = process.env.IMAGE_BRIDGE_URL ?? 'http://127.0.0.1:8765';
 export const IMAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'images');
 mkdirSync(IMAGES_DIR, { recursive: true });
+export const MEDIA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'media');
+mkdirSync(MEDIA_DIR, { recursive: true });
 
 // quality presets: the only knob is steps (the real speed/quality lever) —
 // size stays a separate, user-chosen framing decision
@@ -73,13 +75,26 @@ export async function bridgeGet(path) {
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// Media generation (image / video / audio) — same bridge, same progress
+// polling, same cancel-by-tag. The bridge's /health tells us which models
+// are on disk per task; /v1/{kind}/generations runs the job.
+// ---------------------------------------------------------------------------
+const ENDPOINTS = {
+  image: '/v1/images/generations',
+  video: '/v1/videos/generations',
+  audio: '/v1/audio/generations',
+};
+
 // onProgress receives:
 //   { type:'progress', phase, step, steps, image, n, enhanced_prompt }
 //   { type:'preview', b64, seq }
 // Resolves { images:[{id,url}], enhanced, model_used }; throws on bridge error.
 export async function generateViaBridge({
   userId, prompt, model = null, size = '1024x1024', steps = null, n = 1,
-  negative = '', enhance = true, seed = null, onProgress = () => {}, signal = null,
+  negative = '', enhance = true, seed = null, task = 'image',
+  numFrames = null, fps = null, audioDuration = null,
+  onProgress = () => {}, signal = null,
 }) {
   const prefs = getUserImagePrefs(userId);
   // Explicit non-auto model wins; otherwise the user's preferred model; else auto.
@@ -89,13 +104,16 @@ export async function generateViaBridge({
   const tag = randomUUID().replace(/-/g, '').slice(0, 12);
   const body = {
     prompt: prompt.trim(), model: resolvedModel, size, tag, enhance,
-    n: min4(Number(n) || 1),
+    n: min4(Number(n) || 1), task,
   };
   if (steps) body.steps = Math.max(1, Math.min(Number(steps) || 1, 80));
   if (negative?.trim()) body.negative_prompt = negative.trim();
   if (seed != null && seed !== '' && Number.isFinite(Number(seed)) && Number(seed) > 0) {
     body.seed = Math.floor(Number(seed));
   }
+  if (numFrames != null) body.num_frames = Math.max(1, Math.min(Number(numFrames) || 25, 500));
+  if (fps != null) body.fps = Math.max(1, Math.min(Number(fps) || 8, 60));
+  if (audioDuration != null) body.audio_duration = Math.max(0.5, Math.min(Number(audioDuration) || 10, 600));
 
   // refuse before burning GPU if the user is over the 15 GB Files quota
   try {
@@ -105,14 +123,15 @@ export async function generateViaBridge({
     if (e?.code === 'QUOTA') throw e;
   }
 
-  const post = bridgePost('/v1/images/generations', body)
+  const endpoint = ENDPOINTS[task] ?? ENDPOINTS.image;
+  const post = bridgePost(endpoint, body)
     .then((r) => ({ ok: true, r })).catch((e) => ({ ok: false, e }));
 
   // A closed chat/studio connection must actually stop the GPU job, not just
   // stop listening to it — otherwise a cancelled generation keeps burning
   // GPU time (and VRAM) with nobody watching. The bridge checks CANCEL_TAGS
   // between denoise steps, so this takes effect within one step.
-  const onAbort = () => { bridgePost('/v1/images/generations/cancel', { tag }).catch(() => {}); };
+  const onAbort = () => { bridgePost(`${endpoint}/cancel`, { tag }).catch(() => {}); };
   if (signal) {
     if (signal.aborted) onAbort();
     else signal.addEventListener('abort', onAbort, { once: true });
@@ -170,13 +189,16 @@ export async function generateViaBridge({
 
   const saved = [];
   // Stagger timestamps so multi-image batches never collide on the same ms
-  // name, and always keep every sample the bridge returned.
+  // name, and always keep every sample the bridge returned. Media files get
+  // their own dir; images stay in IMAGES_DIR for backward compat.
+  const ext = task === 'video' ? 'mp4' : task === 'audio' ? 'wav' : 'png';
+  const dir = task === 'image' ? IMAGES_DIR : MEDIA_DIR;
   let i = 0;
   for (const item of result.r.data ?? []) {
     if (!item.b64_json) continue;
-    const file = `img-${Date.now()}-${i}-${randomUUID().slice(0, 8)}.png`;
+    const file = `${task}-${Date.now()}-${i}-${randomUUID().slice(0, 8)}.${ext}`;
     i += 1;
-    writeFileSync(join(IMAGES_DIR, file), Buffer.from(item.b64_json, 'base64'));
+    writeFileSync(join(dir, file), Buffer.from(item.b64_json, 'base64'));
     const info = db.prepare(`
       INSERT INTO images (user_id, prompt, enhanced_prompt, model, size, steps, file)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
@@ -185,7 +207,7 @@ export async function generateViaBridge({
       result.r.steps_used ?? body.steps ?? null, file);
     // ?v=filename busts browser caches if an id is ever reused
     const id = info.lastInsertRowid;
-    saved.push({ id, url: `/api/images/${id}/file?v=${encodeURIComponent(file)}` });
+    saved.push({ id, url: `/api/images/${id}/file?v=${encodeURIComponent(file)}`, task });
   }
   return {
     images: saved,
@@ -194,5 +216,6 @@ export async function generateViaBridge({
     steps_used: result.r.steps_used ?? body.steps ?? null,
     steps_requested: result.r.steps_requested ?? body.steps ?? null,
     steps_capped: !!result.r.steps_capped,
+    task,
   };
 }
