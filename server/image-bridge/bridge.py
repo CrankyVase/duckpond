@@ -193,6 +193,19 @@ def _encode_video_mp4(buf, frames, fps):
     container.close()
 
 
+def _callback_kwargs(pipe, on_step):
+    """Per-pipeline step-callback kwargs — newer diffusers pipelines take
+    callback_on_step_end, older ones (AudioLDM2, some video) only the legacy
+    callback/callback_steps pair, and a few take neither."""
+    import inspect
+    params = inspect.signature(pipe.__call__).parameters
+    if "callback_on_step_end" in params:
+        return {"callback_on_step_end": on_step}
+    if "callback" in params:
+        return {"callback": on_step, "callback_steps": 1}
+    return {}
+
+
 def run_job(body, tag):
     prompt = body["prompt"]
     model_req = body.get("model") or "auto"
@@ -237,7 +250,7 @@ def run_job(body, tag):
                 num_inference_steps=steps,
                 audio_length_in_s=audio_duration,
                 generator=generator,
-                callback_on_step_end=on_step,
+                **_callback_kwargs(pipe, on_step),
             )
             audio = result.audios[0] if hasattr(result, 'audios') else result[0]
             buf = io.BytesIO()
@@ -250,7 +263,7 @@ def run_job(body, tag):
                 num_inference_steps=steps,
                 num_frames=num_frames,
                 generator=generator,
-                callback_on_step_end=on_step,
+                **_callback_kwargs(pipe, on_step),
             )
             frames = result.frames[0] if hasattr(result, 'frames') else result[0]
             buf = io.BytesIO()
@@ -261,7 +274,7 @@ def run_job(body, tag):
                 prompt=prompt, negative_prompt=negative,
                 num_inference_steps=steps, width=w, height=h,
                 generator=generator,
-                callback_on_step_end=on_step,
+                **_callback_kwargs(pipe, on_step),
             )
             img = result.images[0]
             buf = io.BytesIO()
