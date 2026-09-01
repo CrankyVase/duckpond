@@ -50,54 +50,6 @@ class JobCancelled(Exception):
     pass
 
 
-# --------------------------------------------------------------- video encode
-def _encode_video_mp4(buf, frames, fps):
-    """Encode a list/ndarray of RGB frames to mp4 in-memory.
-    Prefers imageio (with its bundled ffmpeg), falls back to PyAV, then to the
-    system ffmpeg binary — whichever the venv happens to have."""
-    if hasattr(frames, "cpu"):  # torch tensor -> numpy
-        frames = frames.cpu().numpy()
-    frames = np.asarray(frames)
-    if frames.dtype != np.uint8:
-        frames = np.clip(frames * 255.0 if frames.max() <= 1.0 else frames, 0, 255).astype(np.uint8)
-    if frames.ndim == 3:  # single frame
-        frames = frames[None]
-    try:
-        import imageio
-        imageio.mimsave(buf, list(frames), format="mp4", fps=fps)
-        return
-    except ImportError:
-        pass
-    try:
-        import av
-        h, w = frames.shape[1:3]
-        container = av.open(buf, mode="w", format="mp4")
-        stream = container.add_stream("libx264", rate=fps)
-        stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
-        for f in frames:
-            packet_stream = stream.encode(av.VideoFrame.from_ndarray(f, format="rgb24"))
-            for p in packet_stream:
-                container.mux(p)
-        for p in stream.encode():
-            container.mux(p)
-        container.close()
-        return
-    except ImportError:
-        pass
-    import subprocess
-    h, w = frames.shape[1:3]
-    proc = subprocess.Popen(
-        ["ffmpeg", "-y", "-loglevel", "error",
-         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(fps),
-         "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-         "-f", "mp4", "pipe:1"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    out, _ = proc.communicate(frames.tobytes())
-    if proc.returncode != 0:
-        raise RuntimeError("ffmpeg video encode failed")
-    buf.write(out)
-
-
 # ---------------------------------------------------------------- discovery
 def discover_models():
     """Scan HF_HOME for anything that looks like a media checkpoint.
