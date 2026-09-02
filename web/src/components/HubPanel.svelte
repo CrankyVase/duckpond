@@ -19,6 +19,7 @@
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import Info from '@lucide/svelte/icons/info';
+  import SearchIcon from '@lucide/svelte/icons/search';
   import Square from '@lucide/svelte/icons/square';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import X from '@lucide/svelte/icons/x';
@@ -278,6 +279,29 @@
     await runQuery(() => api(currentQueryUrl()));
   }
   void loadTab(activeTab); // populate the default landing tab immediately
+
+  // Reinstated 2026-09-02 after notes/HUB-2.md's "no free-text inputs"
+  // removal (password managers were autofilling into search fields) — user
+  // approved a hardened version rather than staying chips/paste-only.
+  // Randomized per-mount name (not "search"/"q") plus the ignore-attribute
+  // quartet below tells every major manager this isn't a credential field;
+  // debounced so typing doesn't spam the HF API on every keystroke.
+  const searchInputName = `hub-model-filter-${Math.random().toString(36).slice(2, 10)}`;
+  let searchTimer = null;
+  function onSearchInput() {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { void doSearch(); }, 350);
+  }
+  function onSearchKeydown(e) {
+    if (e.key !== 'Enter') return;
+    if (searchTimer) clearTimeout(searchTimer);
+    void doSearch();
+  }
+  function clearSearch() {
+    if (searchTimer) clearTimeout(searchTimer);
+    q = '';
+    void loadTab(activeTab);
+  }
 
   // Endless scroll: append the next page when the sentinel shows up. Same
   // shape as Unsloth's fetchMore — one in-flight guard, results append,
@@ -566,6 +590,15 @@
         <button class="tab" class:active={activeTab === val && !q.trim()}
           onclick={() => loadTab(val)}>{label}</button>
       {/each}
+    </div>
+    <div class="searchbox">
+      <SearchIcon size={14} />
+      <input type="search" inputmode="search" placeholder="Search all models…"
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+        data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
+        name={searchInputName}
+        bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
+      {#if q}<button class="ghost searchclear" onclick={clearSearch} title="Clear"><X size={13} /></button>{/if}
     </div>
     <div class="popular">
       <span class="plabel">Jump to</span>
@@ -998,6 +1031,22 @@
     font-size: 11.5px; color: var(--text-dim); background: none;
   }
   .pchip:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border); }
+  .searchbox {
+    display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 160px; max-width: 340px;
+    padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border-soft);
+    background: var(--bg-raised); color: var(--text-faint);
+  }
+  .searchbox:focus-within { border-color: var(--accent-dim); color: var(--text-dim); }
+  .searchbox input {
+    flex: 1; min-width: 0; border: none; background: none; font-size: 12.5px; color: var(--text);
+    padding: 0;
+  }
+  .searchbox input::placeholder { color: var(--text-faint); }
+  .searchbox input:focus { outline: none; }
+  .searchbox input::-webkit-search-cancel-button { display: none; }
+  .searchclear { flex-shrink: 0; padding: 2px; border-radius: 50%; color: var(--text-faint); }
+  .searchclear:hover { color: var(--text); background: var(--bg-hover); }
+
   .pasterow { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .paste {
     width: 220px; font-size: 12px; padding: 7px 12px;
