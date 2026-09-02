@@ -8,6 +8,7 @@ import {
   removeRouterPresetSections, removeRouterPresetSectionsByPath, searchModels,
 } from '../hfHub.js';
 import { listLocalModels } from '../localInventory.js';
+import { reloadRouterModels } from '../llama.js';
 
 // Org/user profile picture, resolved through the server (browser never
 // reaches huggingface.co) and cached in memory for 12h. Lives in its own
@@ -125,26 +126,32 @@ export default async function hfRoutes(app) {
   // Delete one row from My Models: a single HF-cache quant, a whole HF-cache
   // repo (every quant), or a plain-dir model (its shard family). Router
   // preset sections pointing at whatever got removed are stripped too, same
-  // as the ModelPicker's trash button in routes/models.js.
+  // as the ModelPicker's trash button in routes/models.js — and just like
+  // that route, the running router is force-reloaded afterward. Editing the
+  // preset ini alone doesn't do it: the router only re-reads it on demand,
+  // so without this the picker kept listing the deleted model (stale
+  // /v1/models entry) until something else happened to trigger a reload.
   app.post('/api/hf/local/delete', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
     const { source, repoId, repoDir, include } = req.body ?? {};
     try {
+      let result;
       if (source === 'local-dir') {
         const del = deleteModelFileByPath(include);
         const presetRemoved = removeRouterPresetSectionsByPath(include);
-        return { ok: true, freedBytes: del.freedBytes, presetRemoved };
-      }
-      if (source === 'hf-cache' && include) {
+        result = { ok: true, freedBytes: del.freedBytes, presetRemoved };
+      } else if (source === 'hf-cache' && include) {
         const del = deleteVariant(repoId, { include });
-        return { ok: true, freedBytes: del.freedBytes };
-      }
-      if (source === 'hf-cache') {
+        result = { ok: true, freedBytes: del.freedBytes, presetRemoved: del.presetRemoved };
+      } else if (source === 'hf-cache') {
         const del = deleteModelRepoByPath(repoDir);
         const presetRemoved = removeRouterPresetSections(del.repoDir);
-        return { ok: true, freedBytes: del.freedBytes, presetRemoved };
+        result = { ok: true, freedBytes: del.freedBytes, presetRemoved };
+      } else {
+        return reply.code(400).send({ error: 'unknown source' });
       }
-      return reply.code(400).send({ error: 'unknown source' });
+      if (result.presetRemoved > 0) await reloadRouterModels().catch(() => {});
+      return result;
     } catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
   });
 }

@@ -59,6 +59,35 @@
   since not every failure mode is a dropped connection (a genuinely broken
   GGUF, e.g. an unsupported experimental quant, still fails immediately and
   correctly — that's not a bug).
+- **GGUF classification fix** — the Type filter/task badge shipped earlier
+  this round trusted HF's `pipeline_tag` literally, but that field is very
+  often just missing on GGUF-only repos (confirmed live: `unsloth/Qwen3.8-
+  27B-GGUF`, `DeepSeek-V4-Pro-0813-GGUF` etc. all return no tag at all), so
+  a huge share of the real catalog silently vanished under every filter but
+  "All". Fixed by extracting the LLM picker's own classifier (which already
+  falls back to filename regex heuristics and defaults to chat rather than
+  "unknown") into a shared `server/src/modelKind.js`, and having `hfHub.js`
+  attach the same `kind` to every Hub result so the client filters/badges
+  off that instead of a raw tag lookup. Also split video out from image
+  (`image-text-to-video` etc. were falling into the image bucket).
+- **"Downloads" tab** — the Hub only ever showed a transient top banner for
+  jobs currently in flight, which vanished the moment a download finished,
+  errored, or got cancelled — no way to see what happened to something
+  after the fact. Added as a third mode next to Discover/My Models
+  (`downloadManager.js` already persisted the full job history server-side,
+  `GET /api/hf/downloads` already returned it — this was purely a missing
+  frontend view), with a "Clear finished" action wired to the existing
+  `clearFinished()` endpoint, and an active-count badge on the tab itself.
+- **Ghost models in the picker after deleting from My Models** — deleting a
+  model through the My Models tab (`POST /api/hf/local/delete`) stripped
+  its router-preset ini section on disk but never told the *running*
+  router to re-read it, so the picker kept listing a model whose file was
+  already gone until something else happened to trigger a reload. Fixed by
+  force-reloading the router (`reloadRouterModels()`) right after any
+  preset-section removal, same pattern the classic model-picker trash
+  button already used. Also closed a related gap: deleting a single quant
+  (not the whole repo) never stripped its preset section at all if it had
+  one — `deleteVariant()` now does that too.
 
 ## 2. Todos — most complex → least complex
 
