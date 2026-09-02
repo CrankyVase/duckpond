@@ -20,7 +20,7 @@ import { downloadBusy } from './downloadManager.js';
 
 const HF_API = 'https://huggingface.co';
 const HF_CLI = process.env.HF_CLI ?? '/home/cranky/.local/bin/hf';
-const HF_HOME = process.env.HF_HOME ?? '/var/mnt/modelnvme/ai/huggingface';
+export const HF_HOME = process.env.HF_HOME ?? '/var/mnt/modelnvme/ai/huggingface';
 // owner/repo, or a bare repo id for legacy no-namespace repos (e.g. "gpt2").
 const REPO_ID_RE = /^[\w.-]+(\/[\w.-]+)?$/;
 
@@ -176,11 +176,11 @@ export async function modelInfo(repoId) {
 // (no .incomplete sibling in blobs/) means that file is downloaded.
 // ---------------------------------------------------------------------------
 
-const cacheDir = (repoId) =>
+export const cacheDir = (repoId) =>
   join(HF_HOME, 'hub', `models--${String(repoId).replace('/', '--')}`);
 
 /** @returns {string|null} snapshot dir for the repo's main ref, or null */
-function mainSnapshotDir(repoId) {
+export function mainSnapshotDir(repoId) {
   const root = cacheDir(repoId);
   try {
     const ref = readFileSync(join(root, 'refs', 'main'), 'utf8').trim();
@@ -511,6 +511,90 @@ export function deleteModelRepoByPath(modelPath) {
     repoId: dirName.replace(/^models--/, '').replace('--', '/'),
     freedBytes,
   };
+}
+
+// ---------------------------------------------------------------------------
+// File-level delete — for models that do NOT live in the HF cache (plain GGUFs
+// in ~/llm-models, split shards in ~/llama-split-models, ...). Used to live as
+// a 400 "delete it manually", which made "remove this model" ambiguous: did it
+// leave the picker, or leave the disk? Now it leaves the disk too.
+//
+// Safety: only paths inside an allowlist of model roots (DUCKPOND_MODEL_ROOTS,
+// colon-separated, falling back to the usual local model dirs) may be deleted,
+// the target must be a regular .gguf file, and symlink tricks are resolved
+// with realpath before the prefix check.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_MODEL_ROOTS = [
+  join(HF_HOME, 'hub'),
+  process.env.HOME ? join(process.env.HOME, 'llm-models') : null,
+  process.env.HOME ? join(process.env.HOME, 'llm-models-local') : null,
+  process.env.HOME ? join(process.env.HOME, 'hf_models') : null,
+  process.env.HOME ? join(process.env.HOME, 'llama-split-models') : null,
+].filter(Boolean);
+export const MODEL_ROOTS = [...new Set([
+  ...DEFAULT_MODEL_ROOTS,
+  ...(process.env.DUCKPOND_MODEL_ROOTS ?? '').split(':').filter(Boolean),
+])];
+
+export const SPLIT_SHARD_RE = /-00001-of-\d{5}\.gguf$/i;
+
+export function deleteModelFileByPath(modelPath) {
+  let real;
+  try { real = realpathSync(String(modelPath ?? '')); } catch {
+    throw Object.assign(new Error('model file not found on disk (router may point at a stale path)'), { status: 404 });
+  }
+  if (!/\.gguf$/i.test(real)) {
+    throw Object.assign(new Error('refusing to delete a non-gguf file'), { status: 400 });
+  }
+  const root = MODEL_ROOTS.map((r) => { try { return realpathSync(r); } catch { return null; } })
+    .find((r) => r && (real === r || real.startsWith(r + '/')));
+  if (!root) {
+    throw Object.assign(new Error(`model file is outside the allowed model directories (${MODEL_ROOTS.join(', ')})`), { status: 400 });
+  }
+  // split GGUF family: delete every shard, not just the first one
+  const family = SPLIT_SHARD_RE.test(real) ? real.replace(/-00001-of-(\d{5})\.gguf$/i, '') : null;
+  const files = [real];
+  if (family) {
+    const dir = real.slice(0, real.lastIndexOf('/'));
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (p !== real && name.startsWith(family.slice(dir.length + 1) + '-') && /\.gguf$/i.test(name)) files.push(p);
+    }
+  }
+  let freedBytes = 0;
+  for (const f of files) {
+    try { freedBytes += statSync(f).size; unlinkSync(f); } catch { /* raced/vanished */ }
+  }
+  return { deleted: files, freedBytes, family };
+}
+
+// Strip router-preset sections whose `model =` matches the deleted file —
+// exact path first, plus the split-shard family prefix so the other shards'
+// aliases stop listing too. Narrower than removeRouterPresetSections (which
+// nukes every section under a repo dir): sibling quants in the same folder
+// are NOT touched.
+export function removeRouterPresetSectionsByPath(modelPath) {
+  if (!existsSync(ROUTER_INI)) return 0;
+  const raw = readFileSync(ROUTER_INI, 'utf8');
+  const blocks = raw.split(/(?=^\[)/m);
+  const kept = [];
+  let removed = 0;
+  const family = SPLIT_SHARD_RE.test(modelPath) ? modelPath.replace(/-00001-of-\d{5}\.gguf$/i, '') : null;
+  for (const block of blocks) {
+    const model = block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim();
+    if (model && (model === modelPath || (family && model.startsWith(`${family}-`)))) {
+      removed += 1;
+      continue;
+    }
+    kept.push(block);
+  }
+  if (removed > 0) {
+    const tmp = `${ROUTER_INI}.tmp`;
+    writeFileSync(tmp, kept.join(''));
+    renameSync(tmp, ROUTER_INI);
+  }
+  return removed;
 }
 
 // Strip every preset section whose `model =` points into the deleted repo

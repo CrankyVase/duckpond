@@ -49,6 +49,54 @@
     'Kimi', 'DeepSeek', 'Qwen', 'Llama', 'GLM', 'MiniMax', 'Gemma', 'Mistral', 'GPT-OSS', 'Phi',
   ];
 
+  // Discover (search/browse — everything below) vs My Models (what's already
+  // on disk, independent of the router's preset ini). The split LM Studio and
+  // Unsloth Studio both make; see notes/HUB-3.md.
+  let mode = $state('discover');
+  let localModels = $state([]);
+  let localTotalBytes = $state(0);
+  let localLoading = $state(false);
+  let localDeleting = $state(null); // `${repoDir}::${include}` mid-delete
+
+  async function loadLocal() {
+    localLoading = true;
+    try {
+      const r = await api('/api/hf/local');
+      localModels = r.models;
+      localTotalBytes = r.totalBytes;
+    } catch (e) { toast(e.message ?? 'failed to load local models', 'error'); }
+    localLoading = false;
+  }
+
+  function setMode(m) {
+    mode = m;
+    if (m === 'my-models' && !localModels.length) void loadLocal();
+  }
+
+  async function deleteLocalVariant(row, variant) {
+    const ok = await confirmDialog({
+      title: 'Delete model?',
+      message: `This will remove ${variant.quant ?? variant.name} from disk.${row.variants.length > 1 ? ' Other quants of this repo stay.' : ''}`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    const key = `${row.repoDir}::${variant.include}`;
+    localDeleting = key;
+    try {
+      const r = await api('/api/hf/local/delete', {
+        method: 'POST',
+        body: { source: row.source, repoId: row.repoId, repoDir: row.repoDir, include: variant.include },
+      });
+      toast(`Deleted — ${fmtBytes(r.freedBytes)} freed`, 'ok');
+      await loadLocal();
+    } catch (e) {
+      toast(e.error ?? e.message ?? 'delete failed', 'error');
+    } finally {
+      localDeleting = null;
+    }
+  }
+
   let q = $state('');
   let activeTab = $state(prefs.hubDefaultTab ?? 'unsloth');
   let results = $state([]);
@@ -395,6 +443,11 @@
     {#if vramLabel}<span class="hwchip">{vramLabel} VRAM free</span>{/if}
   </div>
 
+  <div class="modebar">
+    <button class="modebtn" class:on={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
+    <button class="modebtn" class:on={mode === 'my-models'} onclick={() => setMode('my-models')}>My Models</button>
+  </div>
+
   {#if [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
     <div class="jobbar-stack">
       {#each [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled') as j (j.key)}
@@ -425,6 +478,7 @@
     </div>
   {/if}
 
+  {#if mode === 'discover'}
   <div class="toolbar">
     <div class="tabs">
       {#each TABS as [val, label] (val)}
@@ -668,6 +722,62 @@
       </div>
     </div>
   {/if}
+  {:else}
+    <div class="mymodels">
+      {#if localLoading}
+        <div class="skeleton-list">
+          {#each Array(4) as _, i (i)}
+            <div class="skeleton-row"><div class="sk avatar-sk"></div><div class="sk-lines"><div class="sk w40"></div><div class="sk w70"></div></div></div>
+          {/each}
+        </div>
+      {:else if !localModels.length}
+        <div class="empty nodetail">Nothing downloaded yet — switch to Discover to find a model.</div>
+      {:else}
+        <div class="mmhead">
+          <span>{localModels.length} model{localModels.length === 1 ? '' : 's'} on disk</span>
+          <span class="mono">{fmtBytes(localTotalBytes)} total</span>
+        </div>
+        <div class="mmlist">
+          {#each localModels as row (row.repoDir)}
+            <div class="mmrow">
+              <span class="avatar" style={avatarStyle(row.repoId ? ownerOf(row.repoId) : 'local')}>
+                {#if row.repoId && !avatarFail.has(ownerOf(row.repoId))}
+                  <img src="/api/hf/avatar/{ownerOf(row.repoId)}" alt="" loading="lazy"
+                    onerror={() => { avatarFail.add(ownerOf(row.repoId)); avatarFail = new Set(avatarFail); }} />
+                {/if}
+                <span class="initial">{(row.repoId ? ownerOf(row.repoId) : 'local')[0]?.toUpperCase()}</span>
+              </span>
+              <div class="mminfo">
+                <div class="mmtop">
+                  <span class="mmname">{row.repoId ?? row.variants[0].name}</span>
+                  <span class="mmwhen">{fmtAgo(row.updatedAt)}</span>
+                  <span class="mmsize mono">{fmtBytes(row.totalBytes)}</span>
+                </div>
+                <div class="qlist">
+                  {#each row.variants as variant (variant.include ?? variant.name)}
+                    <div class="qrow mmvariant">
+                      <span class="qleft">
+                        <span class="mono qname">{variant.quant ?? variant.name}</span>
+                      </span>
+                      <span class="qright">
+                        <span class="qsize mono">{fmtBytes(variant.size)}</span>
+                        {#if isOwner}
+                          <button class="qdel" disabled={localDeleting === `${row.repoDir}::${variant.include}`}
+                            onclick={() => deleteLocalVariant(row, variant)} title="Delete from disk">
+                            <Trash2 size={13} />
+                          </button>
+                        {/if}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -698,6 +808,40 @@
     content: ''; width: 7px; height: 7px; border-radius: 50%;
     background: var(--green);
   }
+
+  /* Discover / My Models — same segmented-pill look as .tabs */
+  .modebar {
+    display: flex; gap: 2px; padding: 3px; border-radius: 999px;
+    background: var(--bg-hover); width: fit-content; flex-shrink: 0; margin-bottom: 12px;
+  }
+  .modebtn {
+    padding: 7px 18px; border-radius: 999px; border: none; background: none;
+    font-size: 12.5px; font-weight: 600; color: var(--text-faint);
+    transition: color 140ms ease, background 140ms ease;
+  }
+  .modebtn:hover { color: var(--text-dim); }
+  .modebtn.on { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+
+  /* My Models — everything on disk, independent of the router preset ini */
+  .mymodels { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+  .mmhead {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    font-size: 11.5px; color: var(--text-faint); padding: 0 4px 10px;
+  }
+  .mmlist { display: flex; flex-direction: column; gap: 8px; }
+  .mmrow {
+    display: flex; gap: 12px; padding: 12px; border-radius: calc(13px * var(--rf));
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+  }
+  .mminfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .mmtop { display: flex; align-items: baseline; gap: 8px; }
+  .mmname {
+    font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; min-width: 0;
+  }
+  .mmwhen { font-size: 11px; color: var(--text-faint); flex-shrink: 0; }
+  .mmsize { font-size: 11px; color: var(--text-dim); margin-left: auto; flex-shrink: 0; }
+  .mmvariant { padding: 6px 8px; }
 
   /* download job bar — floats above the split, full-width surface */
   .jobbar {

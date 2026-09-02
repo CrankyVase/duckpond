@@ -3,9 +3,11 @@ import {
   cancelDownload, clearFinished, downloadStatus, listDownloads, startDownload,
 } from '../downloadManager.js';
 import {
-  deleteVariant, findQuantizers, modalityModels, modelInfo,
-  modelVariants, ownerAvatar, popularModels, searchModels,
+  deleteModelFileByPath, deleteModelRepoByPath, deleteVariant, findQuantizers,
+  modalityModels, modelInfo, modelVariants, ownerAvatar, popularModels,
+  removeRouterPresetSections, removeRouterPresetSectionsByPath, searchModels,
 } from '../hfHub.js';
+import { listLocalModels } from '../localInventory.js';
 
 // Org/user profile picture, resolved through the server (browser never
 // reaches huggingface.co) and cached in memory for 12h. Lives in its own
@@ -109,5 +111,40 @@ export default async function hfRoutes(app) {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
     clearFinished();
     return { ok: true };
+  });
+
+  // "My Models" — everything already on disk (HF cache + plain model dirs),
+  // independent of what the router currently has a preset for. See
+  // notes/HUB-3.md: the Discover/My-Models split LM Studio and Unsloth
+  // Studio both make, that the search-only Hub didn't have a page for.
+  app.get('/api/hf/local', async (req, reply) => {
+    try { return listLocalModels(); }
+    catch (e) { return reply.code(500).send({ error: e.message }); }
+  });
+
+  // Delete one row from My Models: a single HF-cache quant, a whole HF-cache
+  // repo (every quant), or a plain-dir model (its shard family). Router
+  // preset sections pointing at whatever got removed are stripped too, same
+  // as the ModelPicker's trash button in routes/models.js.
+  app.post('/api/hf/local/delete', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    const { source, repoId, repoDir, include } = req.body ?? {};
+    try {
+      if (source === 'local-dir') {
+        const del = deleteModelFileByPath(include);
+        const presetRemoved = removeRouterPresetSectionsByPath(include);
+        return { ok: true, freedBytes: del.freedBytes, presetRemoved };
+      }
+      if (source === 'hf-cache' && include) {
+        const del = deleteVariant(repoId, { include });
+        return { ok: true, freedBytes: del.freedBytes };
+      }
+      if (source === 'hf-cache') {
+        const del = deleteModelRepoByPath(repoDir);
+        const presetRemoved = removeRouterPresetSections(del.repoDir);
+        return { ok: true, freedBytes: del.freedBytes, presetRemoved };
+      }
+      return reply.code(400).send({ error: 'unknown source' });
+    } catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
   });
 }
