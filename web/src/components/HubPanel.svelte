@@ -12,9 +12,9 @@
   // through /api/hf/* — the browser only renders it.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
-  import { downloads, getJob, jobKey, optimisticallyAdd, cancelJob, startPolling, stopPolling } from '../lib/downloads.svelte.js';
+  import { downloads, getJob, jobKey, optimisticallyAdd, cancelJob, clearFinished, startPolling, stopPolling } from '../lib/downloads.svelte.js';
   import { prefs } from '../lib/prefs.svelte.js';
-  import { app } from '../lib/state.svelte.js';
+  import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
@@ -77,14 +77,24 @@
     'feature-extraction': ['Embeddings', 'slate'],
     'sentence-similarity': ['Embeddings', 'slate'],
   };
-  function taskBadge(pipelineTag) {
-    return TASK_BADGES[String(pipelineTag ?? '').toLowerCase()] ?? null;
+  // Falls back to Conversational whenever the server classified the model as
+  // chat (modelKind.js — filename heuristics, defaults to chat) but the raw
+  // pipeline_tag itself didn't match a specific badge above. Most GGUF-only
+  // repos have no pipeline_tag at all, so without this fallback the badge
+  // (and the model itself, see displayedResults below) would silently
+  // disappear for the majority of the actual catalog.
+  function taskBadge(pipelineTag, kind) {
+    return TASK_BADGES[String(pipelineTag ?? '').toLowerCase()]
+      ?? (kind === 'chat' ? ['Conversational', 'violet'] : null);
   }
 
   // Capability filter — client-side over whatever's already loaded, so it
-  // needs no server round trip. A row with no pipeline_tag (common on raw
-  // GGUF repos) only shows under "All"; that's the honest answer when we
-  // don't know its type, not a guess either way.
+  // needs no server round trip. Uses the server-computed `kind` (same
+  // classifier the LLM picker relies on, modelKind.js) rather than the raw
+  // pipeline_tag directly: HF very often has no pipeline_tag on GGUF-only
+  // repos, and that must not mean "hide it" — modelKind falls back to
+  // filename heuristics and defaults to chat, since that's what the
+  // overwhelming majority of untagged GGUF repos actually are.
   const TYPE_FILTERS = [
     ['all', 'All types'],
     ['chat', 'Text / Chat'],
@@ -93,18 +103,6 @@
     ['video', 'Video'],
     ['embed', 'Embeddings'],
   ];
-  const TYPE_OF_TAG = {
-    'text-generation': 'chat', 'text2text-generation': 'chat', conversational: 'chat',
-    'question-answering': 'chat', 'image-text-to-text': 'chat',
-    'visual-document-question-answering': 'chat', 'any-to-any': 'chat',
-    'text-to-image': 'image', 'image-to-image': 'image',
-    'unconditional-image-generation': 'image', inpainting: 'image',
-    'text-to-video': 'video', 'image-to-video': 'video',
-    'text-to-speech': 'audio', 'text-to-audio': 'audio',
-    'automatic-speech-recognition': 'audio', 'audio-to-audio': 'audio',
-    'audio-classification': 'audio',
-    'feature-extraction': 'embed', 'sentence-similarity': 'embed',
-  };
   let typeFilter = $state('all');
 
   const SORTS = [
@@ -146,6 +144,20 @@
     if (m === 'my-models' && !localModels.length) void loadLocal();
   }
 
+  // Downloads tab — every job the server knows about (running, queued,
+  // done, error, cancelled), not just the transient in-progress ones the
+  // floating jobbar shows while browsing. Newest first, active jobs pinned
+  // to the top so a stalled/errored download doesn't get lost in history.
+  const STATE_RANK = { running: 0, cancelling: 0, error: 1, done: 2, cancelled: 3 };
+  const allDownloads = $derived.by(() => [...downloads.values()].sort((a, b) => {
+    const r = (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9);
+    if (r) return r;
+    return (b.startedAt ?? 0) - (a.startedAt ?? 0);
+  }));
+  const activeDownloadCount = $derived(
+    [...downloads.values()].filter((j) => j.state === 'running' || j.state === 'cancelling').length,
+  );
+
   async function deleteLocalVariant(row, variant) {
     const ok = await confirmDialog({
       title: 'Delete model?',
@@ -163,6 +175,11 @@
       });
       toast(`Deleted — ${fmtBytes(r.freedBytes)} freed`, 'ok');
       await loadLocal();
+      // ModelPicker reads app.models from a separate store that only
+      // refreshes on its own actions — without this, a model deleted here
+      // keeps showing as pickable there until something else happens to
+      // reload it. Same ghost-entry issue as the router reload ordering fix.
+      void loadModels();
     } catch (e) {
       toast(e.error ?? e.message ?? 'delete failed', 'error');
     } finally {
@@ -210,7 +227,7 @@
 
   const isOwner = $derived(app.user?.role === 'owner');
   const displayedResults = $derived.by(() => {
-    const list = typeFilter === 'all' ? results : results.filter((m) => TYPE_OF_TAG[String(m.pipelineTag ?? '').toLowerCase()] === typeFilter);
+    const list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
     return sortedResults(list);
   });
   // If the filter drops the selected row out of view, follow the list rather
@@ -433,6 +450,15 @@
     await cancelJob(repoId, include);
   }
 
+  const DL_STATE_LABEL = {
+    running: 'downloading', cancelling: 'cancelling', done: 'done',
+    error: 'failed', cancelled: 'cancelled',
+  };
+  async function clearDownloadHistory() {
+    await clearFinished();
+    toast('cleared finished downloads', 'ok');
+  }
+
   /** Paste any `owner/repo` into the hub — validates and opens it directly. */
   async function addRepo() {
     const id = pasteId.trim().replace(/^https?:\/\/huggingface\.co\//, '').replace(/\/$/, '');
@@ -558,9 +584,12 @@
   <div class="modebar">
     <button class="modebtn" class:on={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
     <button class="modebtn" class:on={mode === 'my-models'} onclick={() => setMode('my-models')}>My Models</button>
+    <button class="modebtn" class:on={mode === 'downloads'} onclick={() => setMode('downloads')}>
+      Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
+    </button>
   </div>
 
-  {#if [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
+  {#if mode !== 'downloads' && [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
     <div class="jobbar-stack">
       {#each [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled') as j (j.key)}
         <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'}>
@@ -656,7 +685,7 @@
       <div class="list" bind:this={listEl}>
         <div class="lhead">Model</div>
         {#each displayedResults as m (m.id)}
-          {@const badge = taskBadge(m.pipelineTag)}
+          {@const badge = taskBadge(m.pipelineTag, m.kind)}
           <button class="rrow" class:active={selected === m.id} onclick={() => select(m.id)}>
             <span class="avatar" style={avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
               {#if !avatarFail.has(ownerOf(m.id))}
@@ -718,7 +747,7 @@
             </div>
           </div>
 
-          {@const dbadge = taskBadge(selectedModel.pipelineTag)}
+          {@const dbadge = taskBadge(selectedModel.pipelineTag, selectedModel.kind)}
           <div class="badges">
             {#if dbadge}<span class="badge task {dbadge[1]}">{dbadge[0]}</span>
             {:else if selectedModel.pipelineTag}<span class="badge">{selectedModel.pipelineTag}</span>{/if}
@@ -873,7 +902,7 @@
       </div>
     </div>
   {/if}
-  {:else}
+  {:else if mode === 'my-models'}
     <div class="mymodels">
       {#if localLoading}
         <div class="skeleton-list">
@@ -928,6 +957,49 @@
         </div>
       {/if}
     </div>
+  {:else}
+    <div class="downloadstab">
+      {#if !allDownloads.length}
+        <div class="empty nodetail">No downloads yet — grab a model from Discover.</div>
+      {:else}
+        <div class="mmhead">
+          <span>{activeDownloadCount} active · {allDownloads.length} total</span>
+          <button class="ghost" onclick={() => clearDownloadHistory()}>Clear finished</button>
+        </div>
+        <div class="mmlist">
+          {#each allDownloads as j (j.key)}
+            <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'}>
+              <div class="jtop">
+                <span class="jrepo mono">{j.repoId}</span>
+                {#if j.variant}<span class="jvariant mono">{j.variant}</span>{/if}
+                <span class="dltag {j.state}">{DL_STATE_LABEL[j.state] ?? j.state}</span>
+                {#if j.state === 'running' || j.state === 'cancelling'}
+                  <button class="ghost" onclick={() => cancel(j.repoId, j.include)} title="Cancel"><Square size={13} /></button>
+                {/if}
+              </div>
+              <span class="jline mono">
+                {#if j.state === 'error'}
+                  {j.error}
+                {:else if j.state === 'running' && j.downloadedBytes > 0}
+                  {fmtBytes(j.downloadedBytes)}{j.totalBytes ? ` / ${fmtBytes(j.totalBytes)}` : ''}{j.speedBytesPerSec ? ` · ${fmtSpeed(j.speedBytesPerSec)}` : ''}{j.etaSec != null ? ` · ${fmtEta(j.etaSec)} left` : ''}
+                {:else if j.state === 'done'}
+                  {j.totalBytes ? fmtBytes(j.totalBytes) : ''}{j.finishedAt ? ` · finished ${fmtAgo(new Date(j.finishedAt).toISOString())}` : ''}
+                {:else if j.state === 'cancelled'}
+                  cancelled{j.finishedAt ? ` ${fmtAgo(new Date(j.finishedAt).toISOString())}` : ''}
+                {:else}
+                  {j.state === 'cancelling' ? 'cancelling…' : 'starting…'}
+                {/if}
+              </span>
+              {#if j.state === 'running' && j.totalBytes}
+                <div class="jbar"><div class="jfill" style="width:{Math.min(100, (j.downloadedBytes / j.totalBytes) * 100)}%"></div></div>
+              {:else if j.state === 'running'}
+                <div class="jbar indeterminate"></div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -972,6 +1044,10 @@
   }
   .modebtn:hover { color: var(--text-dim); }
   .modebtn.on { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+  .modebadge {
+    display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; background: var(--accent); color: var(--bg);
+  }
 
   /* My Models — everything on disk, independent of the router preset ini */
   .mymodels { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
@@ -1019,6 +1095,18 @@
     animation: indeterminate 1.2s ease-in-out infinite;
   }
   @keyframes indeterminate { 0% { left: -30%; } 100% { left: 100%; } }
+
+  /* Downloads tab — full job history (running/done/error/cancelled), not
+     just the transient in-progress rows the floating jobbar shows. */
+  .downloadstab { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+  .dltag {
+    font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;
+  }
+  .dltag.running, .dltag.cancelling { background: var(--accent-glow); color: var(--accent); }
+  .dltag.done { background: color-mix(in srgb, var(--green) 22%, transparent); color: var(--green); }
+  .dltag.error { background: color-mix(in srgb, var(--red) 22%, transparent); color: var(--red); }
+  .dltag.cancelled { background: var(--bg-hover); color: var(--text-faint); }
 
   .toolbar {
     flex-shrink: 0; display: flex; align-items: center; gap: 12px;
