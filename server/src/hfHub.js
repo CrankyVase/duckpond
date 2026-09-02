@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { gpuVram } from './llama.js';
 import { modelParamsB } from './modelDescribe.js';
 import { downloadBusy } from './downloadManager.js';
+import { modelKind } from './modelKind.js';
 
 const HF_API = 'https://huggingface.co';
 const HF_CLI = process.env.HF_CLI ?? '/home/cranky/.local/bin/hf';
@@ -57,6 +58,10 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
     likes: m.likes ?? 0,
     downloads: m.downloads ?? 0,
     pipelineTag: m.pipeline_tag ?? null,
+    // pipeline_tag is frequently missing on GGUF-only repos — kind falls
+    // back to filename heuristics and defaults to chat rather than hiding
+    // the model, same classifier the LLM picker uses (modelKind.js).
+    kind: modelKind(m.id, m.pipeline_tag),
     gated: !!m.gated,
     private: !!m.private,
     updatedAt: m.lastModified ?? null,
@@ -165,6 +170,7 @@ export async function modelInfo(repoId) {
     likes: m.likes ?? 0,
     downloads: m.downloads ?? 0,
     pipelineTag: m.pipeline_tag ?? null,
+    kind: modelKind(m.id, m.pipeline_tag),
     gated: !!m.gated,
     private: !!m.private,
     license: m.cardData?.license ?? null,
@@ -466,7 +472,12 @@ export function deleteVariant(repoId, { include } = {}) {
       deleted.push(name);
     } catch { /* snapshot entry vanished mid-delete — skip */ }
   }
-  return { freedBytes, deleted };
+  // A single downloaded quant can still have its own router preset alias —
+  // strip those too, same as the whole-repo delete below, so the picker
+  // doesn't keep listing a quant whose file just got unlinked.
+  let presetRemoved = 0;
+  for (const name of deleted) presetRemoved += removeRouterPresetSectionsByPath(join(snapDir, name));
+  return { freedBytes, deleted, presetRemoved };
 }
 
 // ---------------------------------------------------------------------------

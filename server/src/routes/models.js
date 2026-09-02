@@ -1,11 +1,12 @@
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
-import { gpuVram, listModels, loadModel, unloadModel } from '../llama.js';
+import { gpuVram, listModels, loadModel, reloadRouterModels, removeModel, unloadModel } from '../llama.js';
 import { ctxBlurb, describeModel } from '../modelDescribe.js';
 import { cardFor, queueCardFetch } from '../modelCards.js';
 import { isRemoteId, parseCaps, parseRemoteId, syncStaleProviders } from '../providers.js';
 import { TOOL_CATALOG } from '../toolCatalog.js';
-import { deleteModelRepoByPath, removeRouterPresetSections } from '../hfHub.js';
+import { deleteModelFileByPath, deleteModelRepoByPath, removeRouterPresetSections, removeRouterPresetSectionsByPath } from '../hfHub.js';
+import { modelKind } from '../modelKind.js';
 
 // Defaults per spec §1; overridable per model, stored in model_settings.
 export const DEFAULT_SETTINGS = {
@@ -66,6 +67,7 @@ function remoteModels() {
     return {
       id,
       remote: true,
+      kind: 'chat',
       status: 'remote',
       args: [],
       ctxSize: r.context_length,
@@ -74,6 +76,7 @@ function remoteModels() {
       maxOutput: r.max_output,
       caps,
       favorite: !!r.favorite,
+      kind: 'chat',
       label: r.label ?? null,
       note: r.note ?? null,
       settings: modelSettings(id),
@@ -109,11 +112,23 @@ export default async function modelRoutes(app) {
         h.blurb = [card.blurb, ctxBlurb(m.ctxSize)].filter(Boolean).join(' ');
         h.card = { repo: card.repo, url: card.url };
       }
-      return { ...m, settings: modelSettings(m.id), ...h };
+      return {
+        ...m,
+        kind: modelKind(m.id, card?.pipeline_tag),
+        settings: modelSettings(m.id),
+        ...h,
+      };
     });
+    // the LLM picker gets only chat models — image/embed/audio/other kinds
+    // have their own slots (media studio, speech lab, embed service)
+    const chat = local.filter((m) => m.kind === 'chat');
+    const hidden = local.filter((m) => m.kind !== 'chat');
+    if (hidden.length) {
+      req.log.info({ hidden: hidden.map((m) => `${m.id} → ${m.kind}`) }, 'non-chat models hidden from the LLM picker');
+    }
     let remote = [];
     try { remote = remoteModels(); } catch (err) { req.log.warn({ err }, 'remote catalog read failed'); }
-    return [...local, ...remote];
+    return [...chat, ...remote];
   });
 
   app.post('/api/models/:id/load', async (req, reply) => {
@@ -124,14 +139,23 @@ export default async function modelRoutes(app) {
 
   app.post('/api/models/:id/unload', async (req, reply) => {
     if (isRemoteId(req.params.id)) return reply.code(400).send({ error: 'remote models run on the provider — nothing to unload' });
-    await unloadModel(req.params.id);
-    return { ok: true };
+    try {
+      await unloadModel(req.params.id);
+      return { ok: true };
+    } catch (err) {
+      // Idempotent: the picker's state can lag the router by a few seconds
+      // (unloads are async server-side), and unloading an already-unloaded
+      // model is exactly what the user asked for — success, not a 500.
+      if (/not running/i.test(String(err.message))) return { ok: true, already: true };
+      throw err;
+    }
   });
 
-  // Delete a local model from disk: unload if resident, then remove the HF
-  // cache repo dir the router's --model path points into (all quants of that
-  // GGUF repo), then strip matching sections from the router preset ini so
-  // the aliases stop showing up. Owner-only — it frees real gigabytes.
+  // Delete a local model from DISK: unload if resident, then remove the files
+  // — the whole HF cache repo dir (all quants) when the model lives in the
+  // HF cache, or the gguf itself (plus split-shard siblings) when it lives in
+  // a plain model dir. Either way the matching router preset sections are
+  // stripped so the alias stops listing. Owner-only — it frees real gigabytes.
   // (Wildcard like the PUT below: find-my-way only allows '*' last, and this
   // sits next to it; local ids never contain slashes anyway.)
   app.delete('/api/models/*', async (req, reply) => {
@@ -143,19 +167,46 @@ export default async function modelRoutes(app) {
       const models = await listModels();
       const m = models.find((x) => x.id === id);
       if (m) {
-        const i = (m.args ?? []).indexOf('--model');
-        modelPath = i >= 0 ? m.args[i + 1] : null;
+        const args = m.args ?? [];
+        const i = Math.max(args.indexOf('--model'), args.indexOf('-m'));
+        modelPath = i >= 0 ? args[i + 1] : null;
       }
     } catch { /* router down — can't resolve the file path */ }
     if (!modelPath) return reply.code(404).send({ error: 'router does not report a file path for this model' });
     await unloadModel(id).catch(() => {});   // release the mmap before rm
     let del;
-    try { del = deleteModelRepoByPath(modelPath); }
-    catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
+    try {
+      del = deleteModelRepoByPath(modelPath);            // HF cache → whole repo
+    } catch (e) {
+      if (e.status !== 400 || !/outside the HF cache/.test(e.message)) {
+        return reply.code(e.status ?? 500).send({ error: e.message });
+      }
+      try { del = deleteModelFileByPath(modelPath); }    // plain dir → gguf + shards
+      catch (e2) { return reply.code(e2.status ?? 500).send({ error: e2.message }); }
+    }
     let presetRemoved = 0;
-    try { presetRemoved = removeRouterPresetSections(del.repoDir); }
-    catch (e) { req.log.warn({ err: e }, 'could not update router preset after model delete'); }
-    return { ok: true, repoId: del.repoId, freedBytes: del.freedBytes, presetRemoved };
+    try {
+      presetRemoved = del.repoDir
+        ? removeRouterPresetSections(del.repoDir)
+        : removeRouterPresetSectionsByPath(modelPath);
+    } catch (e) { req.log.warn({ err: e }, 'could not update router preset after model delete'); }
+    // Drop the alias from the RUNNING router now that the ini is actually
+    // edited: the preset reload only picks up a change that already
+    // happened, so it must run AFTER the section strip above, not before —
+    // reloading first (against the still-intact ini) reloads nothing, and
+    // the router then never gets told again, leaving a ghost entry in the
+    // picker for a model that's already deleted from disk. Dynamically-added
+    // (cache) models aren't preset-backed, so also try the explicit remove;
+    // both are best-effort.
+    await reloadRouterModels().catch(() => {});
+    await removeModel(id).catch(() => {});
+    return {
+      ok: true,
+      repoId: del.repoId ?? null,
+      deleted: del.deleted ?? null,
+      freedBytes: del.freedBytes,
+      presetRemoved,
+    };
   });
 
   // Remote ids can contain slashes (e.g. r1:anthropic/claude-3.5), and
