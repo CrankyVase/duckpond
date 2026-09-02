@@ -138,16 +138,49 @@ export async function countInputTokens(model, messages) {
   return r.input_tokens ?? r.prompt_tokens ?? r.tokens ?? null;
 }
 
+// A dropped connection to the router — the process asleep after
+// --sleep-idle-seconds, mid-swap between models, or a plain TCP hiccup —
+// throws before a single byte of the reply exists. Retrying that is free;
+// retrying anything else (a real 500 from a broken GGUF, a context-length
+// rejection) just delays the same failure, so this stays narrow: fetch-level
+// network errors and 503 (the router's own "busy/loading" status) only.
+function isRetryableLocalError(err) {
+  const msg = String(err?.message ?? err);
+  if (/^llama chat 503\b/.test(msg)) return true;
+  return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up/i.test(msg);
+}
+const LOCAL_RETRY_MAX = 3;
+const LOCAL_RETRY_BASE_MS = 500;
+
 // Streaming chat completion. Calls onDelta(textChunk, meta) per SSE chunk and
 // returns { content, timings, usage } when done. abortSignal cancels generation.
-// onEvent: optional side-channel ({type:'fallback', from, to, reason}) so
-// callers can toast/log chain hops; every caller gets fallback either way.
+// onEvent: optional side-channel ({type:'fallback'|'retry', ...}) so callers
+// can toast/log chain hops and reconnects; every caller gets both either way.
 export async function streamChat({ model, messages, params = {}, onDelta, abortSignal, onEvent }) {
   if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal, onEvent });
   const act = markUse(model);
   act.active++;
   try {
-    return await streamChatInner({ model, messages, params, onDelta, abortSignal });
+    let lastErr;
+    // Same shape as remoteCall's fallback loop: only while nothing has
+    // streamed yet — a half-delivered reply never restarts.
+    for (let attempt = 1; attempt <= LOCAL_RETRY_MAX; attempt++) {
+      let emitted = false;
+      const trackDelta = (chunk, meta) => {
+        if (chunk || meta?.reasoning || meta?.toolFrag) emitted = true;
+        return onDelta?.(chunk, meta);
+      };
+      try {
+        return await streamChatInner({ model, messages, params, onDelta: trackDelta, abortSignal });
+      } catch (err) {
+        lastErr = err;
+        const more = attempt < LOCAL_RETRY_MAX;
+        if (!more || emitted || abortSignal?.aborted || !isRetryableLocalError(err)) throw err;
+        onEvent?.({ attempt, type: 'retry', reason: String(err.message ?? err).slice(0, 200) });
+        await new Promise((r) => setTimeout(r, LOCAL_RETRY_BASE_MS * attempt));
+      }
+    }
+    throw lastErr;
   } finally {
     act.active--;
     act.lastUsed = Date.now();

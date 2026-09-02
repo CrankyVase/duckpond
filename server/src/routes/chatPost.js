@@ -461,6 +461,14 @@ export function registerChatPost(app) {
       // fallback-chain hops: toast the user + ledger entry (the retried turn
       // bills under the new model via recordUsage, so no cost rows needed here)
       const fbNotice = (info) => {
+        if (info?.type === 'retry') {
+          // Local-only (llama.js never emits this for remote calls): a dropped
+          // connection to the router before anything streamed — sleeping model
+          // waking up, a swap between models, a TCP hiccup. Surfaced so a retry
+          // reads as "reconnecting" instead of the turn silently taking longer.
+          send({ type: 'notice', message: `Connection to the model dropped (${info.reason}) — reconnecting…` });
+          return;
+        }
         if (info?.type !== 'fallback') return;
         send({ type: 'notice', message: `${info.from} failed (${info.reason}) — falling back to ${info.to}` });
         if (!remote) return;

@@ -75,7 +75,23 @@ adopting LM Studio's title/subTitle/info row style here for the per-task
 knobs (steps, size, frames/fps, duration) instead of bare labeled inputs.
 Lower complexity — mostly cosmetic once #1's data is available.
 
-### 5. Hub quant-row cosmetic borrows from LM Studio
+### 5. Rankings tab — coding score, benchmark leaderboards
+Requested 2026-09-02: a tab (alongside Unsloth/Popular/Image/Audio/Video)
+that ranks models by benchmark scores (coding score, Chatbot Arena-style
+Elo, etc.), plus surfacing that same signal as a sortable/visible thing on
+the main Discover list too. **Blocked on a decision, not just effort**: HF's
+own model API has no benchmark-score field — this needs pulling from an
+external leaderboard source (LMSYS Chatbot Arena, HF Open LLM Leaderboard,
+Aider's coding leaderboard, LiveBench, etc.), which is a hosted external API
+DuckPond doesn't currently call — per standing rule, wiring any of those in
+needs the user's explicit go-ahead first, every time, not just once. Also
+non-trivial matching-wise even once approved: leaderboards rank BASE models,
+not the GGUF quant repos Discover actually lists, so a repo would need
+fuzzy-matching back to its base model (the existing quant-maker plumbing
+already resolves that direction once, could maybe be reused) before a score
+could attach to it.
+
+### 6. Hub quant-row cosmetic borrows from LM Studio
 Small, self-contained: append "(Recommended)" directly into the recommended
 row's label text (LM Studio does this instead of/alongside a separate badge),
 and consider a "Staff Pick" style badge for curated/Popular-tab entries
