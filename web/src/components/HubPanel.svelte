@@ -765,6 +765,7 @@
                     <span class="qtrigger" class:active={picked.downloaded}>
                       <span class="fiticon {FIT[picked.fit]?.icon ?? 'sky'}" title={FIT[picked.fit]?.tip ?? ''}><Info size={13} /></span>
                       <span class="mono">{picked.quant ?? picked.name}</span>
+                      {#if v.recommended && picked.include === v.recommended}<span class="reclabel">Recommended</span>{/if}
                     </span>
                     {#if picked.downloaded}<span class="dottag success"><span class="dot"></span>On device</span>{/if}
                     {#if picked.fit && FIT[picked.fit]}<span class="fitpill {picked.fit}" title={FIT[picked.fit].tip}>{FIT[picked.fit].label}</span>{/if}
@@ -804,6 +805,7 @@
                     <span class="qleft">
                       <span class="fiticon {FIT[row.fit]?.icon ?? 'sky'}" title={FIT[row.fit]?.tip ?? ''}><Info size={13} /></span>
                       <span class="mono qname">{row.quant ?? row.name}</span>
+                      {#if v.recommended && row.include === v.recommended}<span class="reclabel">Recommended</span>{/if}
                       {#if row.downloaded}
                         <span class="dottag success"><span class="dot"></span>On device</span>
                       {/if}
@@ -1228,6 +1230,7 @@
     font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
   }
   .qtrigger.active { color: var(--accent); }
+  .reclabel { font-size: 10.5px; font-weight: 600; color: var(--accent); white-space: nowrap; }
   .fiticon { display: inline-flex; align-items: center; cursor: help; }
   .fiticon.emerald { color: #34d399; }
   .fiticon.amber { color: var(--yellow); }
