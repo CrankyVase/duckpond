@@ -25,7 +25,42 @@
   `diffusion_engine_router`. It's a hand-rolled dispatcher sitting next to
   Unsloth's actual family-detection/build-check code, not on top of it.
 
-## 1. Todos — most complex → least complex
+## 1. Done this round (2026-09-02)
+
+- **Avatar tinting bug** — every avatar was tinted a random per-owner hue,
+  which bled through transparent-PNG org logos and turned clean brand icons
+  into colored smudges. Hue now reserved for the no-image fallback only; real
+  logos sit on a plain light tile like Unsloth's/LM Studio's, bumped bigger
+  (48px list / 72px detail).
+- **Task-type badges** — `pipeline_tag` mapped to Unsloth's own vocabulary
+  ("Conversational" etc.), colored dot on list rows + full badge on the
+  detail pane, so a model's type reads at a glance.
+- **Type + Sort filters** — client-side over whatever's already loaded (no
+  backend round trip): filter by chat/image/audio/video/embeddings, sort by
+  downloads/likes/newest.
+- **Hardened search box** reinstated on Discover (see notes/HUB-2.md's
+  original removal) — randomized per-mount field name + the
+  lpignore/1p-ignore/bwignore/autocomplete-off quartet, debounced 350ms.
+  User explicitly approved this after the "no free-text inputs" rule.
+- **"My Models" tab** — server-side disk scan (`server/src/localInventory.js`)
+  across the whole HF cache + plain model dirs, `/api/hf/local(+delete)`
+  route, independent of the router's preset ini.
+- **Quant list collapses** behind the picked-quant summary row (chevron,
+  matches Unsloth's own screenshot) instead of always rendering everything;
+  downloaded rows dropped a redundant duplicate "on device" icon.
+- **"(Recommended)" inline label** on whichever quant Hub auto-picked, LM
+  Studio-style.
+- **Local-generation retry** (`llama.js: streamChat`) — a dropped connection
+  to the router (sleeping model waking up, mid-swap, TCP hiccup) now retries
+  up to 3x with backoff, only while nothing has streamed yet, only on
+  network-level errors or a 503 — not on a real model-load failure. Surfaces
+  as a "reconnecting…" notice instead of a hard error. This was the
+  session's "pet peeve" ask; check back if errors during generation persist,
+  since not every failure mode is a dropped connection (a genuinely broken
+  GGUF, e.g. an unsupported experimental quant, still fails immediately and
+  correctly — that's not a bug).
+
+## 2. Todos — most complex → least complex
 
 ### 1. Reuse Unsloth's own inference engine code in the media bridge
 Right now `bridge.py` hand-rolls model → pipeline dispatch. Unsloth's
@@ -55,17 +90,7 @@ keep every existing feature, just re-house it. This is the concrete answer to
 complexity because it's 1302 lines of stateful UI to re-partition without
 breaking any of the existing effects/api calls.
 
-### 3. Model Hub: add a "My Models" tab (LM Studio's biggest structural difference)
-LM Studio splits Discover (search/browse — what HubPanel already does) from
-My Models (a dedicated downloaded-inventory view: table of on-device models,
-size, quant, last-used, with Use-in-New-Chat / Load Model / Delete actions).
-DuckPond currently only surfaces "downloaded" as a badge buried inside a
-model's quant list — there's no page that just lists everything already on
-disk. Needs a new server endpoint (check `hfHub.js` — `groupVariants` /
-`deleteModelRepoByPath` exist but there's no "list everything on disk"
-aggregate route yet) and a new tab in HubPanel. Medium complexity: mostly new
-UI, but the disk-scan aggregation may not exist server-side yet and needs
-checking before assuming it's a pure frontend job.
+### ~~3. Model Hub: add a "My Models" tab~~ — done, see §1
 
 ### 4. Media Studio panel polish
 Once #1 lands, the model list MediaPanel.svelte shows should come from the
@@ -91,16 +116,14 @@ fuzzy-matching back to its base model (the existing quant-maker plumbing
 already resolves that direction once, could maybe be reused) before a score
 could attach to it.
 
-### 6. Hub quant-row cosmetic borrows from LM Studio
-Small, self-contained: append "(Recommended)" directly into the recommended
-row's label text (LM Studio does this instead of/alongside a separate badge),
-and consider a "Staff Pick" style badge for curated/Popular-tab entries
-(LM Studio's `staffPick` boolean on search results) distinct from the existing
-Unsloth-owner verified checkmark. Lowest complexity — pure template/CSS
-changes to HubPanel.svelte, no new backend data needed since "Popular" is
-already a curated allowlist server-side.
+### 6. Staff Pick style badge (the rest of the old #6 — "(Recommended)" is done)
+Consider a "Staff Pick" style badge for curated/Popular-tab entries (LM
+Studio's `staffPick` boolean on search results) distinct from the existing
+Unsloth-owner verified checkmark. Lowest complexity — pure template/CSS,
+no new backend data needed since "Popular" is already a curated allowlist
+server-side.
 
-## 2. Reference: exact vocabulary pulled from LM Studio (for #5, and general flavor)
+## 3. Reference: exact vocabulary pulled from LM Studio (for #5, and general flavor)
 
 Fit tiers (`modelSearchResultDownloadOptionFitEstimationSchema`, a 4-way enum
 vs. Unsloth/DuckPond's 5-way fits/marginal/partial/ram/oom):
@@ -132,7 +155,7 @@ Search result identifier is a discriminated union of `catalog` (LM Studio's
 own curated set) vs `hf` (raw HuggingFace) — mirrors DuckPond's existing
 Unsloth-tab/Popular-tab vs raw-search split, so no new concept needed there.
 
-## 3. Reference: Unsloth internals worth knowing about (beyond what's already borrowed)
+## 4. Reference: Unsloth internals worth knowing about (beyond what's already borrowed)
 
 - `core/inference/offload_planner.py` — `-ot` tensor-level spill planner
   (spills FFN blocks to host RAM while keeping KV cache resident, instead of
