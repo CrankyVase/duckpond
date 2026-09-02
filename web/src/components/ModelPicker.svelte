@@ -77,6 +77,7 @@
   // capture focus anymore, and window-level means Ctrl+K/Escape/arrows all
   // work regardless of what has focus.
   let listEl = $state(null);
+  let rootEl = $state(null); // .picker root — clicks outside it close the menu
   $effect(() => {
     if (!app.modelPickerOpen) return;
     const onKey = (e) => {
@@ -91,11 +92,42 @@
     return () => window.removeEventListener('keydown', onKey);
   });
 
+  // Click-outside: a document-level pointerdown beats the old fixed backdrop
+  // div, which sat above the toggle button (z-index 40 vs none) so the button
+  // itself could never receive the "click it again" toggle, and overlays with
+  // their own stacking could eat the backdrop click entirely. The toggle
+  // button and menu live inside rootEl, so their pointerdowns are ignored.
+  $effect(() => {
+    if (!app.modelPickerOpen) return;
+    const onDocPointer = (e) => {
+      if (rootEl && e.target instanceof Node && rootEl.contains(e.target)) return;
+      app.modelPickerOpen = false;
+    };
+    document.addEventListener('pointerdown', onDocPointer, true);
+    return () => document.removeEventListener('pointerdown', onDocPointer, true);
+  });
+
   async function pick(m) {
     app.modelPickerOpen = false;
     if (!app.conv || app.conv.model_id === m.id) return;
+    const prevLocal = app.models.find((x) => x.id === app.conv.model_id && !x.remote);
     app.conv.model_id = m.id;
     await api(`/api/conversations/${app.conv.id}`, { method: 'PATCH', body: { model_id: m.id } });
+    // Switching models is a VRAM switch, not just a label: ask the router to
+    // load the new model now — with --models-max 1 it preempts the previously
+    // loaded one, which is exactly what "where did the old model go" expects.
+    // Fire-and-forget: generation would trigger the same load lazily anyway.
+    if (!m.remote) {
+      api(`/api/models/${m.id}/load`, { method: 'POST', body: {} })
+        .catch(() => { /* lazy load on next message instead */ });
+      setTimeout(loadModels, 2500);
+      setTimeout(loadModels, 8000);
+    } else if (prevLocal) {
+      // leaving a local model for a remote one — free the VRAM right away
+      api(`/api/models/${prevLocal.id}/unload`, { method: 'POST', body: {} })
+        .catch(() => { /* idle reaper gets it in 10 min */ });
+      setTimeout(loadModels, 2500);
+    }
     loadModels();
   }
 
@@ -127,6 +159,10 @@
     } finally {
       unloading = null;
       loadModels();
+      // the router frees the model asynchronously — re-check so the dot/eject
+      // state doesn't lie about what's still in VRAM
+      setTimeout(loadModels, 2500);
+      setTimeout(loadModels, 6000);
     }
   }
 
@@ -171,7 +207,7 @@
   }
 </script>
 
-<div class="picker">
+<div class="picker" bind:this={rootEl}>
   <button class="current" onclick={() => (app.modelPickerOpen = !app.modelPickerOpen)}
     title="Switch model (Ctrl+K)">
     <span class="dot" style="background:{dot(current?.status)}"></span>
@@ -180,8 +216,6 @@
   </button>
 
   {#if app.modelPickerOpen}
-    <div class="backdrop" onclick={() => (app.modelPickerOpen = false)}
-      role="presentation"></div>
     <div class="menu slide-up">
       <div class="list" bind:this={listEl} role="listbox">
         {#each groups as g (g.label)}
@@ -285,7 +319,6 @@
   .chev { color: var(--text-faint); display: grid; place-items: center; transition: transform 180ms ease; flex-shrink: 0; }
   .chev.flip { transform: rotate(180deg); }
   .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; transition: background 300ms ease; }
-  .backdrop { position: fixed; inset: 0; z-index: 40; }
   .menu {
     position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
     width: 400px; max-width: min(400px, calc(100vw - 16px));
