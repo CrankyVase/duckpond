@@ -18,6 +18,7 @@
   import { toast } from '../lib/toast.svelte.js';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Info from '@lucide/svelte/icons/info';
   import SearchIcon from '@lucide/svelte/icons/search';
   import Square from '@lucide/svelte/icons/square';
@@ -222,6 +223,11 @@
   const selectedQuantizers = $derived(selected ? quantizers.get(selected) : null);
   const activeRepo = $derived(selected ? (quantRepo.get(selected) ?? selected) : null);
   const selectedVariants = $derived(activeRepo ? variants.get(activeRepo) : null);
+  // The full quant list is collapsed behind the picked-quant summary row by
+  // default — Unsloth's own Hub layout — and closes again on every new
+  // model so it doesn't stay pinned open while browsing.
+  let quantOpen = $state(false);
+  $effect(() => { activeRepo; quantOpen = false; });
   // Live VRAM readout from whichever variant payload last landed — Unsloth's
   // header stat pill.
   const vramLabel = $derived.by(() => {
@@ -751,7 +757,10 @@
             {:else if v}
               {@const picked = pickedVariant(v)}
               <div class="vhead">
-                <span class="vpicklabel">
+                <span class="vpicklabel" onclick={() => (quantOpen = !quantOpen)}
+                  role="button" tabindex="0"
+                  onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (quantOpen = !quantOpen)}>
+                  <ChevronDown size={14} class={quantOpen ? 'qchevron open' : 'qchevron'} />
                   {#if picked}
                     <span class="qtrigger" class:active={picked.downloaded}>
                       <span class="fiticon {FIT[picked.fit]?.icon ?? 'sky'}" title={FIT[picked.fit]?.tip ?? ''}><Info size={13} /></span>
@@ -785,6 +794,7 @@
                   {/if}
                 {/if}
               </div>
+              {#if quantOpen}
               <div class="qlist">
                 {#each sortedVariants(v) as row (row.include ?? row.name)}
                   <div class="qrow" class:sel={v.pick === row.include} class:loaded={row.downloaded}
@@ -808,9 +818,6 @@
                       <span class="qsize mono">{fmtBytes(row.size)}</span>
                       {#if isOwner && row.include != null}
                         {#if row.downloaded}
-                          <span class="qdl done" title="On device">
-                            <Download size={13} />
-                          </span>
                           <button class="qdel" disabled={deleting === row.include}
                             onclick={(e) => { e.stopPropagation(); deleteVariant(activeRepo, row.include, row.name); }}
                             title="Delete">
@@ -842,6 +849,7 @@
                   </div>
                 {/each}
               </div>
+              {/if}
             {/if}
           </div>
           {#if activeRepo && activeRepo !== selectedModel.id}
@@ -1212,7 +1220,9 @@
     padding-bottom: 10px; margin-bottom: 8px;
     border-bottom: 1px solid var(--border-soft);
   }
-  .vpicklabel { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .vpicklabel { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
+  .vpicklabel :global(.qchevron) { color: var(--text-faint); flex-shrink: 0; transition: transform 160ms ease; }
+  .vpicklabel :global(.qchevron.open) { transform: rotate(180deg); }
   .qtrigger {
     display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
     font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
