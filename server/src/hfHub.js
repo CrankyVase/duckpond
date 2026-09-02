@@ -86,7 +86,10 @@ export async function popularModels({ limit = 30, sinceMs = THIRTY_DAYS_MS } = {
       if (seen.has(m.id)) continue;
       if (!m.updatedAt || new Date(m.updatedAt).getTime() < cutoff) continue;
       seen.add(m.id);
-      out.push(m);
+      // LM Studio's staffPick flag, mapped onto this tab: it's already a
+      // curated big-name-owner allowlist rather than raw trending, so every
+      // row here earned the same "someone picked this" badge that implies.
+      out.push({ ...m, curated: true });
     }
   }
   out.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());

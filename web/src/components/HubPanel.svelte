@@ -22,6 +22,7 @@
   import Info from '@lucide/svelte/icons/info';
   import SearchIcon from '@lucide/svelte/icons/search';
   import Square from '@lucide/svelte/icons/square';
+  import Sparkles from '@lucide/svelte/icons/sparkles';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import X from '@lucide/svelte/icons/x';
 
@@ -668,6 +669,7 @@
               <span class="rname">
                 {m.id.split('/').pop()}
                 <span class="dots">
+                  {#if m.curated}<span class="staffpick" title="Staff Pick"><Sparkles size={11} /></span>{/if}
                   {#if badge}<span class="dot task {badge[1]}" title={badge[0]}></span>{/if}
                   {#if m.id.toLowerCase().includes('gguf')}<span class="dot gguf" title="GGUF"></span>{/if}
                   {#if m.gated}<span class="dot warn" title="Gated repo — access request needed"></span>{/if}
@@ -1151,6 +1153,7 @@
   .dots { display: inline-flex; gap: 4px; flex-shrink: 0; }
   .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .dot.gguf { background: #7c6ff0; }
+  .staffpick { display: inline-flex; color: var(--yellow); flex-shrink: 0; }
   .dot.warn { background: var(--yellow); }
   /* task-type colors — shared between the list-row dot and the detail badge */
   .dot.task.violet { background: #a78bfa; }
