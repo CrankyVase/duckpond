@@ -49,6 +49,76 @@
     'Kimi', 'DeepSeek', 'Qwen', 'Llama', 'GLM', 'MiniMax', 'Gemma', 'Mistral', 'GPT-OSS', 'Phi',
   ];
 
+  // Task-type badge — HF's pipeline_tag, mapped to Unsloth's own vocabulary
+  // ("Conversational" for a chat model, etc.) and a color so a card reads at
+  // a glance instead of needing pipelineTag spelled out raw.
+  const TASK_BADGES = {
+    'text-generation': ['Conversational', 'violet'],
+    'text2text-generation': ['Conversational', 'violet'],
+    conversational: ['Conversational', 'violet'],
+    'question-answering': ['Conversational', 'violet'],
+    'image-text-to-text': ['Vision + Text', 'teal'],
+    'visual-document-question-answering': ['Vision + Text', 'teal'],
+    'any-to-any': ['Multimodal', 'teal'],
+    'text-to-image': ['Image Generation', 'pink'],
+    'image-to-image': ['Image Generation', 'pink'],
+    'unconditional-image-generation': ['Image Generation', 'pink'],
+    inpainting: ['Image Generation', 'pink'],
+    'text-to-video': ['Video Generation', 'pink'],
+    'image-to-video': ['Video Generation', 'pink'],
+    'text-to-speech': ['Speech', 'amber'],
+    'text-to-audio': ['Audio', 'amber'],
+    'automatic-speech-recognition': ['Speech Recognition', 'amber'],
+    'audio-to-audio': ['Audio', 'amber'],
+    'audio-classification': ['Audio', 'amber'],
+    'feature-extraction': ['Embeddings', 'slate'],
+    'sentence-similarity': ['Embeddings', 'slate'],
+  };
+  function taskBadge(pipelineTag) {
+    return TASK_BADGES[String(pipelineTag ?? '').toLowerCase()] ?? null;
+  }
+
+  // Capability filter — client-side over whatever's already loaded, so it
+  // needs no server round trip. A row with no pipeline_tag (common on raw
+  // GGUF repos) only shows under "All"; that's the honest answer when we
+  // don't know its type, not a guess either way.
+  const TYPE_FILTERS = [
+    ['all', 'All types'],
+    ['chat', 'Text / Chat'],
+    ['image', 'Image'],
+    ['audio', 'Audio / Speech'],
+    ['video', 'Video'],
+    ['embed', 'Embeddings'],
+  ];
+  const TYPE_OF_TAG = {
+    'text-generation': 'chat', 'text2text-generation': 'chat', conversational: 'chat',
+    'question-answering': 'chat', 'image-text-to-text': 'chat',
+    'visual-document-question-answering': 'chat', 'any-to-any': 'chat',
+    'text-to-image': 'image', 'image-to-image': 'image',
+    'unconditional-image-generation': 'image', inpainting: 'image',
+    'text-to-video': 'video', 'image-to-video': 'video',
+    'text-to-speech': 'audio', 'text-to-audio': 'audio',
+    'automatic-speech-recognition': 'audio', 'audio-to-audio': 'audio',
+    'audio-classification': 'audio',
+    'feature-extraction': 'embed', 'sentence-similarity': 'embed',
+  };
+  let typeFilter = $state('all');
+
+  const SORTS = [
+    ['relevance', 'Relevance'],
+    ['downloads', 'Most downloads'],
+    ['likes', 'Most likes'],
+    ['newest', 'Newest'],
+  ];
+  let sortBy = $state('relevance');
+  function sortedResults(list) {
+    if (sortBy === 'relevance') return list;
+    const key = sortBy === 'newest'
+      ? (m) => (m.updatedAt ? new Date(m.updatedAt).getTime() : 0)
+      : (m) => Number(m[sortBy]) || 0;
+    return [...list].sort((a, b) => key(b) - key(a));
+  }
+
   // Discover (search/browse — everything below) vs My Models (what's already
   // on disk, independent of the router's preset ini). The split LM Studio and
   // Unsloth Studio both make; see notes/HUB-3.md.
@@ -136,6 +206,17 @@
   let listEl = $state(null);
 
   const isOwner = $derived(app.user?.role === 'owner');
+  const displayedResults = $derived.by(() => {
+    const list = typeFilter === 'all' ? results : results.filter((m) => TYPE_OF_TAG[String(m.pipelineTag ?? '').toLowerCase()] === typeFilter);
+    return sortedResults(list);
+  });
+  // If the filter drops the selected row out of view, follow the list rather
+  // than leaving the detail pane pointed at something no longer shown.
+  $effect(() => {
+    if (selected && !displayedResults.some((m) => m.id === selected) && displayedResults.length) {
+      select(displayedResults[0].id);
+    }
+  });
   const selectedModel = $derived(results.find((m) => m.id === selected) ?? null);
   const selectedQuantizers = $derived(selected ? quantizers.get(selected) : null);
   const activeRepo = $derived(selected ? (quantRepo.get(selected) ?? selected) : null);
@@ -499,23 +580,45 @@
     </div>
   </div>
 
+  <div class="filterbar">
+    <label class="fselect">
+      <span class="fslabel">Type</span>
+      <select bind:value={typeFilter}>
+        {#each TYPE_FILTERS as [val, label] (val)}<option value={val}>{label}</option>{/each}
+      </select>
+    </label>
+    <label class="fselect">
+      <span class="fslabel">Sort</span>
+      <select bind:value={sortBy}>
+        {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
+      </select>
+    </label>
+    {#if typeFilter !== 'all' && results.length}
+      <span class="fcount">{displayedResults.length} of {results.length}</span>
+    {/if}
+  </div>
+
   {#if searching}
     <div class="skeleton-list">
       {#each Array(6) as _, i (i)}
         <div class="skeleton-row"><div class="sk avatar-sk"></div><div class="sk-lines"><div class="sk w40"></div><div class="sk w70"></div></div></div>
       {/each}
     </div>
-  {:else if searched && !results.length}
-    <div class="empty nodetail">No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}</div>
+  {:else if searched && !displayedResults.length}
+    <div class="empty nodetail">
+      {#if results.length}No {TYPE_FILTERS.find(([v]) => v === typeFilter)?.[1].toLowerCase()} models in this view — try All types.
+      {:else}No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}{/if}
+    </div>
   {/if}
 
-  {#if results.length || (!searching && searched)}
+  {#if displayedResults.length || (!searching && searched)}
     <div class="split">
       <div class="list" bind:this={listEl}>
         <div class="lhead">Model</div>
-        {#each results as m (m.id)}
+        {#each displayedResults as m (m.id)}
+          {@const badge = taskBadge(m.pipelineTag)}
           <button class="rrow" class:active={selected === m.id} onclick={() => select(m.id)}>
-            <span class="avatar" style={avatarStyle(ownerOf(m.id))}>
+            <span class="avatar" style={avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
               {#if !avatarFail.has(ownerOf(m.id))}
                 <img src="/api/hf/avatar/{ownerOf(m.id)}" alt="" loading="lazy"
                   onerror={() => { avatarFail.add(ownerOf(m.id)); avatarFail = new Set(avatarFail); }} />
@@ -526,6 +629,7 @@
               <span class="rname">
                 {m.id.split('/').pop()}
                 <span class="dots">
+                  {#if badge}<span class="dot task {badge[1]}" title={badge[0]}></span>{/if}
                   {#if m.id.toLowerCase().includes('gguf')}<span class="dot gguf" title="GGUF"></span>{/if}
                   {#if m.gated}<span class="dot warn" title="Gated repo — access request needed"></span>{/if}
                 </span>
@@ -560,7 +664,7 @@
         {#if selectedModel}
           {@const v = selectedVariants}
           <div class="dhead">
-            <span class="avatar big" style={avatarStyle(ownerOf(selectedModel.id))}>
+            <span class="avatar big" style={avatarFail.has(ownerOf(selectedModel.id)) ? avatarStyle(ownerOf(selectedModel.id)) : ''}>
               {#if !avatarFail.has(ownerOf(selectedModel.id))}
                 <img src="/api/hf/avatar/{ownerOf(selectedModel.id)}" alt="" loading="lazy"
                   onerror={() => { avatarFail.add(ownerOf(selectedModel.id)); avatarFail = new Set(avatarFail); }} />
@@ -573,8 +677,10 @@
             </div>
           </div>
 
+          {@const dbadge = taskBadge(selectedModel.pipelineTag)}
           <div class="badges">
-            {#if selectedModel.pipelineTag}<span class="badge">{selectedModel.pipelineTag}</span>{/if}
+            {#if dbadge}<span class="badge task {dbadge[1]}">{dbadge[0]}</span>
+            {:else if selectedModel.pipelineTag}<span class="badge">{selectedModel.pipelineTag}</span>{/if}
             {#if selectedModel.gated}<span class="badge warn">gated</span>{/if}
             {#if selectedModel.private}<span class="badge warn">private</span>{/if}
           </div>
@@ -740,7 +846,7 @@
         <div class="mmlist">
           {#each localModels as row (row.repoDir)}
             <div class="mmrow">
-              <span class="avatar" style={avatarStyle(row.repoId ? ownerOf(row.repoId) : 'local')}>
+              <span class="avatar" style={!row.repoId || avatarFail.has(ownerOf(row.repoId)) ? avatarStyle(row.repoId ? ownerOf(row.repoId) : 'local') : ''}>
                 {#if row.repoId && !avatarFail.has(ownerOf(row.repoId))}
                   <img src="/api/hf/avatar/{ownerOf(row.repoId)}" alt="" loading="lazy"
                     onerror={() => { avatarFail.add(ownerOf(row.repoId)); avatarFail = new Set(avatarFail); }} />
@@ -901,6 +1007,17 @@
   .paste::placeholder { color: var(--text-faint); }
   .paste:focus { outline: none; border-color: var(--accent-dim); }
 
+  /* Type / sort filters — client-side over whatever's already loaded */
+  .filterbar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-shrink: 0; flex-wrap: wrap; }
+  .fselect { display: flex; align-items: center; gap: 7px; }
+  .fslabel { font-size: 11px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+  .fselect select {
+    font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border-soft);
+    background: var(--bg-raised); color: var(--text);
+  }
+  .fselect select:focus { outline: none; border-color: var(--accent-dim); }
+  .fcount { font-size: 11.5px; color: var(--text-faint); }
+
   .empty { padding: 40px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
   @keyframes pulse { 50% { opacity: 0.45; } }
@@ -947,14 +1064,20 @@
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
 
+  /* Plain light tile by default — like Unsloth's and LM Studio's brand-icon
+     squares. Most HF org logos are transparent PNGs; tinting the tile with a
+     random per-owner hue (the old behavior) bleeds through the transparency
+     and turns a clean logo into a colored smudge. The hue is now reserved
+     for the no-image fallback only (set inline, see avatarStyle callers). */
   .avatar {
-    width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
+    width: 48px; height: 48px; border-radius: 12px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
     font-size: 16px; font-weight: 700;
     overflow: hidden; position: relative;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    background: #eeeef1; color: #1a1a1a;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
   }
-  .avatar.big { width: 56px; height: 56px; border-radius: 15px; font-size: 20px; }
+  .avatar.big { width: 72px; height: 72px; border-radius: 18px; font-size: 26px; }
   .avatar img {
     position: absolute; inset: 0; width: 100%; height: 100%;
     object-fit: cover; border-radius: inherit; display: block;
@@ -970,6 +1093,12 @@
   .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .dot.gguf { background: #7c6ff0; }
   .dot.warn { background: var(--yellow); }
+  /* task-type colors — shared between the list-row dot and the detail badge */
+  .dot.task.violet { background: #a78bfa; }
+  .dot.task.teal { background: #2dd4bf; }
+  .dot.task.pink { background: #f472b6; }
+  .dot.task.amber { background: var(--yellow); }
+  .dot.task.slate { background: #94a3b8; }
   .rowner {
     font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; display: flex; align-items: center; gap: 4px;
@@ -998,6 +1127,11 @@
     background: var(--bg-hover); color: var(--text-dim);
   }
   .badge.warn { color: var(--red); }
+  .badge.task.violet { color: #c4b5fd; background: color-mix(in srgb, #a78bfa 18%, transparent); }
+  .badge.task.teal { color: #5eead4; background: color-mix(in srgb, #2dd4bf 18%, transparent); }
+  .badge.task.pink { color: #f9a8d4; background: color-mix(in srgb, #f472b6 18%, transparent); }
+  .badge.task.amber { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 18%, transparent); }
+  .badge.task.slate { color: #cbd5e1; background: color-mix(in srgb, #94a3b8 18%, transparent); }
 
   .qmrow { margin-bottom: 14px; }
   .qmlabel {
