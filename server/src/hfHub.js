@@ -330,7 +330,10 @@ export function quantLabel(filename) {
 // hundred MB standing next to tens of GB. Still a real, separately
 // downloadable file (for speculative decoding setups), just never the model
 // itself — see quantLabel's caller in modelVariants for how this is surfaced.
-const DRAFT_RE = /(?:^|[-_.])(mtp|dflash|eagle-?3?)(?:[-_.]|$)/i;
+// The "3" in eagle-?3 is required, not optional: EAGLE-3 is the specific
+// technique's name, and "Eagle" alone is a real model-family name in the
+// wild (e.g. an Eagle-7B) this must not misclassify as a draft file.
+const DRAFT_RE = /(?:^|[-_.])(mtp|dflash|eagle-?3)(?:[-_.]|$)/i;
 export function draftKind(filename) {
   const base = String(filename).split('/').pop();
   const m = base.match(DRAFT_RE);
