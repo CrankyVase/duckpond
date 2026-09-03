@@ -77,7 +77,6 @@
   // capture focus anymore, and window-level means Ctrl+K/Escape/arrows all
   // work regardless of what has focus.
   let listEl = $state(null);
-  let rootEl = $state(null); // .picker root — clicks outside it close the menu
   $effect(() => {
     if (!app.modelPickerOpen) return;
     const onKey = (e) => {
@@ -92,20 +91,16 @@
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  // Click-outside: a document-level pointerdown beats the old fixed backdrop
-  // div, which sat above the toggle button (z-index 40 vs none) so the button
-  // itself could never receive the "click it again" toggle, and overlays with
-  // their own stacking could eat the backdrop click entirely. The toggle
-  // button and menu live inside rootEl, so their pointerdowns are ignored.
-  $effect(() => {
-    if (!app.modelPickerOpen) return;
-    const onDocPointer = (e) => {
-      if (rootEl && e.target instanceof Node && rootEl.contains(e.target)) return;
-      app.modelPickerOpen = false;
-    };
-    document.addEventListener('pointerdown', onDocPointer, true);
-    return () => document.removeEventListener('pointerdown', onDocPointer, true);
-  });
+  // Click-outside: a real backdrop element, not a synthetic document-level
+  // listener — a prior version used document-level pointerdown-capture
+  // instead, reasoning that a backdrop div would sit above the toggle
+  // button and block re-closing it. That traded a minor annoyance for a
+  // worse one: a listener that's supposed to fire on every outside
+  // pointerdown occasionally didn't (observed: the menu gets stuck open and,
+  // on the mobile layout where .menu is a large `position: fixed` sheet,
+  // blocks interacting with the rest of the page entirely). A real backdrop
+  // is a guaranteed, unmissable click target — .current (the toggle button)
+  // gets a higher z-index than the backdrop so it stays clickable to close.
 
   async function pick(m) {
     app.modelPickerOpen = false;
@@ -207,7 +202,7 @@
   }
 </script>
 
-<div class="picker" bind:this={rootEl}>
+<div class="picker">
   <button class="current" onclick={() => (app.modelPickerOpen = !app.modelPickerOpen)}
     title="Switch model (Ctrl+K)">
     <span class="dot" style="background:{dot(current?.status)}"></span>
@@ -216,6 +211,7 @@
   </button>
 
   {#if app.modelPickerOpen}
+    <div class="backdrop" onclick={() => (app.modelPickerOpen = false)} role="presentation"></div>
     <div class="menu slide-up">
       <div class="list" bind:this={listEl} role="listbox">
         {#each groups as g (g.label)}
@@ -309,6 +305,7 @@
     background: transparent; border-color: transparent;
     min-width: 0;
     box-sizing: border-box;
+    position: relative; z-index: 51; /* above .backdrop (40) so it always stays clickable to re-close */
   }
   .current:hover { background: var(--bg-hover); border-color: transparent; }
   .name {
@@ -319,6 +316,7 @@
   .chev { color: var(--text-faint); display: grid; place-items: center; transition: transform 180ms ease; flex-shrink: 0; }
   .chev.flip { transform: rotate(180deg); }
   .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; transition: background 300ms ease; }
+  .backdrop { position: fixed; inset: 0; z-index: 40; background: transparent; }
   .menu {
     position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
     width: 400px; max-width: min(400px, calc(100vw - 16px));

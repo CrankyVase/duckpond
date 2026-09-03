@@ -530,6 +530,10 @@
     if (!bps) return '';
     return `${fmtBytes(bps)}/s`;
   }
+  function fmtPct(j) {
+    if (!j.totalBytes) return 0;
+    return Math.min(100, Math.round((j.downloadedBytes / j.totalBytes) * 100));
+  }
 
   // Unsloth's exact fit-badge vocabulary — labels, tooltips and icon colors
   // copied from their gguf-download-card.tsx FIT_BADGE table (AGPL).
@@ -611,7 +615,7 @@
               {#if j.state === 'error'}
                 {j.error}
               {:else if j.state === 'running' && j.downloadedBytes > 0}
-                {fmtBytes(j.downloadedBytes)}{j.totalBytes ? ` / ${fmtBytes(j.totalBytes)}` : ''}{j.speedBytesPerSec ? ` · ${fmtSpeed(j.speedBytesPerSec)}` : ''}{j.etaSec != null ? ` · ${fmtEta(j.etaSec)} left` : ''}
+                {j.totalBytes ? `${fmtPct(j)}% · ` : ''}{fmtBytes(j.downloadedBytes)}{j.totalBytes ? ` / ${fmtBytes(j.totalBytes)}` : ''}{j.speedBytesPerSec ? ` · ${fmtSpeed(j.speedBytesPerSec)}` : ''}{j.etaSec != null ? ` · ${fmtEta(j.etaSec)} left` : ''}
               {:else}
                 {j.state === 'cancelling' ? 'cancelling…' : 'starting…'}
               {/if}
@@ -621,7 +625,7 @@
             {/if}
           </div>
           {#if j.state === 'running' && j.totalBytes}
-            <div class="jbar"><div class="jfill" style="width:{Math.min(100, (j.downloadedBytes / j.totalBytes) * 100)}%"></div></div>
+            <div class="jbar"><div class="jfill" style="width:{fmtPct(j)}%"></div></div>
           {:else if j.state === 'running'}
             <div class="jbar indeterminate"></div>
           {/if}
@@ -1018,7 +1022,7 @@
                 {#if j.state === 'error'}
                   {j.error}
                 {:else if j.state === 'running' && j.downloadedBytes > 0}
-                  {fmtBytes(j.downloadedBytes)}{j.totalBytes ? ` / ${fmtBytes(j.totalBytes)}` : ''}{j.speedBytesPerSec ? ` · ${fmtSpeed(j.speedBytesPerSec)}` : ''}{j.etaSec != null ? ` · ${fmtEta(j.etaSec)} left` : ''}
+                  {j.totalBytes ? `${fmtPct(j)}% · ` : ''}{fmtBytes(j.downloadedBytes)}{j.totalBytes ? ` / ${fmtBytes(j.totalBytes)}` : ''}{j.speedBytesPerSec ? ` · ${fmtSpeed(j.speedBytesPerSec)}` : ''}{j.etaSec != null ? ` · ${fmtEta(j.etaSec)} left` : ''}
                 {:else if j.state === 'done'}
                   {j.totalBytes ? fmtBytes(j.totalBytes) : ''}{j.finishedAt ? ` · finished ${fmtAgo(new Date(j.finishedAt).toISOString())}` : ''}
                 {:else if j.state === 'cancelled'}
@@ -1028,7 +1032,7 @@
                 {/if}
               </span>
               {#if j.state === 'running' && j.totalBytes}
-                <div class="jbar"><div class="jfill" style="width:{Math.min(100, (j.downloadedBytes / j.totalBytes) * 100)}%"></div></div>
+                <div class="jbar"><div class="jfill" style="width:{fmtPct(j)}%"></div></div>
               {:else if j.state === 'running'}
                 <div class="jbar indeterminate"></div>
               {/if}
