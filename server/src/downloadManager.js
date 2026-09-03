@@ -13,6 +13,7 @@
 //  - Resume: `hf download` re-uses the cache's .incomplete blobs, so a restart
 //    continues where it left off.
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertRepoId } from './hfHub.js';
@@ -35,6 +36,12 @@ const procs = new Map();
 let generation = 0;
 
 const keyOf = (repoId, include) => `${String(repoId).toLowerCase()}::${include ?? ''}`;
+
+// Fixed-length filename regardless of key length — some repos/filenames
+// (DavidAU's especially) are long enough that hex-encoding the raw key
+// blows past the OS's 255-byte filename limit, and writeFileSync's ENAMETOOLONG
+// gets silently swallowed by persistJob's catch, orphaning the job on restart.
+const stateFile = (key) => join(STATE_DIR, `${createHash('sha256').update(key).digest('hex')}.json`);
 
 // ---------------------------------------------------------------------------
 // Progress: scan the cache dir. A file counts when its blob exists and has no
@@ -105,8 +112,7 @@ function spawnWorker(job) {
 
 function persistJob(job) {
   try {
-    writeFileSync(join(STATE_DIR, `${Buffer.from(job.key).toString('hex')}.json`),
-      JSON.stringify({ ...job, pid: undefined }));
+    writeFileSync(stateFile(job.key), JSON.stringify({ ...job, pid: undefined }));
   } catch { /* state dir unwritable — job still tracked in memory */ }
 }
 
@@ -135,8 +141,27 @@ export function reapOrphans() {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+// Shared by listDownloads (panel poll) and downloadStatus (single-job poll) —
+// refresh progress on disk-scan before either hands the job to a caller.
+// Bug this fixes: listDownloads used to return jobs straight from memory
+// with downloadedBytes stuck at its startDownload() initial value (0) since
+// only downloadStatus ever called scanProgress, but nothing on the frontend
+// polls the single-job endpoint — the panel and job bar both poll
+// listDownloads, so progress/speed never advanced there.
+function refreshProgress(job) {
+  if (job.state !== 'running') return job;
+  const { downloadedBytes } = scanProgress(job.repoId, job.include);
+  job.downloadedBytes = downloadedBytes;
+  const { speed } = sampleSpeed(job.key, downloadedBytes);
+  if (speed) job.speedBytesPerSec = speed;
+  if (job.totalBytes && speed) {
+    job.etaSec = Math.max(0, Math.round((job.totalBytes - downloadedBytes) / speed));
+  }
+  return job;
+}
+
 export function listDownloads() {
-  return [...jobs.values()].map((j) => ({ ...j, pid: undefined }));
+  return [...jobs.values()].map((j) => ({ ...refreshProgress(j), pid: undefined }));
 }
 
 /** True when a job for this repo (any variant) is mid-flight. */
@@ -151,16 +176,7 @@ export function downloadStatus(repoId, include) {
   const key = keyOf(repoId, include);
   const job = jobs.get(key);
   if (!job) return { state: 'idle' };
-  if (job.state === 'running') {
-    const { downloadedBytes } = scanProgress(job.repoId, job.include);
-    job.downloadedBytes = downloadedBytes;
-    const { speed } = sampleSpeed(key, downloadedBytes);
-    if (speed) job.speedBytesPerSec = speed;
-    if (job.totalBytes && speed) {
-      job.etaSec = Math.max(0, Math.round((job.totalBytes - downloadedBytes) / speed));
-    }
-  }
-  return { ...job, pid: undefined };
+  return { ...refreshProgress(job), pid: undefined };
 }
 
 export function startDownload(repoId, { include, variant, totalBytes } = {}) {
@@ -210,7 +226,7 @@ export function clearFinished() {
   for (const [key, j] of jobs) {
     if (j.state === 'done' || j.state === 'cancelled' || j.state === 'error') {
       jobs.delete(key);
-      try { rmSync(join(STATE_DIR, `${Buffer.from(key).toString('hex')}.json`)); } catch { /* gone */ }
+      try { rmSync(stateFile(key)); } catch { /* gone */ }
     }
   }
 }
