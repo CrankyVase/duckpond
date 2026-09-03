@@ -53,6 +53,7 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
   const next = link.match(/<([^>]+)>;\s*rel="next"/);
   if (next) nextCursor = new URL(next[1]).searchParams.get('cursor');
   const data = await res.json();
+  const hw = await hardwareSnapshot();
   const models = data.map((m) => ({
     id: m.id,
     likes: m.likes ?? 0,
@@ -65,6 +66,9 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
     gated: !!m.gated,
     private: !!m.private,
     updatedAt: m.lastModified ?? null,
+    // Sort/filter sidebar (size/TPS/param-count sliders) — see
+    // estimateListing()'s doc comment for what "estimated" means here.
+    ...estimateListing(m.id, hw),
   }));
   return { models, nextCursor };
 }
@@ -224,7 +228,15 @@ const HW = {
   nvmeGBs: 5,      // modelnvme sequential read, cold
 };
 
+// searchModels() now calls this on every Discover page/search (to estimate
+// TPS per result for the sort/filter sidebar), not just once per opened
+// repo — cheap per call (one rocm-smi exec + one file read) but no reason to
+// repeat it within the same few seconds of typing/scrolling.
+let hwCache = null;
+let hwCacheAt = 0;
+const HW_CACHE_MS = 4000;
 async function hardwareSnapshot() {
+  if (hwCache && Date.now() - hwCacheAt < HW_CACHE_MS) return hwCache;
   const vram = await gpuVram().catch(() => null);
   let ramTotalBytes = 0;
   let ramAvailableBytes = 0;
@@ -235,13 +247,15 @@ async function hardwareSnapshot() {
   } catch { /* meminfo unreadable — fit math degrades to VRAM-only */ }
   const gpuTotalBytes = vram ? vram.totalBytes : null;
   const gpuFreeBytes = vram ? Math.max(0, vram.totalBytes - vram.usedBytes) : null;
-  return {
+  hwCache = {
     gpuTotalBytes, gpuFreeBytes,
     gpuTotalGB: gpuTotalBytes ? gpuTotalBytes / 1024 ** 3 : null,
     gpuFreeGB: gpuFreeBytes ? gpuFreeBytes / 1024 ** 3 : null,
     ramTotalGB: ramTotalBytes ? ramTotalBytes / 1024 ** 3 : null,
     ramAvailableGB: ramAvailableBytes ? ramAvailableBytes / 1024 ** 3 : null,
   };
+  hwCacheAt = Date.now();
+  return hwCache;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +306,27 @@ export function estimateTps(sizeBytes, repoIdOrName, { gpuFreeGB, ramAvailableGB
   if (nvmeGB > 0) t += nvmeGB / HW.nvmeGBs;
   const tTok = t * COMPUTE_FACTOR + FIXED_OH_S;
   return tTok > 0 ? Math.max(0.5, Math.round(1 / tTok)) : null;
+}
+
+// Discover-list-level estimate — the real per-variant numbers above need an
+// actual file size, which means fetching a repo's file tree (one HF call
+// each), far too expensive to do for every row of a 30-100 result search
+// page. modelParamsB() parsing the repo name is free, so estimate a size
+// off an assumed "typical" quant instead of a real one: Q4_K_M is by far
+// the most commonly downloaded/recommended tier, averaging roughly 4.8 bits
+// per weight. Good enough to sort/filter a list by, not a promise about any
+// specific quant — the real fit/TPS numbers still come from modelVariants()
+// once a repo is actually opened.
+const TYPICAL_BPW = 4.8;
+export function estimateListing(repoIdOrName, hw) {
+  const { totalB } = modelParamsB(repoIdOrName);
+  if (!totalB) return { paramsB: null, estimatedSizeBytes: null, estimatedTps: null };
+  const estimatedSizeBytes = Math.round(totalB * 1e9 * TYPICAL_BPW / 8);
+  return {
+    paramsB: totalB,
+    estimatedSizeBytes,
+    estimatedTps: estimateTps(estimatedSizeBytes, repoIdOrName, hw),
+  };
 }
 
 // ---------------------------------------------------------------------------
