@@ -121,6 +121,19 @@
   mirrors like `meshllm/...-layers`) instead of showing the repo actually
   clicked. Chips now only auto-navigate away for a genuine base/safetensors
   model with no GGUF of its own.
+- **Sort/filter sidebar for Discover** — a real per-quant size/TPS number
+  needs a repo's file tree (one HF call each, too expensive for a 30-100
+  row search page), so `estimateListing()` (`hfHub.js`) estimates instead:
+  `modelParamsB()` already parses a headline param count from the repo name
+  for free, assumes a typical ~4.8 bits/weight (Q4_K_M-ish, the most common
+  tier) for a ballpark size, and feeds that into the existing `estimateTps()`
+  physics model (MoE active-param ratio included). Every Discover result now
+  carries `paramsB`/`estimatedSizeBytes`/`estimatedTps`; a new sidebar
+  (toggle button in the filterbar) filters on them with range sliders plus
+  an "updated within" recency step slider — same client-side-over-loaded-
+  results pattern as the existing Type/Sort dropdowns. A repo whose name
+  doesn't encode a param count is never excluded by these, same "missing
+  data doesn't mean hide it" principle as the GGUF classification fix.
 
 ## 2. Todos — most complex → least complex
 
@@ -140,35 +153,9 @@ sharing the same HF cache — Unsloth Studio, Duck Pond Control). Needs
 reproduction first — ask what "sometimes" correlates with (right after a
 delete? after idle unload? after a router restart?) before guessing at a fix.
 
-### 1. Sort/filter sidebar for Discover — size, TPS, param count, recency sliders
-Requested 2026-09-03: "sort by model size, tps speed so like only show
-models that will hit above the tps slider or below... same for the param
-size... a slider for how recent... a whole sidebar I can click through like
-sort settings basically." Currently Discover only has the two flat dropdowns
-(Type, Sort-by) added 2026-09-02 — this is a bigger ask: a persistent
-side panel with range sliders that actually FILTER the list (not just
-reorder it), for at minimum:
-- **TPS** — `estimateTps()` already runs per-variant in `hfHub.js`, but only
-  against the currently-selected repo's variants once you've drilled in;
-  filtering the top-level Discover list by TPS means either estimating TPS
-  for every search result up front (expensive — needs param count + a
-  chosen/assumed quant, not just the repo id) or estimating it against the
-  repo's *recommended* variant only as a stand-in. Needs a decision on which.
-- **Param size** — `modelParamsB()` (`modelDescribe.js`) already parses
-  param count from a repo id/name string for the TPS estimator and the LLM
-  picker's blurb; same parser reusable here, but only ever a name-based
-  guess, not authoritative (no HF field for it) — same caveat as TPS.
-- **Recency** — trivial, `updatedAt` is already on every search result.
-- **Model size (bytes)** — trivial for a single quant, ambiguous for a
-  multi-quant repo (smallest variant? recommended variant? total repo size?
-  probably recommended variant, matching what TPS/fit already key off of).
-Given TPS/param-size need a per-result estimate that isn't free at Discover's
-current scale (30-100 results/page, cursor-paginated), this needs a design
-pass on where that computation happens (server-side per search result vs.
-client-side only after opening each repo) before implementing — flag this
-back to the user rather than guessing.
+### ~~Sort/filter sidebar for Discover~~ — done, see §1b
 
-### 2. Reuse Unsloth's own inference engine code in the media bridge
+### 1. Reuse Unsloth's own inference engine code in the media bridge
 Right now `bridge.py` hand-rolls model → pipeline dispatch. Unsloth's
 `core/inference/diffusion_families.py`, `video_families.py`, and
 `diffusion_engine_router.py` already do family detection (which repo/GGUF is
@@ -185,7 +172,7 @@ whether `studio.backend.core.inference.*` has any hidden dependency on
 Studio's own FastAPI app state (DB connections, settings singletons) before
 assuming it's import-safe standalone.
 
-### 3. Settings page: flat 1302-line scroll → sectioned nav
+### 2. Settings page: flat 1302-line scroll → sectioned nav
 LM Studio's load-settings pattern is title/subTitle/info triples per row,
 grouped into named sections navigated from a left rail (General, Hardware,
 Developer). DuckPond's SettingsPanel.svelte is one continuous page mixing
@@ -198,15 +185,15 @@ breaking any of the existing effects/api calls.
 
 ### ~~Model Hub: add a "My Models" tab~~ — done, see §1
 
-### 5. Media Studio panel polish
-Once #2 lands, the model list MediaPanel.svelte shows should come from the
+### 3. Media Studio panel polish
+Once #1 lands, the model list MediaPanel.svelte shows should come from the
 same family-detection Unsloth uses, so "no video models downloaded" etc.
 reflects real buildability, not just presence in the HF cache. Also worth
 adopting LM Studio's title/subTitle/info row style here for the per-task
 knobs (steps, size, frames/fps, duration) instead of bare labeled inputs.
 Lower complexity — mostly cosmetic once #1's data is available.
 
-### 6. Rankings tab — coding score, benchmark leaderboards
+### 4. Rankings tab — coding score, benchmark leaderboards
 Requested 2026-09-02: a tab (alongside Unsloth/Popular/Image/Audio/Video)
 that ranks models by benchmark scores (coding score, Chatbot Arena-style
 Elo, etc.), plus surfacing that same signal as a sortable/visible thing on
@@ -224,7 +211,7 @@ could attach to it.
 
 ### ~~Staff Pick style badge~~ — done, see §1's 2026-09-02 entry
 
-## 3. Reference: exact vocabulary pulled from LM Studio (for #5, and general flavor)
+## 3. Reference: exact vocabulary pulled from LM Studio (for #4, and general flavor)
 
 Fit tiers (`modelSearchResultDownloadOptionFitEstimationSchema`, a 4-way enum
 vs. Unsloth/DuckPond's 5-way fits/marginal/partial/ram/oom):
