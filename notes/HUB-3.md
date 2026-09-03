@@ -89,9 +89,86 @@
   (not the whole repo) never stripped its preset section at all if it had
   one — `deleteVariant()` now does that too.
 
+## 1b. Done 2026-09-03 (GGUF quant display was actively wrong)
+
+- **Unsloth Dynamic quants all rendered as the bare word "dynamic"** —
+  `quantLabel()` collapsed every `UD-*` level (`UD-TQ1_0`, `UD-IQ2_M`,
+  `UD-Q3_K_XL`, ...) to the literal string `"dynamic"`, so a repo with 20+
+  dynamic variants showed 20+ rows reading identically, only distinguishable
+  by scrolling to compare byte sizes. This is what "the gguf stuff isn't
+  showing up correctly" and "unsloth quants... it just says dynamic" were
+  about. Now shows the specific level: "Dynamic Q2_K_XL", "Dynamic TQ1_0".
+- **Speculative-decoding draft heads mislabeled as real quants** — a repo
+  that ships an MTP/EAGLE/dFlash draft head quantized the same as the main
+  model (e.g. `TaterTotterson/gemma-4-26B-A4B-it-GGUF-Tater-NoThink`'s
+  `-MTP-Q8_0.gguf` and `-DFlash-Q8_0.gguf`, ~460MB each, next to the real
+  17GB `-UD-Q4_K_M.gguf`) got the exact same bare "Q8_0" label as a real
+  full-size Q8_0 quant would — indistinguishable, and what actually happened
+  when trying to download "the Q8_0 model". Now reads "MTP draft (Q8_0)" /
+  "dFlash draft (Q8_0)", stays downloadable on its own, and is excluded from
+  the recommended-default pick.
+- **Downloaded models missing from My Models** — `hf download` writes a
+  file's blob before creating the snapshot symlink pointing to it; a cancel
+  or crash in that gap leaves a real, fully-written blob with nothing
+  referencing it, so the repo scanned as completely empty. Found 5 repos,
+  ~48GB orphaned this way, including `unsloth/Qwen3.8-27B-GGUF` (17GB).
+  `localInventory.js` now surfaces these as an "Incomplete — not usable"
+  row with a one-click delete to reclaim the space.
+- **Quant-maker chips hijacking an already-GGUF repo** — opening a repo
+  that's already real GGUF (e.g. `unsloth/GLM-5.3-Flash-GGUF`) queried HF for
+  "who else quantized this already-quantized repo" and defaulted straight to
+  whatever unrelated third-party repackaging came back first (layer-sharded
+  mirrors like `meshllm/...-layers`) instead of showing the repo actually
+  clicked. Chips now only auto-navigate away for a genuine base/safetensors
+  model with no GGUF of its own.
+
 ## 2. Todos — most complex → least complex
 
-### 1. Reuse Unsloth's own inference engine code in the media bridge
+### 0. Old/removed models sometimes still show in the model picker
+Reported 2026-09-03, after already fixing one cause of this on 2026-09-02
+(router-reload-before-preset-edit ordering bug, + My Models delete not
+refreshing the picker's store). Still happening "sometimes" per the user, so
+there's at least one more cause not yet found. Not investigated this round —
+next session should check: (a) the idle-reaper (`reapIdleModels` in
+llama.js) unloading a model in the background without the picker's `app.models`
+store ever refreshing to reflect it went from loaded→unloaded/gone; (b) a
+race between ModelPicker's optimistic state and its 2.5s/6-8s delayed
+re-polls (see 2026-09-02's ModelPicker commit) landing in the wrong order;
+(c) whether the router's own preset ini can drift out of sync with disk some
+other way (e.g. a model deleted by hand outside DuckPond, or by another tool
+sharing the same HF cache — Unsloth Studio, Duck Pond Control). Needs
+reproduction first — ask what "sometimes" correlates with (right after a
+delete? after idle unload? after a router restart?) before guessing at a fix.
+
+### 1. Sort/filter sidebar for Discover — size, TPS, param count, recency sliders
+Requested 2026-09-03: "sort by model size, tps speed so like only show
+models that will hit above the tps slider or below... same for the param
+size... a slider for how recent... a whole sidebar I can click through like
+sort settings basically." Currently Discover only has the two flat dropdowns
+(Type, Sort-by) added 2026-09-02 — this is a bigger ask: a persistent
+side panel with range sliders that actually FILTER the list (not just
+reorder it), for at minimum:
+- **TPS** — `estimateTps()` already runs per-variant in `hfHub.js`, but only
+  against the currently-selected repo's variants once you've drilled in;
+  filtering the top-level Discover list by TPS means either estimating TPS
+  for every search result up front (expensive — needs param count + a
+  chosen/assumed quant, not just the repo id) or estimating it against the
+  repo's *recommended* variant only as a stand-in. Needs a decision on which.
+- **Param size** — `modelParamsB()` (`modelDescribe.js`) already parses
+  param count from a repo id/name string for the TPS estimator and the LLM
+  picker's blurb; same parser reusable here, but only ever a name-based
+  guess, not authoritative (no HF field for it) — same caveat as TPS.
+- **Recency** — trivial, `updatedAt` is already on every search result.
+- **Model size (bytes)** — trivial for a single quant, ambiguous for a
+  multi-quant repo (smallest variant? recommended variant? total repo size?
+  probably recommended variant, matching what TPS/fit already key off of).
+Given TPS/param-size need a per-result estimate that isn't free at Discover's
+current scale (30-100 results/page, cursor-paginated), this needs a design
+pass on where that computation happens (server-side per search result vs.
+client-side only after opening each repo) before implementing — flag this
+back to the user rather than guessing.
+
+### 2. Reuse Unsloth's own inference engine code in the media bridge
 Right now `bridge.py` hand-rolls model → pipeline dispatch. Unsloth's
 `core/inference/diffusion_families.py`, `video_families.py`, and
 `diffusion_engine_router.py` already do family detection (which repo/GGUF is
@@ -108,7 +185,7 @@ whether `studio.backend.core.inference.*` has any hidden dependency on
 Studio's own FastAPI app state (DB connections, settings singletons) before
 assuming it's import-safe standalone.
 
-### 2. Settings page: flat 1302-line scroll → sectioned nav
+### 3. Settings page: flat 1302-line scroll → sectioned nav
 LM Studio's load-settings pattern is title/subTitle/info triples per row,
 grouped into named sections navigated from a left rail (General, Hardware,
 Developer). DuckPond's SettingsPanel.svelte is one continuous page mixing
@@ -119,17 +196,17 @@ keep every existing feature, just re-house it. This is the concrete answer to
 complexity because it's 1302 lines of stateful UI to re-partition without
 breaking any of the existing effects/api calls.
 
-### ~~3. Model Hub: add a "My Models" tab~~ — done, see §1
+### ~~Model Hub: add a "My Models" tab~~ — done, see §1
 
-### 4. Media Studio panel polish
-Once #1 lands, the model list MediaPanel.svelte shows should come from the
+### 5. Media Studio panel polish
+Once #2 lands, the model list MediaPanel.svelte shows should come from the
 same family-detection Unsloth uses, so "no video models downloaded" etc.
 reflects real buildability, not just presence in the HF cache. Also worth
 adopting LM Studio's title/subTitle/info row style here for the per-task
 knobs (steps, size, frames/fps, duration) instead of bare labeled inputs.
 Lower complexity — mostly cosmetic once #1's data is available.
 
-### 5. Rankings tab — coding score, benchmark leaderboards
+### 6. Rankings tab — coding score, benchmark leaderboards
 Requested 2026-09-02: a tab (alongside Unsloth/Popular/Image/Audio/Video)
 that ranks models by benchmark scores (coding score, Chatbot Arena-style
 Elo, etc.), plus surfacing that same signal as a sortable/visible thing on
@@ -145,12 +222,7 @@ fuzzy-matching back to its base model (the existing quant-maker plumbing
 already resolves that direction once, could maybe be reused) before a score
 could attach to it.
 
-### 6. Staff Pick style badge (the rest of the old #6 — "(Recommended)" is done)
-Consider a "Staff Pick" style badge for curated/Popular-tab entries (LM
-Studio's `staffPick` boolean on search results) distinct from the existing
-Unsloth-owner verified checkmark. Lowest complexity — pure template/CSS,
-no new backend data needed since "Popular" is already a curated allowlist
-server-side.
+### ~~Staff Pick style badge~~ — done, see §1's 2026-09-02 entry
 
 ## 3. Reference: exact vocabulary pulled from LM Studio (for #5, and general flavor)
 
