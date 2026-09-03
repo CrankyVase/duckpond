@@ -108,43 +108,6 @@
   ];
   let typeFilter = $state('all');
 
-  // Sort/filter sidebar — size/TPS/param-count/recency range sliders over
-  // whatever's currently loaded, client-side like Type/Sort above. TPS and
-  // param count come from estimateListing() (hfHub.js): a real file size
-  // isn't available without fetching each repo's tree (way too expensive
-  // for a 30-100 row search page), so the server estimates off an assumed
-  // "typical" Q4_K_M-ish quant parsed from the repo name — an honest
-  // ballpark for narrowing the list, not the precise per-quant numbers the
-  // detail pane shows once a repo's actually open. A repo whose name
-  // doesn't encode a param count (flagship names like "GLM-5.3" with no
-  // "27B" suffix) has no estimate at all — those are never excluded by
-  // these sliders, since we have no basis to say they're out of range.
-  const AGE_STEPS = [0, 1, 7, 30, 90, 365]; // 0 = any time
-  const AGE_LABEL = { 0: 'any time', 1: 'past day', 7: 'past week', 30: 'past month', 90: 'past 3 months', 365: 'past year' };
-  const FILTER_DEFAULTS = { minTps: 0, minSizeGB: 0, maxSizeGB: 0, minParamsB: 0, maxParamsB: 0, maxAgeDays: 0 };
-  let filters = $state({ ...FILTER_DEFAULTS });
-  let filtersOpen = $state(false);
-  const filtersActive = $derived(Object.keys(FILTER_DEFAULTS).some((k) => filters[k] !== FILTER_DEFAULTS[k]));
-  function resetFilters() { filters = { ...FILTER_DEFAULTS }; }
-  function passesFilters(m) {
-    const { minTps, minSizeGB, maxSizeGB, minParamsB, maxParamsB, maxAgeDays } = filters;
-    if (minTps > 0 && m.estimatedTps != null && m.estimatedTps < minTps) return false;
-    if (m.estimatedSizeBytes != null) {
-      const gb = m.estimatedSizeBytes / 1024 ** 3;
-      if (minSizeGB > 0 && gb < minSizeGB) return false;
-      if (maxSizeGB > 0 && gb > maxSizeGB) return false;
-    }
-    if (m.paramsB != null) {
-      if (minParamsB > 0 && m.paramsB < minParamsB) return false;
-      if (maxParamsB > 0 && m.paramsB > maxParamsB) return false;
-    }
-    if (maxAgeDays > 0 && m.updatedAt) {
-      const ageDays = (Date.now() - new Date(m.updatedAt).getTime()) / 86_400_000;
-      if (ageDays > maxAgeDays) return false;
-    }
-    return true;
-  }
-
   const SORTS = [
     ['relevance', 'Relevance'],
     ['downloads', 'Most downloads'],
@@ -267,8 +230,7 @@
 
   const isOwner = $derived(app.user?.role === 'owner');
   const displayedResults = $derived.by(() => {
-    let list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
-    if (filtersActive) list = list.filter(passesFilters);
+    const list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
     return sortedResults(list);
   });
   // If the filter drops the selected row out of view, follow the list rather
@@ -711,12 +673,7 @@
         {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
       </select>
     </label>
-    <button class="fselect fsidebtn" class:on={filtersOpen} onclick={() => (filtersOpen = !filtersOpen)}>
-      <ChevronDown size={13} class={filtersOpen ? 'qchevron open' : 'qchevron'} />
-      Sort &amp; filter settings
-      {#if filtersActive}<span class="modebadge">on</span>{/if}
-    </button>
-    {#if (typeFilter !== 'all' || filtersActive) && results.length}
+    {#if typeFilter !== 'all' && results.length}
       <span class="fcount">{displayedResults.length} of {results.length}</span>
     {/if}
   </div>
@@ -729,66 +686,13 @@
     </div>
   {:else if searched && !displayedResults.length}
     <div class="empty nodetail">
-      {#if results.length}
-        No models match{#if typeFilter !== 'all'} the {TYPE_FILTERS.find(([v]) => v === typeFilter)?.[1].toLowerCase()} filter{/if}{#if filtersActive}{typeFilter !== 'all' ? ' and' : ''} the current sort &amp; filter settings{/if} — try loosening them.
-        {#if filtersActive}<button class="ghost" onclick={resetFilters}>Reset sliders</button>{/if}
+      {#if results.length}No {TYPE_FILTERS.find(([v]) => v === typeFilter)?.[1].toLowerCase()} models in this view — try All types.
       {:else}No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}{/if}
     </div>
   {/if}
 
   {#if displayedResults.length || (!searching && searched)}
     <div class="split">
-      {#if filtersOpen}
-        <div class="filtersidebar">
-          <div class="fsbhead">
-            <span>Sort &amp; filter settings</span>
-            {#if filtersActive}<button class="ghost" onclick={resetFilters}>Reset</button>{/if}
-          </div>
-
-          <div class="fsbgroup">
-            <div class="fsblabel">
-              <span>Min. estimated speed</span>
-              <span class="mono">{filters.minTps > 0 ? `${filters.minTps}+ t/s` : 'any'}</span>
-            </div>
-            <input type="range" min="0" max="100" step="5" bind:value={filters.minTps} />
-            <span class="fsbhint">Hides models whose estimated decode speed on this GPU falls below this — estimated off a typical Q4_K_M-ish quant of each model, not the exact quant you'd pick.</span>
-          </div>
-
-          <div class="fsbgroup">
-            <div class="fsblabel">
-              <span>Estimated size</span>
-              <span class="mono">{filters.minSizeGB > 0 || filters.maxSizeGB > 0 ? `${filters.minSizeGB || 0}–${filters.maxSizeGB || '∞'} GB` : 'any'}</span>
-            </div>
-            <div class="fsbrange2">
-              <input type="range" min="0" max="500" step="5" bind:value={filters.minSizeGB} title="Minimum GB" />
-              <input type="range" min="0" max="500" step="5" bind:value={filters.maxSizeGB} title="Maximum GB (0 = no cap)" />
-            </div>
-            <span class="fsbhint">Same typical-quant estimate as speed, above.</span>
-          </div>
-
-          <div class="fsbgroup">
-            <div class="fsblabel">
-              <span>Parameter count</span>
-              <span class="mono">{filters.minParamsB > 0 || filters.maxParamsB > 0 ? `${filters.minParamsB || 0}–${filters.maxParamsB || '∞'} B` : 'any'}</span>
-            </div>
-            <div class="fsbrange2">
-              <input type="range" min="0" max="700" step="1" bind:value={filters.minParamsB} title="Minimum params (B)" />
-              <input type="range" min="0" max="700" step="1" bind:value={filters.maxParamsB} title="Maximum params (B, 0 = no cap)" />
-            </div>
-            <span class="fsbhint">Parsed from the repo name (e.g. "27B") — models whose name doesn't state a size aren't excluded by this.</span>
-          </div>
-
-          <div class="fsbgroup">
-            <div class="fsblabel">
-              <span>Updated within</span>
-              <span class="mono">{AGE_LABEL[filters.maxAgeDays] ?? `${filters.maxAgeDays}d`}</span>
-            </div>
-            <input type="range" min="0" max="5" step="1"
-              value={AGE_STEPS.indexOf(filters.maxAgeDays)}
-              oninput={(e) => (filters.maxAgeDays = AGE_STEPS[Number(e.currentTarget.value)])} />
-          </div>
-        </div>
-      {/if}
       <div class="list" bind:this={listEl}>
         <div class="lhead">Model</div>
         {#each displayedResults as m (m.id)}
@@ -1301,30 +1205,6 @@
   }
   .fselect select:focus { outline: none; border-color: var(--accent-dim); }
   .fcount { font-size: 11.5px; color: var(--text-faint); }
-  .fsidebtn {
-    all: unset; cursor: pointer; display: flex; align-items: center; gap: 6px;
-    font-size: 11px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em;
-    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border-soft);
-  }
-  .fsidebtn:hover, .fsidebtn.on { color: var(--text); border-color: var(--border); }
-  .fsidebtn.on { background: var(--bg-hover); }
-
-  .filtersidebar {
-    flex: 0 0 240px; min-width: 0; overflow-y: auto;
-    display: flex; flex-direction: column; gap: 18px;
-    padding: 14px; border-radius: calc(13px * var(--rf));
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-  }
-  .fsbhead {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 12.5px; font-weight: 600; padding-bottom: 4px; border-bottom: 1px solid var(--border-soft);
-  }
-  .fsbgroup { display: flex; flex-direction: column; gap: 6px; }
-  .fsblabel { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
-  .fsblabel .mono { color: var(--text-dim); font-size: 11px; }
-  .fsbrange2 { display: flex; flex-direction: column; gap: 4px; }
-  .fsbhint { font-size: 10.5px; color: var(--text-faint); line-height: 1.4; }
-  .filtersidebar input[type="range"] { width: 100%; accent-color: var(--accent); }
 
   .empty { padding: 40px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
