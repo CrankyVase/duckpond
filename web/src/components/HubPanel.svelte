@@ -36,6 +36,9 @@
     return `background: hsl(${hue} 55% 30%); color: hsl(${hue} 70% 82%);`;
   }
   function ownerOf(id) { return id.includes('/') ? id.split('/')[0] : id; }
+  // Same "is this already a quantized GGUF repo" heuristic hfHub.js's
+  // findQuantizers() uses server-side to filter its own results.
+  const GGUF_REPO_RE = /-gguf(-|$)/i;
 
   // Tab destinations — see popularModels()/modalityModels() in hfHub.js for
   // what each one actually fetches.
@@ -380,7 +383,15 @@
     try {
       const list = await api(`/api/hf/quantizers/${repoId}`);
       quantizers.set(repoId, { loading: false, list });
-      activeRepoId = list[0]?.id ?? repoId;
+      // A repo that's already GGUF (e.g. unsloth/GLM-5.3-Flash-GGUF) is the
+      // real thing the user opened — default to ITS OWN files. Only default
+      // away to the top "who quantized this" result for a base/safetensors
+      // repo that has no GGUF of its own to show. Without this, opening an
+      // already-quantized repo could silently jump straight to some
+      // unrelated third party's re-packaging of it (layer-sharded mirrors
+      // etc. showing up in the "quantized:" tag search) instead of the repo
+      // actually clicked — the chips are still there to pick deliberately.
+      if (!GGUF_REPO_RE.test(repoId)) activeRepoId = list[0]?.id ?? repoId;
     } catch (e) {
       quantizers.set(repoId, { loading: false, list: [], error: e.message ?? 'lookup failed' });
     }
@@ -762,6 +773,12 @@
             <div class="qmrow">
               <span class="qmlabel">Quant maker</span>
               <div class="qmchips">
+                {#if GGUF_REPO_RE.test(selectedModel.id)}
+                  <button class="qmchip" class:active={activeRepo === selectedModel.id}
+                    onclick={() => pickQuantRepo(selected, selectedModel.id)} title={selectedModel.id}>
+                    {ownerOf(selectedModel.id)} (this repo)
+                  </button>
+                {/if}
                 {#each qz.list.slice(0, 8) as qm (qm.id)}
                   <button class="qmchip" class:active={activeRepo === qm.id}
                     onclick={() => pickQuantRepo(selected, qm.id)} title={qm.id}>
@@ -919,7 +936,7 @@
         </div>
         <div class="mmlist">
           {#each localModels as row (row.repoDir)}
-            <div class="mmrow">
+            <div class="mmrow" class:broken={row.broken}>
               <span class="avatar" style={!row.repoId || avatarFail.has(ownerOf(row.repoId)) ? avatarStyle(row.repoId ? ownerOf(row.repoId) : 'local') : ''}>
                 {#if row.repoId && !avatarFail.has(ownerOf(row.repoId))}
                   <img src="/api/hf/avatar/{ownerOf(row.repoId)}" alt="" loading="lazy"
@@ -929,28 +946,48 @@
               </span>
               <div class="mminfo">
                 <div class="mmtop">
-                  <span class="mmname">{row.repoId ?? row.variants[0].name}</span>
+                  <span class="mmname">{row.repoId ?? row.variants[0]?.name}</span>
                   <span class="mmwhen">{fmtAgo(row.updatedAt)}</span>
                   <span class="mmsize mono">{fmtBytes(row.totalBytes)}</span>
                 </div>
-                <div class="qlist">
-                  {#each row.variants as variant (variant.include ?? variant.name)}
+                {#if row.broken}
+                  <div class="qlist">
                     <div class="qrow mmvariant">
                       <span class="qleft">
-                        <span class="mono qname">{variant.quant ?? variant.name}</span>
+                        <span class="mono qname err">Incomplete — not usable</span>
+                        <span class="vhint">a download was interrupted after writing data but before finishing; safe to delete and re-download</span>
                       </span>
                       <span class="qright">
-                        <span class="qsize mono">{fmtBytes(variant.size)}</span>
                         {#if isOwner}
-                          <button class="qdel" disabled={localDeleting === `${row.repoDir}::${variant.include}`}
-                            onclick={() => deleteLocalVariant(row, variant)} title="Delete from disk">
+                          <button class="qdel" disabled={localDeleting === `${row.repoDir}::null`}
+                            onclick={() => deleteLocalVariant(row, { include: null, name: 'this incomplete download' })}
+                            title="Delete and reclaim disk space">
                             <Trash2 size={13} />
                           </button>
                         {/if}
                       </span>
                     </div>
-                  {/each}
-                </div>
+                  </div>
+                {:else}
+                  <div class="qlist">
+                    {#each row.variants as variant (variant.include ?? variant.name)}
+                      <div class="qrow mmvariant">
+                        <span class="qleft">
+                          <span class="mono qname">{variant.quant ?? variant.name}</span>
+                        </span>
+                        <span class="qright">
+                          <span class="qsize mono">{fmtBytes(variant.size)}</span>
+                          {#if isOwner}
+                            <button class="qdel" disabled={localDeleting === `${row.repoDir}::${variant.include}`}
+                              onclick={() => deleteLocalVariant(row, variant)} title="Delete from disk">
+                              <Trash2 size={13} />
+                            </button>
+                          {/if}
+                        </span>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             </div>
           {/each}
@@ -1060,6 +1097,8 @@
     display: flex; gap: 12px; padding: 12px; border-radius: calc(13px * var(--rf));
     background: var(--bg-raised); border: 1px solid var(--border-soft);
   }
+  .mmrow.broken { border-color: color-mix(in srgb, var(--red) 35%, var(--border-soft)); }
+  .qname.err { color: var(--red); }
   .mminfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
   .mmtop { display: flex; align-items: baseline; gap: 8px; }
   .mmname {

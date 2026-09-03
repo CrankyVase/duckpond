@@ -34,28 +34,65 @@ function repoIdFromCacheDirName(dirName) {
   return dirName.replace(/^models--/, '').replace('--', '/');
 }
 
-/** One HF-cache repo -> a "My Models" row, or null when it has no complete snapshot. */
+// hf download writes a file's blob (blobs/<hash>) BEFORE creating the
+// snapshot symlink that points to it — two separate steps, not one atomic
+// commit. A cancel (or a crash) landing in that gap leaves a fully-written,
+// real blob on disk with nothing in any snapshot dir referencing it: the
+// repo scans as empty even though it's actually holding real gigabytes.
+// Sums every blob that isn't a live ".incomplete" transfer, real usage
+// whether or not anything currently links to it — good enough to flag
+// "there's reclaimable space here" without walking the symlink graph.
+function blobBytes(repoDir) {
+  let names;
+  try { names = readdirSync(join(repoDir, 'blobs')); } catch { return 0; }
+  let total = 0;
+  for (const n of names) {
+    if (n.endsWith('.incomplete')) continue;
+    try { total += statSync(join(repoDir, 'blobs', n)).size; } catch { /* vanished mid-scan */ }
+  }
+  return total;
+}
+
+/** One HF-cache repo -> a "My Models" row, or null when there's nothing on disk at all. */
 function hfCacheRepoEntry(dirName) {
   if (!/^models--[\w.-]+(--[\w.-]+)?$/.test(dirName)) return null;
   const repoId = repoIdFromCacheDirName(dirName);
+  const repoDir = cacheDir(repoId);
   const snapDir = mainSnapshotDir(repoId);
-  if (!snapDir) return null;
-  const files = walkFiles(snapDir);
-  if (!files.length) return null;
-  const grouped = groupVariants(files);
-  const variants = grouped.variants
-    .filter((v) => !/mmproj/i.test(v.name ?? ''))
-    .map((v) => ({ name: v.name, include: v.include, size: v.size, quant: quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null) }));
-  if (!variants.length) return null;
-  const updatedAt = Math.max(...files.map((f) => f.mtimeMs));
+  const files = snapDir ? walkFiles(snapDir) : [];
+  if (files.length) {
+    const grouped = groupVariants(files);
+    const variants = grouped.variants
+      .filter((v) => !/mmproj/i.test(v.name ?? ''))
+      .map((v) => ({ name: v.name, include: v.include, size: v.size, quant: quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null) }));
+    if (variants.length) {
+      const updatedAt = Math.max(...files.map((f) => f.mtimeMs));
+      return {
+        source: 'hf-cache',
+        repoId,
+        repoDir,
+        kind: grouped.kind,
+        totalBytes: grouped.total,
+        variants,
+        updatedAt: new Date(updatedAt).toISOString(),
+      };
+    }
+  }
+  // No usable snapshot — see if there's an orphaned blob explaining why
+  // "I downloaded this" doesn't match "it's not in my list".
+  const orphaned = blobBytes(repoDir);
+  if (orphaned < 1024) return null; // a few stray KB isn't worth reporting
+  let mtimeMs = Date.now();
+  try { mtimeMs = statSync(repoDir).mtimeMs; } catch { /* repoDir vanished mid-scan */ }
   return {
-    source: 'hf-cache',
+    source: 'hf-cache-broken',
     repoId,
-    repoDir: cacheDir(repoId),
-    kind: grouped.kind,
-    totalBytes: grouped.total,
-    variants,
-    updatedAt: new Date(updatedAt).toISOString(),
+    repoDir,
+    kind: 'broken',
+    totalBytes: orphaned,
+    variants: [],
+    broken: true,
+    updatedAt: new Date(mtimeMs).toISOString(),
   };
 }
 

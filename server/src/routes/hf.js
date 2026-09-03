@@ -143,7 +143,10 @@ export default async function hfRoutes(app) {
       } else if (source === 'hf-cache' && include) {
         const del = deleteVariant(repoId, { include });
         result = { ok: true, freedBytes: del.freedBytes, presetRemoved: del.presetRemoved };
-      } else if (source === 'hf-cache') {
+      } else if (source === 'hf-cache' || source === 'hf-cache-broken') {
+        // Broken rows (localInventory.js) are orphaned blobs with no
+        // snapshot symlink — never had a usable file, so never had a router
+        // preset, but strip defensively in case one was hand-added anyway.
         const del = deleteModelRepoByPath(repoDir);
         const presetRemoved = removeRouterPresetSections(del.repoDir);
         result = { ok: true, freedBytes: del.freedBytes, presetRemoved };
