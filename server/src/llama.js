@@ -11,7 +11,7 @@ import {
   estimateTokens, fallbackCandidates, isRemoteId, isRetryableRemoteError,
   resolveRemote, streamRemote,
 } from './providers.js';
-import { makeThinkSplitter } from './reasoning.js';
+import { makeThinkSplitter, REASONING_PARAM_KEYS } from './reasoning.js';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
 
@@ -150,6 +150,20 @@ function isRetryableLocalError(err) {
   return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up/i.test(msg);
 }
 const LOCAL_RETRY_MAX = 3;
+
+// Some GGUF chat templates (DavidAU's merges especially) hardcode their own
+// vocabulary for reasoning_effort — e.g. 'xhigh'/'medium'/'low' instead of the
+// usual 'high'/'medium'/'low' — and raise a Jinja exception on anything else,
+// which llama.cpp surfaces as a 500 before a single token streams. There's no
+// way to know a model's accepted values ahead of time, so on this specific
+// failure we drop reasoning.js's params entirely and retry once bare rather
+// than losing the whole turn to a template quirk we can't predict.
+const TEMPLATE_REASONING_REJECT_RE = /Jinja Exception:.*reasoning effort/i;
+function stripReasoningParams(params) {
+  const next = { ...params };
+  for (const k of REASONING_PARAM_KEYS) delete next[k];
+  return next;
+}
 const LOCAL_RETRY_BASE_MS = 500;
 
 // Streaming chat completion. Calls onDelta(textChunk, meta) per SSE chunk and
@@ -162,6 +176,8 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
   act.active++;
   try {
     let lastErr;
+    let effectiveParams = params;
+    let strippedReasoning = false;
     // Same shape as remoteCall's fallback loop: only while nothing has
     // streamed yet — a half-delivered reply never restarts.
     for (let attempt = 1; attempt <= LOCAL_RETRY_MAX; attempt++) {
@@ -171,12 +187,20 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
         return onDelta?.(chunk, meta);
       };
       try {
-        return await streamChatInner({ model, messages, params, onDelta: trackDelta, abortSignal });
+        return await streamChatInner({ model, messages, params: effectiveParams, onDelta: trackDelta, abortSignal });
       } catch (err) {
         lastErr = err;
         const more = attempt < LOCAL_RETRY_MAX;
-        if (!more || emitted || abortSignal?.aborted || !isRetryableLocalError(err)) throw err;
-        onEvent?.({ attempt, type: 'retry', reason: String(err.message ?? err).slice(0, 200) });
+        const msg = String(err.message ?? err);
+        const templateRejectsReasoning = !strippedReasoning && TEMPLATE_REASONING_REJECT_RE.test(msg);
+        if (!more || emitted || abortSignal?.aborted || !(isRetryableLocalError(err) || templateRejectsReasoning)) throw err;
+        if (templateRejectsReasoning) {
+          effectiveParams = stripReasoningParams(effectiveParams);
+          strippedReasoning = true;
+          onEvent?.({ attempt, type: 'retry', reason: 'model template rejected reasoning_effort; retrying without it' });
+          continue; // template-quirk retry, not a transient failure — no backoff
+        }
+        onEvent?.({ attempt, type: 'retry', reason: msg.slice(0, 200) });
         await new Promise((r) => setTimeout(r, LOCAL_RETRY_BASE_MS * attempt));
       }
     }
