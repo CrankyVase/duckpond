@@ -121,19 +121,6 @@
   mirrors like `meshllm/...-layers`) instead of showing the repo actually
   clicked. Chips now only auto-navigate away for a genuine base/safetensors
   model with no GGUF of its own.
-- **Sort/filter sidebar for Discover** — a real per-quant size/TPS number
-  needs a repo's file tree (one HF call each, too expensive for a 30-100
-  row search page), so `estimateListing()` (`hfHub.js`) estimates instead:
-  `modelParamsB()` already parses a headline param count from the repo name
-  for free, assumes a typical ~4.8 bits/weight (Q4_K_M-ish, the most common
-  tier) for a ballpark size, and feeds that into the existing `estimateTps()`
-  physics model (MoE active-param ratio included). Every Discover result now
-  carries `paramsB`/`estimatedSizeBytes`/`estimatedTps`; a new sidebar
-  (toggle button in the filterbar) filters on them with range sliders plus
-  an "updated within" recency step slider — same client-side-over-loaded-
-  results pattern as the existing Type/Sort dropdowns. A repo whose name
-  doesn't encode a param count is never excluded by these, same "missing
-  data doesn't mean hide it" principle as the GGUF classification fix.
 
 ## 2. Todos — most complex → least complex
 
@@ -153,7 +140,20 @@ sharing the same HF cache — Unsloth Studio, Duck Pond Control). Needs
 reproduction first — ask what "sometimes" correlates with (right after a
 delete? after idle unload? after a router restart?) before guessing at a fix.
 
-### ~~Sort/filter sidebar for Discover~~ — done, see §1b
+### Sort/filter sidebar for Discover — built 2026-09-03, reverted same day
+Shipped as a toggleable side panel (speed/size/param-count range sliders +
+an "updated within" recency slider, filtering client-side over whatever's
+loaded, same pattern as the existing Type/Sort dropdowns) with a server-side
+`estimateListing()` in `hfHub.js` doing the actual estimation work
+(`modelParamsB()`'s free name-parsed param count → assumed ~4.8 bits/weight
+→ fed into the existing `estimateTps()` physics model). User's reaction:
+"rm that ugly sidebard :(" — reverted whole (commit 6dfff09), including the
+backend estimate fields, rather than left half-wired. The estimation
+approach itself was never objected to, just the sidebar's look — if this
+comes back, get a steer on presentation first (inline chips on each row?
+a compact bar instead of a side panel? Unsloth/LM Studio don't actually
+have an equivalent filter UI to copy verbatim here, unlike everything else
+in this doc) before reimplementing the same layout.
 
 ### 1. Reuse Unsloth's own inference engine code in the media bridge
 Right now `bridge.py` hand-rolls model → pipeline dispatch. Unsloth's
