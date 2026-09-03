@@ -295,8 +295,8 @@ export function estimateTps(sizeBytes, repoIdOrName, { gpuFreeGB, ramAvailableGB
 }
 
 // ---------------------------------------------------------------------------
-// Quant labels — "Q4_K_M" / "IQ2_XS" / "F16" / "dynamic" from a GGUF
-// filename, with Unsloth's display_label convention (UD-* → "dynamic").
+// Quant labels — "Q4_K_M" / "IQ2_XS" / "F16" / "Dynamic Q2_K_XL" from a GGUF
+// filename/dirname.
 // ---------------------------------------------------------------------------
 // A quant token: optional I/Q/T/MX prefix family, then digits, then
 // dash/underscore-joined sub-tokens (K_S, K_XL, XXS, NL, 0, 1...). Requires
@@ -310,11 +310,35 @@ export function quantLabel(filename) {
   const m = base.match(QUANT_RE);
   if (!m) return null;
   let q = m[1].toUpperCase().replace(/-/g, '_');
-  if (/^UD_/.test(q)) return 'dynamic';
+  if (/^UD_/.test(q)) {
+    // Unsloth Dynamic quants (UD-TQ1_0, UD-IQ2_M, UD-Q3_K_XL, ...) used to
+    // all collapse to the bare word "dynamic" here, so every dynamic-quant
+    // row in the picker read identically no matter which level it actually
+    // was — keep the specific level, just flagged as Dynamic.
+    const rest = q.replace(/^UD_/, '');
+    return rest ? `Dynamic ${rest}` : 'Dynamic';
+  }
   if (/^BF?16$|^F32$/.test(q)) return q;
   if (!/\d/.test(q)) return null;
   // "Q4_K_M_00001" (first shard of a set) reads as plain Q4_K_M
   return q.replace(SHARD_RE, '').replace(/[_-]+$/, '');
+}
+
+// Speculative-decoding draft heads (MTP, EAGLE/EAGLE3, dFlash) get published
+// alongside the main model, often quantized the same way as a real quant
+// (e.g. "-MTP-Q8_0.gguf" next to a real "-UD-Q4_K_M.gguf" main model) — a few
+// hundred MB standing next to tens of GB. Still a real, separately
+// downloadable file (for speculative decoding setups), just never the model
+// itself — see quantLabel's caller in modelVariants for how this is surfaced.
+const DRAFT_RE = /(?:^|[-_.])(mtp|dflash|eagle-?3?)(?:[-_.]|$)/i;
+export function draftKind(filename) {
+  const base = String(filename).split('/').pop();
+  const m = base.match(DRAFT_RE);
+  if (!m) return null;
+  const k = m[1].toLowerCase();
+  if (k === 'mtp') return 'MTP';
+  if (k === 'dflash') return 'dFlash';
+  return 'EAGLE';
 }
 
 // ---------------------------------------------------------------------------
@@ -413,9 +437,17 @@ export async function modelVariants(repoId) {
     const cachedBytes = v.include && snapDir && !v.include.includes('*')
       ? cachedFileBytes(snapDir, v.include)
       : null;
+    const draft = draftKind(v.name);
+    const baseQuant = quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null);
     return {
       ...v,
-      quant: quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null),
+      // A speculative-decoding draft head (MTP/EAGLE/dFlash) quantized the
+      // same as the main model — e.g. "-MTP-Q8_0.gguf" and "-DFlash-Q8_0.gguf"
+      // both labeled bare "Q8_0" — is indistinguishable from, and far smaller
+      // than, an actual full-size Q8_0 quant of the model itself. Tag it so
+      // it reads as what it is instead of looking like a real alternative.
+      quant: draft ? `${draft} draft (${baseQuant ?? 'GGUF'})` : baseQuant,
+      draft,
       cachedBytes,
       downloaded: cachedBytes != null && cachedBytes >= v.size * 0.999,
       fit: fitTier(v.size, hw),
@@ -426,7 +458,7 @@ export async function modelVariants(repoId) {
   return {
     ...grouped,
     variants: enriched,
-    recommended: recommendVariant(enriched.filter((v) => !/mmproj/i.test(v.name ?? '')), hw.gpuFreeGB)?.include ?? null,
+    recommended: recommendVariant(enriched.filter((v) => !/mmproj/i.test(v.name ?? '') && !v.draft), hw.gpuFreeGB)?.include ?? null,
     vramFreeBytes: hw.gpuFreeBytes != null ? Math.round(hw.gpuFreeBytes) : null,
     vramTotalBytes: hw.gpuTotalBytes != null ? Math.round(hw.gpuTotalBytes) : null,
     ramAvailableBytes: hw.ramAvailableBytes != null ? Math.round(hw.ramAvailableBytes) : null,
