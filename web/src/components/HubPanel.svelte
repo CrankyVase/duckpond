@@ -153,6 +153,70 @@
   // repos, and that must not mean "hide it" — modelKind falls back to
   // filename heuristics and defaults to chat, since that's what the
   // overwhelming majority of untagged GGUF repos actually are.
+  const TASK_FILTERS = [
+    ['text-generation', 'Text Generation'],
+    ['image-text-to-text', 'Image-Text-to-Text'],
+    ['any-to-any', 'Any-to-Any'],
+    ['text-to-image', 'Text-to-Image'],
+    ['image-to-image', 'Image-to-Image'],
+    ['text-to-video', 'Text-to-Video'],
+    ['text-to-speech', 'Text-to-Speech'],
+  ];
+  const SIZE_FILTERS = [
+    ['<1', '<1B'],
+    ['1-8', '1–8B'],
+    ['8-32', '8–32B'],
+    ['32+', '32B+'],
+  ];
+  const FORMAT_FILTERS = [
+    ['gguf', 'GGUF'],
+    ['diffusers', 'Diffusers'],
+    ['transformers', 'Transformers'],
+  ];
+  let taskFilter = $state('');
+  let sizeFilter = $state('');
+  let formatFilter = $state('');
+  function toggleChip(which, value) {
+    if (which === 'task') taskFilter = taskFilter === value ? '' : value;
+    if (which === 'size') sizeFilter = sizeFilter === value ? '' : value;
+    if (which === 'format') formatFilter = formatFilter === value ? '' : value;
+  }
+  function paramsBOf(m) {
+    if (m.paramsB != null) return m.paramsB;
+    const moe = String(m.id).toLowerCase().match(/(\d+(?:\.\d+)?)b-a(\d+(?:\.\d+)?)b/);
+    const dense = !moe && String(m.id).toLowerCase().match(/(?:^|[-_])(\d+(?:\.\d+)?)b(?:[-_]|$)/);
+    return moe ? Number(moe[1]) : dense ? Number(dense[1]) : null;
+  }
+  function matchesTask(m) {
+    if (!taskFilter) return true;
+    const tag = String(m.pipelineTag ?? '').toLowerCase();
+    if (tag === taskFilter) return true;
+    const tags = (m.tags ?? []).map((t) => String(t).toLowerCase());
+    if (tags.includes(taskFilter)) return true;
+    if (taskFilter === 'text-generation' && (m.kind === 'chat' || !m.pipelineTag)) return true;
+    return false;
+  }
+  function matchesSize(m) {
+    if (!sizeFilter) return true;
+    const b = paramsBOf(m);
+    if (b == null) return false;
+    if (sizeFilter === '<1') return b < 1;
+    if (sizeFilter === '1-8') return b >= 1 && b < 8;
+    if (sizeFilter === '8-32') return b >= 8 && b < 32;
+    if (sizeFilter === '32+') return b >= 32;
+    return true;
+  }
+  function matchesFormat(m) {
+    if (!formatFilter) return true;
+    const id = String(m.id).toLowerCase();
+    const tags = (m.tags ?? []).map((t) => String(t).toLowerCase());
+    const lib = String(m.libraryName ?? '').toLowerCase();
+    if (formatFilter === 'gguf') return id.includes('gguf') || tags.includes('gguf');
+    if (formatFilter === 'diffusers') return lib.includes('diffusers') || tags.includes('diffusers');
+    if (formatFilter === 'transformers') return lib.includes('transformers') || tags.includes('transformers') || (!lib && !id.includes('gguf'));
+    return true;
+  }
+
   const TYPE_FILTERS = [
     ['all', 'All types'],
     ['chat', 'Text / Chat'],
@@ -286,9 +350,10 @@
   const isOwner = $derived(app.user?.role === 'owner');
   const displayedResults = $derived.by(() => {
     let list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
-    if (activeTab === 'llm' && !q.trim()) {
+    if (activeTab === 'llm' && !q.trim() && !formatFilter) {
       list = list.filter((m) => /-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id));
     }
+    list = list.filter((m) => matchesTask(m) && matchesSize(m) && matchesFormat(m));
     return sortedResults(list);
   });
   // If the filter drops the selected row out of view, follow the list rather
@@ -313,7 +378,7 @@
   let quantOpen = $state(false);
   let showOom = $state(false);
   $effect(() => { activeRepo; quantOpen = false; showOom = false; });
-  const FIT_OK = new Set(['fits', 'marginal']);
+  const FIT_OK = new Set(['fits', 'marginal', 'partial', 'ram']);
   function fittingRows(v) {
     return sortedVariants(v).filter((r) => FIT_OK.has(r.fit) && !r.companion);
   }
@@ -803,6 +868,29 @@
     </div>
   {/if}
 
+  {#if mode === 'discover'}
+    <div class="filters">
+      <div class="fg">
+        {#each TASK_FILTERS as [val, label] (val)}
+          <button type="button" class="fchip" class:on={taskFilter === val}
+            onclick={() => toggleChip('task', val)}>{label}</button>
+        {/each}
+      </div>
+      <div class="fg">
+        {#each SIZE_FILTERS as [val, label] (val)}
+          <button type="button" class="fchip" class:on={sizeFilter === val}
+            onclick={() => toggleChip('size', val)}>{label}</button>
+        {/each}
+      </div>
+      <div class="fg">
+        {#each FORMAT_FILTERS as [val, label] (val)}
+          <button type="button" class="fchip" class:on={formatFilter === val}
+            onclick={() => toggleChip('format', val)}>{label}</button>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
   {#if mode !== 'downloads' && [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
     <div class="jobbar-stack">
       {#each [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled') as j (j.key)}
@@ -836,7 +924,7 @@
   {#if mode === 'discover'}
   {#if activeTab === 'llm' && !q.trim() && recModels.length}
     <section class="recstrip">
-      <h2>Recommended for this GPU</h2>
+      <h2>Recommended for this machine</h2>
       <div class="carousel">
         {#each recModels as m (m.id)}
           {@const logo = logoFor(m.id)}
@@ -949,7 +1037,7 @@
               </span>
             </div>
             <div class="dacts">
-              <button class="iconbtn" title="Copy repo id" onclick={() => copyRepo(selectedModel.id)}><Copy size={14} /></button>
+              <button type="button" class="iconbtn" title="Copy repo id" onclick={() => copyRepo(selectedModel.id)}><Copy size={14} /></button>
               <a class="iconbtn" title="Open on Hugging Face" href="https://huggingface.co/{selectedModel.id}" target="_blank" rel="noreferrer"><ExternalLink size={14} /></a>
             </div>
           </div>
@@ -1033,7 +1121,8 @@
               </div>
               {:else if !picked && !fits.length}
                 <div class="nofit">
-                  <span>Nothing in this repo fits {hw?.gpuLabel ?? 'this GPU'}.
+                  <span>Nothing in this repo fits {hw?.gpuLabel ?? 'this GPU'}
+                    {hw?.ramLabel ? ` + ${hw.ramLabel} RAM` : ''}.
                     Smallest real quant is {fmtBytes(rest.filter((r) => !r.companion)[0]?.size ?? v.total)}.</span>
                   {#if rest.length}
                     <button class="ghost" onclick={() => { showOom = !showOom; quantOpen = true; }}>
@@ -1338,6 +1427,7 @@
     transition: color 140ms ease, background 140ms ease;
   }
   .modebtn:hover { color: var(--text-dim); }
+  .modebtn:focus-visible { outline: none; color: var(--text); }
   .modebtn.on { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
   .modebadge {
     display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
@@ -1378,12 +1468,14 @@
   }
   .mcowner { font-size: 11.5px; color: var(--text-faint); line-height: 1; }
 
-  .dacts { margin-left: auto; display: flex; gap: 4px; }
+  .dacts { margin-left: auto; display: flex; gap: 2px; flex-shrink: 0; }
   .iconbtn {
-    width: 28px; height: 28px; border-radius: 999px; color: var(--text-faint);
+    all: unset; cursor: pointer; box-sizing: border-box;
+    width: 28px; height: 28px; border-radius: 8px; color: var(--text-faint);
     display: grid; place-items: center;
   }
   .iconbtn:hover { background: var(--bg-hover); color: var(--text); }
+  .iconbtn:focus-visible { outline: none; background: var(--bg-hover); color: var(--text); }
 
   .readme {
     margin-top: 22px; font-size: 13.5px; line-height: 1.65; color: var(--text-dim);
@@ -1479,6 +1571,25 @@
   .dltag.error { background: color-mix(in srgb, var(--red) 22%, transparent); color: var(--red); }
   .dltag.cancelled { background: var(--bg-hover); color: var(--text-faint); }
 
+  .filters {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px;
+    margin: -4px 0 14px; flex-shrink: 0;
+  }
+  .fg { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .fchip {
+    all: unset; cursor: pointer; box-sizing: border-box;
+    height: 28px; padding: 0 11px; border-radius: 999px;
+    font-size: 12px; font-weight: 550; color: var(--text-dim);
+    background: color-mix(in srgb, var(--foreground, #fff) 5%, transparent);
+    display: inline-flex; align-items: center;
+  }
+  .fchip:hover { color: var(--text); background: var(--bg-hover); }
+  .fchip.on {
+    color: var(--text); background: var(--bg-card);
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+  .fchip:focus-visible { outline: none; color: var(--text); background: var(--bg-hover); }
+
   .toolbar {
     flex-shrink: 0; display: flex; align-items: center; gap: 10px;
     flex-wrap: wrap; margin-bottom: 16px; min-height: 36px;
@@ -1494,6 +1605,7 @@
     transition: color 140ms ease, background 140ms ease;
   }
   .tab:hover { color: var(--text-dim); }
+  .tab:focus-visible { outline: none; color: var(--text); }
   .tab.active { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
 
   .popular { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; flex-shrink: 0; }

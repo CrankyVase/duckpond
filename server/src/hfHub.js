@@ -67,6 +67,9 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
     gated: !!m.gated,
     private: !!m.private,
     updatedAt: m.lastModified ?? null,
+    tags: m.tags ?? [],
+    libraryName: m.library_name ?? null,
+    paramsB: modelParamsB(m.id).totalB,
   }));
   return { models, nextCursor };
 }
@@ -314,16 +317,20 @@ export async function modelReadme(repoId) {
 // VRAM + 50% RAM, else oom), computed on the server from live rocm-smi +
 // meminfo. Reported RAM headroom is what's actually *available*, not total.
 // ---------------------------------------------------------------------------
-export function fitTier(sizeBytes, { gpuTotalGB, ramAvailableGB }) {
+export function fitTier(sizeBytes, { gpuTotalGB, ramAvailableGB, ramTotalGB }) {
+  const sizeGB = sizeBytes / 1024 ** 3;
+  const ramGB = ramTotalGB ?? ramAvailableGB ?? 0;
   if (!gpuTotalGB || gpuTotalGB <= 0) {
-    return ramAvailableGB && sizeBytes / 1024 ** 3 <= ramAvailableGB * 0.5 ? 'ram' : 'oom';
+    return ramGB && sizeGB <= ramGB * 0.5 ? 'ram' : 'oom';
   }
   // +15% load overhead (KV+activations estimate) — Unsloth's constant.
-  const needGB = sizeBytes / 1024 ** 3 * 1.15 + 1;
+  const needGB = sizeGB * 1.15 + 1;
   const budgetGB = gpuTotalGB * 0.97;
   if (needGB <= budgetGB) return 'fits';
   if (needGB <= gpuTotalGB) return 'marginal';
-  if (needGB <= budgetGB + (ramAvailableGB ?? 0) * 0.5) return 'partial';
+  // llama.cpp --fit will split across VRAM + RAM. A 67 GB GGUF on a
+  // 16 GB card + 62 GB of system RAM is runnable (slow), not "does not fit".
+  if (sizeGB <= gpuTotalGB + ramGB * 0.9) return 'partial';
   return 'oom';
 }
 
@@ -500,23 +507,25 @@ export function isCompanionVariant(v, all) {
   return false;
 }
 
-// Recommended default: largest real quant that still *fits* (fits/marginal).
-// Never recommend an OOM row. If nothing fits, return the smallest real
-// quant as a fallback pick but the caller must not label it Recommended.
+// Recommended default: best-fit runnable quant. Full GPU offload wins,
+// then over-budget, then VRAM+RAM split (llama.cpp --fit). Never recommend
+// an OOM row. If nothing is runnable, return the smallest real quant as a
+// fallback pick but the caller must not label it Recommended.
+const RUNNABLE_FIT = new Set(['fits', 'marginal', 'partial', 'ram']);
+const FIT_PREF = { fits: 0, marginal: 1, partial: 2, ram: 3 };
 export function recommendVariant(variants, gpuFreeGB) {
   if (!variants.length) return { pick: null, recommended: false };
   const pool = variants.filter((v) => !isCompanionVariant(v, variants));
   const real = pool.length ? pool : variants;
-  if (gpuFreeGB != null) {
-    const usable = gpuFreeGB * 0.9;
-    const fitting = real.filter((v) => {
-      const gb = v.size / 1024 ** 3;
-      return gb <= usable && (v.fit === 'fits' || v.fit === 'marginal');
+  const runnable = real.filter((v) => RUNNABLE_FIT.has(v.fit));
+  if (runnable.length) {
+    const pick = runnable.reduce((a, b) => {
+      const pa = FIT_PREF[a.fit] ?? 9;
+      const pb = FIT_PREF[b.fit] ?? 9;
+      if (pa !== pb) return pa < pb ? a : b;
+      return b.size > a.size ? b : a;
     });
-    if (fitting.length) {
-      const pick = fitting.reduce((a, b) => (b.size > a.size ? b : a));
-      return { pick, recommended: true };
-    }
+    return { pick, recommended: true };
   }
   const smallest = real.reduce((a, b) => (a.size <= b.size ? a : b));
   return { pick: smallest, recommended: false };

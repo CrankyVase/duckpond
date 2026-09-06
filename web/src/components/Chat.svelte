@@ -29,6 +29,7 @@
   let pendText = '';
   let pendThink = '';
   let toolBuf = null; // { index, name, args } — streaming tool-call arguments
+  let ctxPromptBaseline = null; // last server-reported prompt size → tok_s grows the bar live
 
   // ----- follow-up prompt chips (messageId → string[]) -----
   let followups = $state(null); // { messageId, items: string[], loading?: boolean } | null
@@ -164,7 +165,13 @@
       case 'delta':
         if (s) { s.loading = false; pendText += ev.text; scheduleFlush(); }
         break;
-      case 'tok_s': if (s) { s.tokS = ev.value; s.n = ev.n; } break;
+      case 'tok_s':
+        if (s) { s.tokS = ev.value; s.n = ev.n; }
+        // live "tokens left": prompt baseline + what this reply has generated so far
+        if (here && ctxPromptBaseline != null && app.context.budget > 0) {
+          app.context.used = Math.min(app.context.budget, ctxPromptBaseline + (ev.n ?? 0));
+        }
+        break;
       case 'tool_delta':
         if (!s) break;
         s.loading = false;
@@ -314,7 +321,10 @@
         s.diffusion = { step: ev.n, steps: ev.steps, text: ev.text, phase: ev.phase };
         if (here) scrollToBottom();
         break;
-      case 'context': if (here) app.context = { used: ev.used, budget: ev.budget }; break;
+      case 'context':
+        if (here) app.context = { used: ev.used, budget: ev.budget };
+        ctxPromptBaseline = ev.used;
+        break;
       case 'title':
         if (here) app.conv.title = ev.title;
         loadConversations();
@@ -1156,7 +1166,7 @@
       <textarea rows="1"
         placeholder={busy
           ? 'Queue a follow-up…'
-          : dragOver ? 'Drop files to attach…' : 'Message DuckPond… (paste or drop images/files)'}
+          : dragOver ? 'Drop files to attach…' : 'Message DuckPond'}
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
         onpaste={onComposerPaste}
         disabled={!app.conv}></textarea>
@@ -1262,8 +1272,8 @@
       0 6px 20px rgba(0, 0, 0, 0.28);
   }
   .composer textarea {
-    resize: none; max-height: 200px;
-    background: none; border: none; box-shadow: none; padding: 2px 0 6px;
+    resize: none; max-height: 200px; min-height: 24px; width: 100%;
+    background: none; border: none; box-shadow: none; outline: none; padding: 2px 0 8px;
     line-height: 1.5;
   }
   .composer textarea:focus { box-shadow: none; }
@@ -1289,16 +1299,18 @@
   .grow { flex: 1; }
   .tool {
     all: unset; cursor: pointer;
-    display: grid; place-items: center;
+    display: inline-flex; align-items: center; justify-content: center;
     width: 30px; height: 28px; border-radius: calc(8px * var(--rf));
     color: var(--text-faint);
     transition: background 120ms ease, color 120ms ease;
   }
   .tool:hover { background: var(--bg-hover); color: var(--text-dim); }
+  .tool:focus-visible { outline: none; background: var(--bg-hover); color: var(--text-dim); }
   .tool.on { color: var(--accent); }
   .tool.ultra { color: var(--accent); background: var(--accent-glow); }
-  .tool :global(.rlbl) { font-size: 11px; font-weight: 600; }
-  .tool:has(.rlbl) { width: auto; gap: 5px; padding: 0 9px; }
+  .tool.ultra:focus-visible { outline: none; background: var(--accent-glow); }
+  .tool :global(.rlbl) { font-size: 11px; font-weight: 600; line-height: 1; }
+  .tool:has(.rlbl) { width: auto; gap: 5px; padding: 0 8px; }
   .tool:disabled { opacity: 0.35; cursor: default; }
   .send {
     width: 34px; height: 34px; border-radius: 50%; padding: 0; line-height: 0;

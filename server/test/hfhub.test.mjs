@@ -30,7 +30,8 @@ ok('small → fits', fitTier(5 * 1024 ** 3, hw) === 'fits');
 ok('just under 97% budget → fits', fitTier(12.5 * 1024 ** 3, hw) === 'fits', fitTier(12.5 * 1024 ** 3, hw));
 ok('just under VRAM → marginal', fitTier(12.9 * 1024 ** 3, hw) === 'marginal', fitTier(12.9 * 1024 ** 3, hw));
 ok('spills to RAM → partial', fitTier(25 * 1024 ** 3, hw) === 'partial', fitTier(25 * 1024 ** 3, hw));
-ok('beyond VRAM+50% RAM → oom', fitTier(200 * 1024 ** 3, hw) === 'oom');
+ok('VRAM+RAM 67GB on 16+62 is partial', fitTier(67.6 * 1024 ** 3, { gpuTotalGB: 16, ramTotalGB: 62 }) === 'partial');
+ok('beyond VRAM+RAM → oom', fitTier(200 * 1024 ** 3, hw) === 'oom');
 ok('no GPU reading → ram/oom', fitTier(4 * 1024 ** 3, { gpuTotalGB: null, ramAvailableGB: 32 }) === 'ram');
 
 console.log('\n== 3. estimateTps: MoE vs dense sanity ==');
@@ -79,6 +80,11 @@ const recOom = recommendVariant([
   { name: 'bigger-IQ2.gguf', include: 'b', size: 94 * 1024 ** 3, fit: 'oom', draft: false },
 ], 3.7);
 ok('nothing fits → smallest real, not labelled recommended', recOom.recommended === false && recOom.pick?.include === 'a', JSON.stringify(recOom));
+const recRam = recommendVariant([
+  { name: 'iq1s.gguf', include: 'a', size: 67.6 * 1024 ** 3, fit: 'partial', draft: false },
+  { name: 'iq2.gguf', include: 'b', size: 90 * 1024 ** 3, fit: 'oom', draft: false },
+], 4);
+ok('VRAM+RAM split is recommended', recRam.recommended === true && recRam.pick?.include === 'a', JSON.stringify(recRam));
 
 console.log(fails ? `\n${fails} FAILURES` : '\nAll green.');
 process.exit(fails ? 1 : 0);
