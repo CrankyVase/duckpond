@@ -13,7 +13,8 @@ import {
   existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
   unlinkSync, writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import os from 'node:os';
+import { basename, join } from 'node:path';
 import { gpuVram } from './llama.js';
 import { modelParamsB } from './modelDescribe.js';
 import { downloadBusy } from './downloadManager.js';
@@ -241,7 +242,69 @@ async function hardwareSnapshot() {
     gpuFreeGB: gpuFreeBytes ? gpuFreeBytes / 1024 ** 3 : null,
     ramTotalGB: ramTotalBytes ? ramTotalBytes / 1024 ** 3 : null,
     ramAvailableGB: ramAvailableBytes ? ramAvailableBytes / 1024 ** 3 : null,
+    ramTotalBytes, ramAvailableBytes,
+    cpuCores: os.cpus()?.length ?? 0,
   };
+}
+
+/** Hub header pills — live VRAM/RAM/CPU plus how many HF-cache repos sit on disk. */
+export async function hubHardware() {
+  const hw = await hardwareSnapshot();
+  let cacheCount = 0;
+  try {
+    const hub = join(HF_HOME, 'hub');
+    cacheCount = readdirSync(hub).filter((n) => n.startsWith('models--')).length;
+  } catch { /* HF_HOME missing */ }
+  const fmt = (gb) => (gb == null ? null : gb >= 10 ? `${Math.round(gb)} GB` : `${gb.toFixed(1)} GB`);
+  return {
+    ...hw,
+    cacheCount,
+    gpuLabel: fmt(hw.gpuTotalGB),
+    ramLabel: fmt(hw.ramTotalGB),
+    cpuLabel: hw.cpuCores ? `${hw.cpuCores}` : null,
+  };
+}
+
+// Models that actually fit a 16 GB card at a usable quant. Used for the
+// "Recommended for this GPU" strip — Unsloth's hub leads with what you can
+// run, not whatever HF sorted lastModified.
+const FITS_THIS_GPU = [
+  'unsloth/LFM2-700M-GGUF',
+  'unsloth/Llama-3.2-3B-Instruct-GGUF',
+  'unsloth/gemma-3-4b-it-GGUF',
+  'unsloth/Ministral-3-8B-Instruct-2512-GGUF',
+];
+
+export async function recommendedModels() {
+  const models = [];
+  for (const id of FITS_THIS_GPU) {
+    try { models.push({ ...(await modelInfo(id)), curated: true }); }
+    catch { /* gated / missing — skip */ }
+  }
+  return { models };
+}
+
+const readmeCache = new Map(); // repoId -> { text, at }
+const README_TTL_MS = 30 * 60 * 1000;
+
+export async function modelReadme(repoId) {
+  assertRepoId(repoId);
+  const hit = readmeCache.get(repoId);
+  if (hit && Date.now() - hit.at < README_TTL_MS) return { text: hit.text };
+  const res = await fetch(`${HF_API}/${repoId}/raw/main/README.md`, {
+    signal: AbortSignal.timeout(12_000),
+    headers: { Accept: 'text/plain' },
+  });
+  if (res.status === 404) return { text: '' };
+  if (!res.ok) throw new Error(`huggingface.co ${res.status}`);
+  let text = await res.text();
+  if (text.length > 200_000) text = `${text.slice(0, 200_000)}\n\n…truncated`;
+  if (text.startsWith('---')) {
+    const end = text.indexOf('\n---', 3);
+    if (end >= 0) text = text.slice(end + 4).replace(/^\s+/, '');
+  }
+  readmeCache.set(repoId, { text, at: Date.now() });
+  return { text };
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +440,16 @@ export function groupVariants(entries) {
     // zero actual .gguf files inside it before ranking.
     const dirList = isQuantDirs ? [...dirs.values()].filter((d) => d.ggufFiles > 0) : [...dirs.values()];
     const sorted = dirList.sort((a, b) => a.size - b.size);
+    // Root-level GGUFs sitting NEXT TO quant subfolders (MTP/EAGLE draft
+    // heads, mmproj vision adapters, the odd standalone quant) used to
+    // vanish entirely in this branch — only subfolders became variants, so
+    // on Unsloth-style repos there was no way to download the draft file at
+    // all. List each one as its own variant, appended after the quant
+    // subfolders so the main quants stay first; the draft tag + the
+    // recommendation filter keep them from ever being the default pick.
+    const rootGgufs = rootFiles
+      .filter((e) => /\.gguf$/i.test(e.path))
+      .map((e) => ({ name: e.path, size: e.size, include: e.path }));
     // Subfolders full of GGUF quants (Unsloth's pattern) are genuine
     // alternatives — picking the smallest is a safe default. Subfolders of
     // anything else (diffusers-style pipelines: language_model/, vae/,
@@ -384,7 +457,9 @@ export function groupVariants(entries) {
     // defaulting to just the smallest one would silently hand back a broken
     // partial model, so default to the whole repo instead and still let
     // someone pick a single subfolder deliberately from the dropdown.
-    const variants = isQuantDirs ? sorted : [{ name: 'Everything (all components)', size: total, include: null }, ...sorted];
+    const variants = isQuantDirs
+      ? [...sorted, ...rootGgufs]
+      : [{ name: 'Everything (all components)', size: total, include: null }, ...sorted, ...rootGgufs];
     return { kind: 'dirs', total, variants };
   }
 
@@ -410,16 +485,40 @@ export function groupVariants(entries) {
   return { kind: 'flat', total, variants: [{ name: 'everything', size: total, include: null }] };
 }
 
-// Recommended default variant: prefer the largest quant that still fits in
-// free VRAM (Unsloth's "default_variant" behaviour — best quality that
-// runs entirely on the GPU). Falls back to the smallest variant overall so
-// the button always points at something sane.
-function recommendVariant(variants, gpuFreeGB) {
-  if (!variants.length) return null;
-  if (gpuFreeGB == null) return variants[0];
-  const usable = gpuFreeGB * 0.9;
-  const fitting = variants.filter((v) => v.size / 1024 ** 3 <= usable);
-  return (fitting.length ? fitting : [variants[0]]).reduce((a, b) => (b.size > a.size ? b : a));
+// Tiny files sitting next to a 40–90 GB GGUF (mmproj, MTP/EAGLE draft heads,
+// leftover BF16 stubs) used to win "largest that fits" because 1 GB always
+// fits a 16 GB card — then the Hub labelled an 86 GB IQ1_S "Recommended"
+// after those got filtered as drafts, which is the opposite of Unsloth.
+export function isCompanionVariant(v, all) {
+  if (v?.draft) return true;
+  const n = String(v?.name ?? '');
+  if (/mmproj/i.test(n)) return true;
+  const real = (all ?? []).filter((x) => !x.draft && !/mmproj/i.test(x.name ?? ''));
+  const max = Math.max(0, ...real.map((x) => x.size || 0));
+  if (max >= 8 * 1024 ** 3 && (v.size || 0) < max * 0.08) return true;
+  return false;
+}
+
+// Recommended default: largest real quant that still *fits* (fits/marginal).
+// Never recommend an OOM row. If nothing fits, return the smallest real
+// quant as a fallback pick but the caller must not label it Recommended.
+export function recommendVariant(variants, gpuFreeGB) {
+  if (!variants.length) return { pick: null, recommended: false };
+  const pool = variants.filter((v) => !isCompanionVariant(v, variants));
+  const real = pool.length ? pool : variants;
+  if (gpuFreeGB != null) {
+    const usable = gpuFreeGB * 0.9;
+    const fitting = real.filter((v) => {
+      const gb = v.size / 1024 ** 3;
+      return gb <= usable && (v.fit === 'fits' || v.fit === 'marginal');
+    });
+    if (fitting.length) {
+      const pick = fitting.reduce((a, b) => (b.size > a.size ? b : a));
+      return { pick, recommended: true };
+    }
+  }
+  const smallest = real.reduce((a, b) => (a.size <= b.size ? a : b));
+  return { pick: smallest, recommended: false };
 }
 
 export async function modelVariants(repoId) {
@@ -433,35 +532,36 @@ export async function modelVariants(repoId) {
 
   const hw = await hardwareSnapshot();
   const snapDir = mainSnapshotDir(repoId);
+  const aliases = routerAliasesByPath();
 
-  // Skip mmproj (vision adapters) when ranking for the recommended pick —
-  // they're tiny but never the model itself.
   const enriched = grouped.variants.map((v) => {
-    const cachedBytes = v.include && snapDir && !v.include.includes('*')
+    const cachedBytes = v.include && snapDir && !String(v.include).includes('*')
       ? cachedFileBytes(snapDir, v.include)
-      : null;
+      : (v.include && snapDir ? cachedPatternBytes(snapDir, v.include) : null);
     const draft = draftKind(v.name);
     const baseQuant = quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null);
+    const downloaded = cachedBytes != null && cachedBytes >= v.size * 0.999;
+    const path = downloaded ? resolveVariantPath(repoId, v.include) : null;
     return {
       ...v,
-      // A speculative-decoding draft head (MTP/EAGLE/dFlash) quantized the
-      // same as the main model — e.g. "-MTP-Q8_0.gguf" and "-DFlash-Q8_0.gguf"
-      // both labeled bare "Q8_0" — is indistinguishable from, and far smaller
-      // than, an actual full-size Q8_0 quant of the model itself. Tag it so
-      // it reads as what it is instead of looking like a real alternative.
       quant: draft ? `${draft} draft (${baseQuant ?? 'GGUF'})` : baseQuant,
       draft,
       cachedBytes,
-      downloaded: cachedBytes != null && cachedBytes >= v.size * 0.999,
+      downloaded,
       fit: fitTier(v.size, hw),
       tps: estimateTps(v.size, repoId, hw),
+      routerAlias: path ? (aliases.get(path) ?? null) : null,
     };
   });
+
+  for (const v of enriched) v.companion = isCompanionVariant(v, enriched);
+  const rec = recommendVariant(enriched, hw.gpuFreeGB);
 
   return {
     ...grouped,
     variants: enriched,
-    recommended: recommendVariant(enriched.filter((v) => !/mmproj/i.test(v.name ?? '') && !v.draft), hw.gpuFreeGB)?.include ?? null,
+    recommended: rec.recommended ? rec.pick?.include ?? null : null,
+    pick: rec.pick?.include ?? null,
     vramFreeBytes: hw.gpuFreeBytes != null ? Math.round(hw.gpuFreeBytes) : null,
     vramTotalBytes: hw.gpuTotalBytes != null ? Math.round(hw.gpuTotalBytes) : null,
     ramAvailableBytes: hw.ramAvailableBytes != null ? Math.round(hw.ramAvailableBytes) : null,
@@ -480,6 +580,104 @@ function includeMatches(include, path) {
   if (!include) return true; // whole-repo variant: caller handles separately
   const re = new RegExp('^' + include.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
   return re.test(path);
+}
+
+function walkRel(dir, prefix = '') {
+  const out = [];
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); }
+  catch { return out; }
+  for (const e of entries) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...walkRel(join(dir, e.name), rel));
+    else out.push(rel);
+  }
+  return out;
+}
+
+function cachedPatternBytes(snapDir, include) {
+  let total = 0;
+  let any = false;
+  for (const rel of walkRel(snapDir)) {
+    if (!includeMatches(include, rel)) continue;
+    const bytes = cachedFileBytes(snapDir, rel);
+    if (bytes == null) continue;
+    any = true;
+    total += bytes;
+  }
+  return any ? total : null;
+}
+
+/** Absolute path of the GGUF a variant include pattern points at (first shard). */
+export function resolveVariantPath(repoId, include) {
+  const snapDir = mainSnapshotDir(repoId);
+  if (!snapDir) return null;
+  const files = walkRel(snapDir).filter((rel) => includeMatches(include, rel) && /\.gguf$/i.test(rel));
+  if (!files.length) return null;
+  files.sort();
+  return join(snapDir, files[0]);
+}
+
+function routerAliasesByPath() {
+  const map = new Map();
+  if (!existsSync(ROUTER_INI)) return map;
+  let raw;
+  try { raw = readFileSync(ROUTER_INI, 'utf8'); }
+  catch { return map; }
+  for (const block of raw.split(/(?=^\[)/m)) {
+    const alias = block.match(/^\[([^\]]+)\]/)?.[1];
+    const model = block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim();
+    if (alias && model) map.set(model, alias);
+  }
+  return map;
+}
+
+function aliasFromPath(modelPath) {
+  return basename(String(modelPath))
+    .replace(/\.gguf$/i, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'model';
+}
+
+/** Add or replace a llama.cpp router-preset section for a downloaded GGUF. Does not load VRAM. */
+export function upsertRouterPreset(modelPath, { alias, ctxSize = 32768 } = {}) {
+  const path = String(modelPath ?? '');
+  if (!path || !existsSync(path)) {
+    throw Object.assign(new Error('model file is not on disk — download it first'), { status: 404 });
+  }
+  if (!existsSync(ROUTER_INI)) {
+    throw Object.assign(new Error(`router preset ini missing (${ROUTER_INI})`), { status: 500 });
+  }
+  const id = alias || aliasFromPath(path);
+  const raw = readFileSync(ROUTER_INI, 'utf8');
+  const kept = [];
+  for (const block of raw.split(/(?=^\[)/m)) {
+    const a = block.match(/^\[([^\]]+)\]/)?.[1];
+    const model = block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim();
+    if (a === id || model === path) continue;
+    kept.push(block);
+  }
+  const section = [
+    `[${id}]`,
+    `model = ${path}`,
+    `alias = ${id}`,
+    `ctx-size = ${ctxSize}`,
+    'n-gpu-layers = auto',
+    'flash-attn = auto',
+    'cache-type-k = q8_0',
+    'cache-type-v = q8_0',
+    'parallel = 1',
+    'cont-batching = true',
+    'mmap = true',
+    '',
+  ].join('\n');
+  const next = `${kept.join('').replace(/\s*$/, '\n\n')}${section}`;
+  const tmp = `${ROUTER_INI}.tmp`;
+  writeFileSync(tmp, next);
+  renameSync(tmp, ROUTER_INI);
+  return { alias: id, modelPath: path };
 }
 
 export function deleteVariant(repoId, { include } = {}) {

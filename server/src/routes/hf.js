@@ -4,11 +4,13 @@ import {
 } from '../downloadManager.js';
 import {
   deleteModelFileByPath, deleteModelRepoByPath, deleteVariant, findQuantizers,
-  modalityModels, modelInfo, modelVariants, ownerAvatar, popularModels,
-  removeRouterPresetSections, removeRouterPresetSectionsByPath, searchModels,
+  hubHardware, modalityModels, modelInfo, modelReadme, modelVariants, ownerAvatar,
+  popularModels, recommendedModels, removeRouterPresetSections,
+  removeRouterPresetSectionsByPath, resolveVariantPath, searchModels,
+  upsertRouterPreset,
 } from '../hfHub.js';
 import { listLocalModels } from '../localInventory.js';
-import { reloadRouterModels } from '../llama.js';
+import { loadModel, reloadRouterModels, unloadModel } from '../llama.js';
 
 // Org/user profile picture, resolved through the server (browser never
 // reaches huggingface.co) and cached in memory for 12h. Lives in its own
@@ -53,6 +55,21 @@ export default async function hfRoutes(app) {
   app.get('/api/hf/popular', async (req, reply) => {
     try { return await popularModels({ limit: req.query.limit }); }
     catch (e) { return reply.code(502).send({ error: e.message }); }
+  });
+
+  app.get('/api/hf/hardware', async (req, reply) => {
+    try { return await hubHardware(); }
+    catch (e) { return reply.code(500).send({ error: e.message }); }
+  });
+
+  app.get('/api/hf/recommend', async (req, reply) => {
+    try { return await recommendedModels(); }
+    catch (e) { return reply.code(502).send({ error: e.message }); }
+  });
+
+  app.get('/api/hf/readme/*', async (req, reply) => {
+    try { return await modelReadme(req.params['*']); }
+    catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
   });
 
   app.get('/api/hf/modality/:kind', async (req, reply) => {
@@ -156,5 +173,34 @@ export default async function hfRoutes(app) {
       if (result.presetRemoved > 0) await reloadRouterModels().catch(() => {});
       return result;
     } catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
+  });
+
+  // Register a downloaded GGUF in the llama.cpp router preset so it shows
+  // up in the picker. Does NOT load VRAM unless `load: true` (Unsloth's
+  // Load button). Owner-only — it writes the shared ini.
+  app.post('/api/hf/register', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    const { repoId, include, load } = req.body ?? {};
+    try {
+      const path = resolveVariantPath(repoId, include);
+      if (!path) return reply.code(404).send({ error: 'quant is not on disk — download it first' });
+      const preset = upsertRouterPreset(path);
+      await reloadRouterModels().catch(() => {});
+      if (load) await loadModel(preset.alias);
+      return { ok: true, ...preset, loaded: !!load };
+    } catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
+  });
+
+  app.post('/api/hf/eject', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    const { alias } = req.body ?? {};
+    if (!alias) return reply.code(400).send({ error: 'alias required' });
+    try {
+      await unloadModel(alias);
+      return { ok: true };
+    } catch (e) {
+      if (/not running/i.test(String(e.message))) return { ok: true, already: true };
+      return reply.code(e.status ?? 500).send({ error: e.message });
+    }
   });
 }

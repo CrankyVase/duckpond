@@ -2,7 +2,7 @@
 // TPS estimates, variant grouping and download-progress parsing. All pure
 // functions — no HF calls, no GPU, no cache reads.
 import {
-  fitTier, groupVariants, quantLabel, estimateTps,
+  fitTier, groupVariants, quantLabel, estimateTps, recommendVariant, isCompanionVariant,
 } from '../src/hfHub.js';
 
 let fails = 0;
@@ -14,7 +14,7 @@ const ok = (name, cond, extra = '') => {
 console.log('\n== 1. quantLabel: GGUF filenames → quant tokens ==');
 const q = (f) => quantLabel(f);
 ok('plain Q4_K_M', q('Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf'.replace('UD-Q4_K_XL', 'Q4_K_M')) === 'Q4_K_M', q('Qwen-7B-Q4_K_M.gguf'));
-ok('dynamic unsloth UD-Q4_K_XL', q('gemma-4-12B-it-qat-UD-Q4_K_XL.gguf') === 'dynamic', q('gemma-4-12B-it-qat-UD-Q4_K_XL.gguf'));
+ok('dynamic unsloth UD-Q4_K_XL', q('gemma-4-12B-it-qat-UD-Q4_K_XL.gguf') === 'Dynamic Q4_K_XL', q('gemma-4-12B-it-qat-UD-Q4_K_XL.gguf'));
 ok('IQ4_XS', q('x-IQ4_XS.gguf') === 'IQ4_XS');
 ok('Q8_0', q('Qwen3.5-9B-Q8_0.gguf') === 'Q8_0');
 ok('shard set keeps quant only', q('Model-Q4_K_M-00001-of-00003.gguf') === 'Q4_K_M', q('Model-Q4_K_M-00001-of-00003.gguf'));
@@ -60,6 +60,25 @@ const line = "Downloading 'M-Q4_K_XL.gguf' to '/cache':  43%|████▏    
 const m = line.match(PROGRESS_RE);
 ok('tqdm line parses', !!m && m[1] === '43' && m[2] === '8.77G' && m[3] === '20.4G', JSON.stringify(m?.slice(1, 4)));
 assert.ok(true);
+
+console.log('\n== 6. recommendVariant: never recommend an 86GB row on a 16GB card ==');
+const vgb = (n, size) => ({ name: n, include: n, size: size * 1024 ** 3, fit: fitTier(size * 1024 ** 3, { gpuTotalGB: 16, ramAvailableGB: 32 }), draft: false });
+const glmish = [
+  vgb('GLM-BF16.gguf', 1.1),
+  vgb('GLM-F16.gguf', 1.1),
+  { ...vgb('GLM-UD-IQ1_S.gguf', 86.7), quant: 'Dynamic IQ1_S' },
+  { ...vgb('GLM-UD-IQ2_XXS.gguf', 94.9), quant: 'Dynamic IQ2_XXS' },
+  vgb('GLM-Q4_K_M.gguf', 12.0),
+];
+ok('1.1GB BF16 is a companion next to 86GB', isCompanionVariant(glmish[0], glmish) === true);
+ok('12GB Q4 is real', isCompanionVariant(glmish[4], glmish) === false);
+const recFits = recommendVariant(glmish.map((v) => ({ ...v, fit: fitTier(v.size, { gpuTotalGB: 16, ramAvailableGB: 32 }) })), 14);
+ok('picks the 12GB Q4 that fits, not IQ1_S', recFits.recommended === true && recFits.pick?.include === 'GLM-Q4_K_M.gguf', JSON.stringify(recFits.pick));
+const recOom = recommendVariant([
+  { name: 'big-IQ1_S.gguf', include: 'a', size: 86.7 * 1024 ** 3, fit: 'oom', draft: false },
+  { name: 'bigger-IQ2.gguf', include: 'b', size: 94 * 1024 ** 3, fit: 'oom', draft: false },
+], 3.7);
+ok('nothing fits → smallest real, not labelled recommended', recOom.recommended === false && recOom.pick?.include === 'a', JSON.stringify(recOom));
 
 console.log(fails ? `\n${fails} FAILURES` : '\nAll green.');
 process.exit(fails ? 1 : 0);

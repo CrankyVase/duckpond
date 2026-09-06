@@ -16,10 +16,21 @@
   import { prefs } from '../lib/prefs.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
+  import { resolveHubLogo, cardGlow } from '../lib/hubLogos.js';
+  import { renderBlock, splitBlocks } from '../lib/markdown.js';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Cpu from '@lucide/svelte/icons/cpu';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
+  import HardDrive from '@lucide/svelte/icons/hard-drive';
   import Info from '@lucide/svelte/icons/info';
+  import MemoryStick from '@lucide/svelte/icons/memory-stick';
+  import Package from '@lucide/svelte/icons/package';
+  import Play from '@lucide/svelte/icons/play';
+  import Plus from '@lucide/svelte/icons/plus';
   import SearchIcon from '@lucide/svelte/icons/search';
   import Square from '@lucide/svelte/icons/square';
   import Sparkles from '@lucide/svelte/icons/sparkles';
@@ -36,6 +47,47 @@
     return `background: hsl(${hue} 55% 30%); color: hsl(${hue} 70% 82%);`;
   }
   function ownerOf(id) { return id.includes('/') ? id.split('/')[0] : id; }
+  function repoNameOf(id) { return id.includes('/') ? id.split('/').slice(1).join('/') : id; }
+  function logoFor(id) { return resolveHubLogo(ownerOf(id), repoNameOf(id)); }
+
+  let hw = $state(null);
+  let recModels = $state([]);
+  let recLoading = $state(false);
+  let readme = $state(new Map()); // repoId -> { loading, text, error }
+  let registering = $state(null);
+  let showPaste = $state(false);
+
+  async function loadHardware() {
+    try { hw = await api('/api/hf/hardware'); } catch { /* pills stay empty */ }
+  }
+  async function loadRecommended() {
+    recLoading = true;
+    try {
+      const r = await api('/api/hf/recommend');
+      recModels = r.models ?? [];
+    } catch { recModels = []; }
+    recLoading = false;
+  }
+  void loadHardware();
+  void loadRecommended();
+  void loadLocal();
+
+  function readmeHtml(text) {
+    if (!text) return '';
+    return splitBlocks(text).map((b) => renderBlock(b)).join('');
+  }
+  async function loadReadme(repoId) {
+    if (!repoId || readme.has(repoId)) return;
+    readme.set(repoId, { loading: true });
+    readme = new Map(readme);
+    try {
+      const r = await api(`/api/hf/readme/${repoId}`);
+      readme.set(repoId, { loading: false, text: r.text ?? '' });
+    } catch (e) {
+      readme.set(repoId, { loading: false, text: '', error: e.message ?? 'readme failed' });
+    }
+    readme = new Map(readme);
+  }
   // Same "is this already a quantized GGUF repo" heuristic hfHub.js's
   // findQuantizers() uses server-side to filter its own results.
   const GGUF_REPO_RE = /-gguf(-|$)/i;
@@ -235,6 +287,8 @@
   });
   // If the filter drops the selected row out of view, follow the list rather
   // than leaving the detail pane pointed at something no longer shown.
+  // Lazy: only auto-resolve data when the user hasn't picked anything yet —
+  // never pre-load quantizers/variants for rows the user didn't click.
   $effect(() => {
     if (selected && !displayedResults.some((m) => m.id === selected) && displayedResults.length) {
       select(displayedResults[0].id);
@@ -282,8 +336,10 @@
       results = models;
       nextCursor = nc;
       hasMore = !!nc;
-      selected = results[0]?.id ?? null;
-      if (selected) void loadQuantizers(selected);
+      // Unsloth opens the first row's detail immediately so the pane isn't
+      // an empty "click a model" stub on every tab switch.
+      if (results[0]?.id) select(results[0].id);
+      else selected = null;
     } catch (e) {
       toast(e.message ?? 'search failed', 'error');
       results = [];
@@ -369,6 +425,7 @@
   function select(repoId) {
     selected = repoId;
     void loadQuantizers(repoId);
+    void loadReadme(repoId);
   }
 
   async function loadQuantizers(repoId) {
@@ -415,7 +472,8 @@
     variants = new Map(variants);
     try {
       const v = await api(`/api/hf/variants/${repoId}`);
-      variants.set(repoId, { loading: false, ...v, pick: v.recommended ?? v.variants[0]?.include ?? null });
+      variants.set(repoId, { loading: false, ...v, pick: v.recommended ?? v.pick ?? v.variants[0]?.include ?? null });
+      void loadReadme(repoId);
     } catch (e) {
       variants.set(repoId, { loading: false, error: e.message ?? 'failed to load files' });
     }
@@ -482,6 +540,51 @@
     } catch (e) {
       toast(e.message ?? 'repo not found', 'error');
     }
+  }
+
+  function routerStatus(alias) {
+    if (!alias) return null;
+    return app.models.find((m) => m.id === alias) ?? null;
+  }
+
+  async function registerVariant(repoId, include, { load } = {}) {
+    const key = `${repoId}::${include}`;
+    registering = key;
+    try {
+      const r = await api('/api/hf/register', { method: 'POST', body: { repoId, include, load: !!load } });
+      await loadModels();
+      await loadVariants(repoId, true);
+      toast(load ? `loading ${r.alias}…` : `added ${r.alias} to the picker`, 'ok');
+    } catch (e) {
+      toast(e.error ?? e.message ?? 'register failed', 'error');
+    } finally {
+      registering = null;
+    }
+  }
+
+  async function loadIntoVram(repoId, include, name) {
+    const ok = await confirmDialog({
+      title: 'Load into VRAM?',
+      message: `This will load ${name} onto the GPU. Big models lag the box — stick to sub-1B / 4B quants if you just want a smoke test.`,
+      confirmLabel: 'Load',
+    });
+    if (!ok) return;
+    await registerVariant(repoId, include, { load: true });
+  }
+
+  async function ejectAlias(alias) {
+    try {
+      await api('/api/hf/eject', { method: 'POST', body: { alias } });
+      await loadModels();
+      toast(`unloaded ${alias}`, 'ok');
+    } catch (e) {
+      toast(e.error ?? e.message ?? 'eject failed', 'error');
+    }
+  }
+
+  async function copyRepo(id) {
+    try { await navigator.clipboard.writeText(id); toast('copied repo id', 'ok'); }
+    catch { toast('copy failed', 'error'); }
   }
 
   async function deleteVariant(repoId, include, name) {
@@ -566,6 +669,8 @@
   function sortedVariants(v) {
     if (!v?.variants) return [];
     return [...v.variants].sort((a, b) => {
+      const sc = (a.companion ? 1 : 0) - (b.companion ? 1 : 0);
+      if (sc !== 0) return sc;
       const sd = downloadRank(a) - downloadRank(b);
       if (sd !== 0) return sd;
       const ra = FIT_RANK[a.fit] ?? 3;
@@ -589,20 +694,74 @@
 <div class="hub">
   <div class="head">
     <div class="title">
-      <h1>Model Hub</h1>
-      <p>Search &amp; download Hugging Face models through the server — your browser
-        never has to reach huggingface.co directly.</p>
+      <h1>Model hub</h1>
+      <p>Discover, download, and run inference models locally.</p>
     </div>
-    {#if vramLabel}<span class="hwchip">{vramLabel} VRAM free</span>{/if}
+    <div class="pills">
+      {#if hw?.cacheCount != null}
+        <span class="pill" title="Hugging Face cache repos"><Package size={13} /> {hw.cacheCount} Cache</span>
+      {/if}
+      {#if localModels.length}
+        <span class="pill" title="Models on disk"><HardDrive size={13} /> {localModels.length} Local</span>
+      {/if}
+      {#if hw?.gpuLabel}
+        <span class="pill" title="Total GPU VRAM"><MemoryStick size={13} /> {hw.gpuLabel} VRAM</span>
+      {/if}
+      {#if hw?.ramLabel}
+        <span class="pill" title="System RAM"><HardDrive size={13} /> {hw.ramLabel} RAM</span>
+      {/if}
+      {#if hw?.cpuLabel}
+        <span class="pill" title="CPU threads"><Cpu size={13} /> {hw.cpuLabel} CPU</span>
+      {/if}
+      {#if vramLabel}<span class="pill live"><span class="dot live"></span> {vramLabel} free</span>{/if}
+    </div>
   </div>
 
-  <div class="modebar">
-    <button class="modebtn" class:on={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
-    <button class="modebtn" class:on={mode === 'my-models'} onclick={() => setMode('my-models')}>My Models</button>
-    <button class="modebtn" class:on={mode === 'downloads'} onclick={() => setMode('downloads')}>
-      Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
-    </button>
+  <div class="toolbar">
+    <div class="modebar">
+      <button class="modebtn" class:on={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
+      <button class="modebtn" class:on={mode === 'my-models'} onclick={() => setMode('my-models')}>On Device</button>
+      <button class="modebtn" class:on={mode === 'downloads'} onclick={() => setMode('downloads')}>
+        Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
+      </button>
+    </div>
+    {#if mode === 'discover'}
+      <div class="searchbox">
+        <SearchIcon size={14} />
+        <input type="search" inputmode="search" placeholder="Search all models"
+          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+          data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
+          name={searchInputName}
+          bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
+        {#if q}<button class="ghost searchclear" onclick={clearSearch} title="Clear"><X size={13} /></button>{/if}
+      </div>
+      <label class="fselect">
+        <select value={activeTab} onchange={(e) => loadTab(e.target.value)}>
+          {#each TABS as [val, label] (val)}<option value={val}>{label}</option>{/each}
+        </select>
+      </label>
+      <label class="fselect">
+        <select bind:value={typeFilter}>
+          {#each TYPE_FILTERS as [val, label] (val)}<option value={val}>{label}</option>{/each}
+        </select>
+      </label>
+      <label class="fselect">
+        <select bind:value={sortBy}>
+          {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
+        </select>
+      </label>
+      <button class="ghost addbtn" onclick={() => (showPaste = !showPaste)} title="Paste a repo id">
+        <Plus size={14} />
+      </button>
+    {/if}
   </div>
+  {#if mode === 'discover' && showPaste}
+    <div class="pasterow">
+      <input class="paste" placeholder="Paste owner/repo to add…" bind:value={pasteId}
+        onkeydown={(e) => { if (e.key === 'Enter') addRepo(); }} />
+      <button class="ghost" onclick={addRepo} title="Open repo">Add</button>
+    </div>
+  {/if}
 
   {#if mode !== 'downloads' && [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
     <div class="jobbar-stack">
@@ -635,52 +794,31 @@
   {/if}
 
   {#if mode === 'discover'}
-  <div class="toolbar">
-    <div class="tabs">
-      {#each TABS as [val, label] (val)}
-        <button class="tab" class:active={activeTab === val && !q.trim()}
-          onclick={() => loadTab(val)}>{label}</button>
-      {/each}
-    </div>
-    <div class="searchbox">
-      <SearchIcon size={14} />
-      <input type="search" inputmode="search" placeholder="Search all models…"
-        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-        data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
-        name={searchInputName}
-        bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
-      {#if q}<button class="ghost searchclear" onclick={clearSearch} title="Clear"><X size={13} /></button>{/if}
-    </div>
-    <div class="popular">
-      <span class="plabel">Jump to</span>
-      {#each POPULAR as name (name)}
-        <button class="pchip" onclick={() => { q = name; doSearch(); }}>{name}</button>
-      {/each}
-    </div>
-    <div class="pasterow">
-      <input class="paste" placeholder="Paste owner/repo to add…" bind:value={pasteId}
-        onkeydown={(e) => { if (e.key === 'Enter') addRepo(); }} />
-      <button class="ghost" onclick={addRepo} title="Open repo">Add</button>
-    </div>
-  </div>
-
-  <div class="filterbar">
-    <label class="fselect">
-      <span class="fslabel">Type</span>
-      <select bind:value={typeFilter}>
-        {#each TYPE_FILTERS as [val, label] (val)}<option value={val}>{label}</option>{/each}
-      </select>
-    </label>
-    <label class="fselect">
-      <span class="fslabel">Sort</span>
-      <select bind:value={sortBy}>
-        {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
-      </select>
-    </label>
-    {#if typeFilter !== 'all' && results.length}
-      <span class="fcount">{displayedResults.length} of {results.length}</span>
-    {/if}
-  </div>
+  {#if !q.trim() && recModels.length}
+    <section class="recstrip">
+      <h2>Recommended for this GPU <ChevronRight size={16} /></h2>
+      <div class="carousel">
+        {#each recModels as m (m.id)}
+          {@const logo = logoFor(m.id)}
+          <button class="mcard" class:on={selected === m.id} style="--glow:{cardGlow(m.id)}"
+            onclick={() => select(m.id)}>
+            <span class="avatar" class:logo={!!logo}
+              style={!logo && avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
+              {#if logo}
+                <img src={logo.path} alt="" class:cover={logo.fit === 'cover'} />
+              {:else if !avatarFail.has(ownerOf(m.id))}
+                <img src="/api/hf/avatar/{ownerOf(m.id)}" alt="" loading="lazy"
+                  onerror={() => { avatarFail.add(ownerOf(m.id)); avatarFail = new Set(avatarFail); }} />
+              {/if}
+              <span class="initial">{ownerOf(m.id)[0]?.toUpperCase()}</span>
+            </span>
+            <span class="mcname">{repoNameOf(m.id)}</span>
+            <span class="mcowner">{ownerOf(m.id)}</span>
+          </button>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   {#if searching}
     <div class="skeleton-list">
@@ -698,12 +836,16 @@
   {#if displayedResults.length || (!searching && searched)}
     <div class="split">
       <div class="list" bind:this={listEl}>
-        <div class="lhead">Model</div>
+        <div class="lhead">{q.trim() ? 'Search results' : activeTab === 'unsloth' ? 'Latest Unsloth models' : TABS.find(([v]) => v === activeTab)?.[1] ?? 'Models'}</div>
         {#each displayedResults as m (m.id)}
           {@const badge = taskBadge(m.pipelineTag, m.kind)}
+          {@const logo = logoFor(m.id)}
           <button class="rrow" class:active={selected === m.id} onclick={() => select(m.id)}>
-            <span class="avatar" style={avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
-              {#if !avatarFail.has(ownerOf(m.id))}
+            <span class="avatar" class:logo={!!logo}
+              style={!logo && avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
+              {#if logo}
+                <img src={logo.path} alt="" class:cover={logo.fit === 'cover'} />
+              {:else if !avatarFail.has(ownerOf(m.id))}
                 <img src="/api/hf/avatar/{ownerOf(m.id)}" alt="" loading="lazy"
                   onerror={() => { avatarFail.add(ownerOf(m.id)); avatarFail = new Set(avatarFail); }} />
               {/if}
@@ -711,7 +853,7 @@
             </span>
             <span class="rinfo">
               <span class="rname">
-                {m.id.split('/').pop()}
+                {repoNameOf(m.id)}
                 <span class="dots">
                   {#if m.curated}<span class="staffpick" title="Staff Pick"><Sparkles size={11} /></span>{/if}
                   {#if badge}<span class="dot task {badge[1]}" title={badge[0]}></span>{/if}
@@ -720,11 +862,11 @@
                 </span>
               </span>
               <span class="rowner">{ownerOf(m.id)}{#if ownerOf(m.id).toLowerCase() === 'unsloth'}<span class="verified" title="Verified Unsloth">✓</span>{/if}</span>
-              <span class="rmeta">
-                {#if m.updatedAt}Updated {fmtAgo(m.updatedAt)} · {/if}
-                <Download size={10} /> {fmtN(m.downloads)} ·
-                <Heart size={10} /> {fmtN(m.likes)}
-              </span>
+            </span>
+            <span class="rstats">
+              <span><Heart size={11} /> {fmtN(m.likes)}</span>
+              <span><Download size={11} /> {fmtN(m.downloads)}</span>
+              {#if m.updatedAt}<span class="rago">{fmtAgo(m.updatedAt)}</span>{/if}
             </span>
           </button>
         {/each}
@@ -748,17 +890,27 @@
       <div class="detail">
         {#if selectedModel}
           {@const v = selectedVariants}
+          {@const dlogo = logoFor(selectedModel.id)}
           <div class="dhead">
-            <span class="avatar big" style={avatarFail.has(ownerOf(selectedModel.id)) ? avatarStyle(ownerOf(selectedModel.id)) : ''}>
-              {#if !avatarFail.has(ownerOf(selectedModel.id))}
+            <span class="avatar big" class:logo={!!dlogo}
+              style={!dlogo && avatarFail.has(ownerOf(selectedModel.id)) ? avatarStyle(ownerOf(selectedModel.id)) : ''}>
+              {#if dlogo}
+                <img src={dlogo.path} alt="" class:cover={dlogo.fit === 'cover'} />
+              {:else if !avatarFail.has(ownerOf(selectedModel.id))}
                 <img src="/api/hf/avatar/{ownerOf(selectedModel.id)}" alt="" loading="lazy"
                   onerror={() => { avatarFail.add(ownerOf(selectedModel.id)); avatarFail = new Set(avatarFail); }} />
               {/if}
               <span class="initial">{ownerOf(selectedModel.id)[0]?.toUpperCase()}</span>
             </span>
             <div class="dtitle">
-              <h2>{selectedModel.id.split('/').pop()}</h2>
-              <span class="downer">{selectedModel.id}</span>
+              <h2>{repoNameOf(selectedModel.id)}</h2>
+              <span class="downer">
+                {ownerOf(selectedModel.id)}{#if ownerOf(selectedModel.id).toLowerCase() === 'unsloth'}<span class="verified">✓</span>{/if}
+              </span>
+            </div>
+            <div class="dacts">
+              <button class="iconbtn" title="Copy repo id" onclick={() => copyRepo(selectedModel.id)}><Copy size={14} /></button>
+              <a class="iconbtn" title="Open on Hugging Face" href="https://huggingface.co/{selectedModel.id}" target="_blank" rel="noreferrer"><ExternalLink size={14} /></a>
             </div>
           </div>
 
@@ -771,7 +923,9 @@
           </div>
 
           {@const qz = selectedQuantizers}
-          {#if qz?.loading}
+          {#if !qz}
+            <div class="qmrow"><span class="qmhint">Click a model on the left to load its quantizations…</span></div>
+          {:else if qz?.loading}
             <div class="qmrow"><span class="qmhint">Loading available quantizations…</span></div>
           {:else if qz?.list?.length}
             <div class="qmrow">
@@ -798,7 +952,9 @@
           {/if}
 
           <div class="varbar">
-            {#if v?.loading}
+            {#if !v}
+              <span class="vhint">Click a model on the left to load its files…</span>
+            {:else if v?.loading}
               <div class="qskeleton">
                 {#each Array(3) as _, i (i)}
                   <div class="skeleton-row qsk"><div class="sk wq"></div><div class="sk wsize"></div></div>
@@ -828,6 +984,7 @@
                 </span>
                 {#if isOwner}
                   {@const dlJob = getJob(activeRepo, v.pick)}
+                  {@const rs = picked?.routerAlias ? routerStatus(picked.routerAlias) : null}
                   {#if dlJob?.state === 'running' || dlJob?.state === 'cancelling'}
                     <button class="dlbtn running" disabled>
                       <span class="spinner"></span>
@@ -836,10 +993,15 @@
                     <button class="dlbtn cancel" onclick={() => cancel(activeRepo, v.pick)} title="Cancel">
                       <X size={13} />
                     </button>
-                  {:else if dlJob?.state === 'done'}
-                    <button class="dlbtn done" disabled>
-                      <Download size={13} /> On device
-                    </button>
+                  {:else if picked?.downloaded || dlJob?.state === 'done'}
+                    {#if rs && (rs.status === 'loaded' || rs.status === 'sleeping' || rs.status === 'loading')}
+                      <button class="dlbtn eject" onclick={() => ejectAlias(picked.routerAlias)}>Eject</button>
+                    {:else}
+                      <button class="dlbtn load" disabled={registering === `${activeRepo}::${v.pick}`}
+                        onclick={() => loadIntoVram(activeRepo, v.pick, picked.quant ?? picked.name)}>
+                        <Play size={13} /> Load
+                      </button>
+                    {/if}
                   {:else}
                     <button class="dlbtn" onclick={() => download(activeRepo, v.pick)}>
                       <Download size={13} /> Download
@@ -850,7 +1012,7 @@
               {#if quantOpen}
               <div class="qlist">
                 {#each sortedVariants(v) as row (row.include ?? row.name)}
-                  <div class="qrow" class:sel={v.pick === row.include} class:loaded={row.downloaded}
+                  <div class="qrow" class:sel={v.pick === row.include} class:loaded={row.downloaded} class:companion={row.companion}
                     onclick={() => pickVariant(activeRepo, row.include)}
                     role="button" tabindex="0"
                     onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && pickVariant(activeRepo, row.include)}>
@@ -917,6 +1079,13 @@
             {#if v && !v.loading && !v.error}<span class="stat">{fmtBytes(v.total)} total</span>{/if}
             {#if v?.vramFreeBytes != null}<span class="stat">{fmtBytes(v.vramFreeBytes)} VRAM free</span>{/if}
           </div>
+
+          {@const rm = readme.get(activeRepo) ?? readme.get(selectedModel.id)}
+          {#if rm?.loading}
+            <div class="readme sk" style="height:120px"></div>
+          {:else if rm?.text}
+            <article class="readme">{@html readmeHtml(rm.text)}</article>
+          {/if}
         {:else}
           <div class="empty">Pick a model on the left.</div>
         {/if}
@@ -1049,29 +1218,28 @@
      pinned, only the two columns scroll. No page-level scrolling at all. */
   .hub {
     flex: 1; min-height: 0; display: flex; flex-direction: column;
-    max-width: 1400px; width: 100%; margin: 0 auto;
-    padding: 18px 24px 10px;
+    max-width: 1680px; width: 100%; margin: 0 auto;
+    padding: 22px 28px 10px;
     padding-bottom: max(10px, calc(10px + env(safe-area-inset-bottom)));
     box-sizing: border-box;
   }
 
   .head {
     display: flex; align-items: flex-start; justify-content: space-between;
-    gap: 16px; margin-bottom: 14px; flex-shrink: 0;
+    gap: 16px; margin-bottom: 16px; flex-shrink: 0; flex-wrap: wrap;
   }
-  h1 { margin: 0; font-size: 21px; font-weight: 650; letter-spacing: -0.02em; }
-  .title p { margin: 5px 0 0; font-size: 12.5px; color: var(--text-dim); max-width: 560px; }
-  .hwchip {
-    flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px;
+  h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.03em; }
+  .title p { margin: 4px 0 0; font-size: 13px; color: var(--text-dim); max-width: 560px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
     font-size: 11.5px; font-weight: 600; color: var(--text-dim);
-    padding: 5px 12px; border-radius: 999px;
+    padding: 5px 11px; border-radius: 999px;
     border: 1px solid var(--border-soft); background: var(--bg-card);
-    white-space: nowrap; margin-top: 2px;
+    white-space: nowrap;
   }
-  .hwchip::before {
-    content: ''; width: 7px; height: 7px; border-radius: 50%;
-    background: var(--green);
-  }
+  .pill.live { color: var(--text); }
+  .pill .dot.live { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
 
   /* Discover / My Models — same segmented-pill look as .tabs */
   .modebar {
@@ -1089,6 +1257,63 @@
     display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
     font-size: 10.5px; font-weight: 700; background: var(--accent); color: var(--bg);
   }
+  .addbtn { padding: 6px; border-radius: 999px; color: var(--text-dim); }
+  .addbtn:hover { background: var(--bg-hover); color: var(--text); }
+
+  .recstrip { flex-shrink: 0; margin: 4px 0 14px; }
+  .recstrip h2 {
+    margin: 0 0 10px; font-size: 16px; font-weight: 650; letter-spacing: -0.02em;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .carousel {
+    display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px;
+    scrollbar-width: thin;
+  }
+  .mcard {
+    flex: 0 0 204px; height: 128px; border-radius: 18px; padding: 14px;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+    text-align: left; border: 1px solid transparent;
+    background:
+      radial-gradient(90% 80% at 18% 10%, var(--glow, rgba(200,153,104,0.28)), transparent 60%),
+      color-mix(in srgb, var(--foreground, #fff) 7%, var(--bg-raised));
+    transition: background 160ms ease;
+  }
+  .mcard:hover { background-color: var(--bg-hover); }
+  .mcard.on { outline: 1px solid var(--accent-dim); }
+  .mcard .avatar { width: 44px; height: 44px; border-radius: 14px; }
+  .mcname {
+    font-size: 13.5px; font-weight: 650; line-height: 1.2;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .mcowner { font-size: 11.5px; color: var(--text-faint); }
+
+  .dacts { margin-left: auto; display: flex; gap: 4px; }
+  .iconbtn {
+    width: 28px; height: 28px; border-radius: 999px; color: var(--text-faint);
+    display: grid; place-items: center;
+  }
+  .iconbtn:hover { background: var(--bg-hover); color: var(--text); }
+
+  .readme {
+    margin-top: 22px; font-size: 13.5px; line-height: 1.65; color: var(--text-dim);
+    max-width: 720px;
+  }
+  .readme :global(h1), .readme :global(h2), .readme :global(h3) {
+    color: var(--text); font-weight: 650; letter-spacing: -0.02em; margin: 1.2em 0 0.4em;
+  }
+  .readme :global(h1) { font-size: 18px; }
+  .readme :global(h2) { font-size: 16px; }
+  .readme :global(p) { margin: 0.6em 0; }
+  .readme :global(a) { color: var(--accent); }
+  .readme :global(img) { max-width: 100%; border-radius: 10px; margin: 8px 0; }
+  .readme :global(code) { font-family: var(--mono); font-size: 12px; }
+  .readme :global(pre) {
+    background: var(--bg-code); padding: 12px 14px; border-radius: 10px; overflow-x: auto;
+  }
+
+  .qrow.companion { opacity: 0.55; }
+  .dlbtn.load { background: var(--accent); border-color: var(--accent); }
+  .dlbtn.eject { background: none; border-color: var(--border); color: var(--text-dim); }
 
   /* My Models — everything on disk, independent of the router preset ini */
   .mymodels { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
@@ -1247,9 +1472,15 @@
   .rrow {
     display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
     padding: 10px 12px; border-radius: calc(13px * var(--rf)); border: 1px solid transparent;
-    background: var(--bg-raised); flex-shrink: 0;
+    background: color-mix(in srgb, var(--foreground, #fff) 4%, transparent); flex-shrink: 0;
     transition: background 140ms ease, border-color 140ms ease, transform 160ms ease;
   }
+  .rstats {
+    margin-left: auto; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+    font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+  }
+  .rstats span { display: inline-flex; align-items: center; gap: 4px; }
+  .rago { opacity: 0.8; }
   .rrow:hover { background: var(--bg-hover); }
   .rrow.active {
     background: var(--bg-hover); border-color: var(--accent-dim);
@@ -1269,11 +1500,14 @@
     background: #eeeef1; color: #1a1a1a;
     box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
   }
+  .avatar.logo { background: #fff; }
   .avatar.big { width: 72px; height: 72px; border-radius: 18px; font-size: 26px; }
   .avatar img {
     position: absolute; inset: 0; width: 100%; height: 100%;
-    object-fit: cover; border-radius: inherit; display: block;
+    object-fit: cover; border-radius: inherit; display: block; z-index: 1;
   }
+  .avatar.logo img { object-fit: contain; padding: 7px; box-sizing: border-box; }
+  .avatar.logo img.cover { object-fit: cover; padding: 0; }
   .avatar .initial { position: relative; }
 
   .rinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2.5px; }
