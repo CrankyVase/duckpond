@@ -21,7 +21,6 @@
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
-  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
   import Cpu from '@lucide/svelte/icons/cpu';
   import ExternalLink from '@lucide/svelte/icons/external-link';
@@ -48,6 +47,7 @@
   }
   function ownerOf(id) { return id.includes('/') ? id.split('/')[0] : id; }
   function repoNameOf(id) { return id.includes('/') ? id.split('/').slice(1).join('/') : id; }
+  function displayName(id) { return repoNameOf(id).replace(/-GGUF$/i, ''); }
   function logoFor(id) { return resolveHubLogo(ownerOf(id), repoNameOf(id)); }
 
   let hw = $state(null);
@@ -836,7 +836,7 @@
   {#if mode === 'discover'}
   {#if activeTab === 'llm' && !q.trim() && recModels.length}
     <section class="recstrip">
-      <h2>Recommended for this GPU <ChevronRight size={16} /></h2>
+      <h2>Recommended for this GPU</h2>
       <div class="carousel">
         {#each recModels as m (m.id)}
           {@const logo = logoFor(m.id)}
@@ -852,7 +852,7 @@
               {/if}
               <span class="initial">{ownerOf(m.id)[0]?.toUpperCase()}</span>
             </span>
-            <span class="mcname">{repoNameOf(m.id)}</span>
+            <span class="mcname">{displayName(m.id)}</span>
             <span class="mcowner">{ownerOf(m.id)}</span>
           </button>
         {/each}
@@ -893,7 +893,7 @@
             </span>
             <span class="rinfo">
               <span class="rname">
-                <span class="rnametext">{repoNameOf(m.id)}</span>
+                <span class="rnametext">{displayName(m.id)}</span>
                 <span class="dots">
                   {#if m.curated}<span class="staffpick" title="Staff Pick"><Sparkles size={11} /></span>{/if}
                   {#if badge}<span class="dot task {badge[1]}" title={badge[0]}></span>{/if}
@@ -943,7 +943,7 @@
               <span class="initial">{ownerOf(selectedModel.id)[0]?.toUpperCase()}</span>
             </span>
             <div class="dtitle">
-              <h2>{repoNameOf(selectedModel.id)}</h2>
+              <h2>{displayName(selectedModel.id)}</h2>
               <span class="downer">
                 {ownerOf(selectedModel.id)}{#if ownerOf(selectedModel.id).toLowerCase() === 'unsloth'}<span class="verified">✓</span>{/if}
               </span>
