@@ -291,6 +291,9 @@
   // never pre-load quantizers/variants for rows the user didn't click.
   $effect(() => {
     if (selected && !displayedResults.some((m) => m.id === selected) && displayedResults.length) {
+      // A pick from the "Recommended for this GPU" strip may not be in the
+      // current tab's page — don't yank the detail pane back to row 0.
+      if (recModels.some((m) => m.id === selected)) return;
       select(displayedResults[0].id);
     }
   });
@@ -424,6 +427,10 @@
 
   function select(repoId) {
     selected = repoId;
+    if (!results.some((m) => m.id === repoId)) {
+      const extra = recModels.find((m) => m.id === repoId);
+      if (extra) results = [extra, ...results];
+    }
     void loadQuantizers(repoId);
     void loadReadme(repoId);
   }

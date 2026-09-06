@@ -149,6 +149,6 @@ export function cardGlow(id) {
   if (s.includes('phi')) return 'rgba(34, 176, 224, 0.42)';
   if (s.includes('glm') || s.includes('zai')) return 'rgba(62, 125, 255, 0.4)';
   if (s.includes('kimi') || s.includes('moonshot')) return 'rgba(20, 184, 166, 0.4)';
-  if (s.includes('unsloth') || s.includes('lfm')) return 'rgba(0, 198, 150, 0.42)';
+  if (s.includes('unsloth') || s.includes('lfm') || s.includes('liquid')) return 'rgba(0, 198, 150, 0.42)';
   return 'rgba(200, 153, 104, 0.28)';
 }
