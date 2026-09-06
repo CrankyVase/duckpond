@@ -44,7 +44,7 @@ export default async function hfRoutes(app) {
     try {
       return await searchModels(q, {
         limit: req.query.limit, sort: req.query.sort, pipelineTag: req.query.pipeline_tag,
-        author: req.query.author, cursor: req.query.cursor,
+        author: req.query.author, cursor: req.query.cursor, filter: req.query.filter,
       });
     } catch (e) { return reply.code(502).send({ error: e.message }); }
   });

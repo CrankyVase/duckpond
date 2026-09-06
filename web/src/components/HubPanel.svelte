@@ -69,7 +69,6 @@
     recLoading = false;
   }
   void loadHardware();
-  void loadRecommended();
   void loadLocal();
 
   function readmeHtml(text) {
@@ -282,7 +281,10 @@
 
   const isOwner = $derived(app.user?.role === 'owner');
   const displayedResults = $derived.by(() => {
-    const list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
+    let list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
+    if (activeTab === 'unsloth' && !q.trim()) {
+      list = list.filter((m) => /-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id));
+    }
     return sortedResults(list);
   });
   // If the filter drops the selected row out of view, follow the list rather
@@ -305,7 +307,15 @@
   // default — Unsloth's own Hub layout — and closes again on every new
   // model so it doesn't stay pinned open while browsing.
   let quantOpen = $state(false);
-  $effect(() => { activeRepo; quantOpen = false; });
+  let showOom = $state(false);
+  $effect(() => { activeRepo; quantOpen = false; showOom = false; });
+  const FIT_OK = new Set(['fits', 'marginal']);
+  function fittingRows(v) {
+    return sortedVariants(v).filter((r) => FIT_OK.has(r.fit) && !r.companion);
+  }
+  function otherRows(v) {
+    return sortedVariants(v).filter((r) => !FIT_OK.has(r.fit) || r.companion);
+  }
   // Live VRAM readout from whichever variant payload last landed — Unsloth's
   // header stat pill.
   const vramLabel = $derived.by(() => {
@@ -317,7 +327,7 @@
 
   function tabEndpoint(tab, cursor) {
     const p = cursor ? { cursor } : {};
-    if (tab === 'unsloth') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified', ...p })}`;
+    if (tab === 'unsloth') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified', filter: 'gguf', ...p })}`;
     if (tab === 'popular') return '/api/hf/popular';
     return `/api/hf/modality/${tab}`;
   }
@@ -339,9 +349,13 @@
       results = models;
       nextCursor = nc;
       hasMore = !!nc;
-      // Unsloth opens the first row's detail immediately so the pane isn't
-      // an empty "click a model" stub on every tab switch.
-      if (results[0]?.id) select(results[0].id);
+      // Land on something that fits this GPU, not whatever Unsloth published
+      // last (those are usually 70B+ "Does not fit" cards).
+      const landing = recModels[0]?.id
+        ?? results.find((m) => /-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id))?.id
+        ?? results[0]?.id
+        ?? null;
+      if (landing) select(landing);
       else selected = null;
     } catch (e) {
       toast(e.message ?? 'search failed', 'error');
@@ -364,7 +378,9 @@
     if (!query) { await loadTab(activeTab); return; }
     await runQuery(() => api(currentQueryUrl()));
   }
-  void loadTab(activeTab); // populate the default landing tab immediately
+  // Wait for the "fits this GPU" strip before the Unsloth tab so landing
+  // can open LFM2-700M instead of the newest 80GB drop.
+  void (async () => { await loadRecommended(); await loadTab(activeTab); })();
 
   // Reinstated 2026-09-02 after notes/HUB-2.md's "no free-text inputs"
   // removal (password managers were autofilling into search fields) — user
@@ -479,7 +495,7 @@
     variants = new Map(variants);
     try {
       const v = await api(`/api/hf/variants/${repoId}`);
-      variants.set(repoId, { loading: false, ...v, pick: v.recommended ?? v.pick ?? v.variants[0]?.include ?? null });
+      variants.set(repoId, { loading: false, ...v, pick: v.recommended ?? v.pick ?? null });
       void loadReadme(repoId);
     } catch (e) {
       variants.set(repoId, { loading: false, error: e.message ?? 'failed to load files' });
@@ -971,6 +987,19 @@
               <span class="vhint err">{v.error}</span>
             {:else if v}
               {@const picked = pickedVariant(v)}
+              {@const fits = fittingRows(v)}
+              {@const rest = otherRows(v)}
+              {#if !picked && !fits.length}
+                <div class="nofit">
+                  <span>Nothing in this repo fits {hw?.gpuLabel ?? 'this GPU'}.
+                    Smallest real quant is {fmtBytes(rest.filter((r) => !r.companion)[0]?.size ?? v.total)}.</span>
+                  {#if rest.length}
+                    <button class="ghost" onclick={() => { showOom = !showOom; quantOpen = true; }}>
+                      {showOom ? 'Hide oversized quants' : `Show oversized quants (${rest.length})`}
+                    </button>
+                  {/if}
+                </div>
+              {:else}
               <div class="vhead">
                 <span class="vpicklabel" onclick={() => (quantOpen = !quantOpen)}
                   role="button" tabindex="0"
@@ -989,7 +1018,7 @@
                     <span class="vhint">Select quantization</span>
                   {/if}
                 </span>
-                {#if isOwner}
+                {#if isOwner && v.pick}
                   {@const dlJob = getJob(activeRepo, v.pick)}
                   {@const rs = picked?.routerAlias ? routerStatus(picked.routerAlias) : null}
                   {#if dlJob?.state === 'running' || dlJob?.state === 'cancelling'}
@@ -1016,9 +1045,10 @@
                   {/if}
                 {/if}
               </div>
-              {#if quantOpen}
+              {/if}
+              {#if quantOpen || showOom}
               <div class="qlist">
-                {#each sortedVariants(v) as row (row.include ?? row.name)}
+                {#each (showOom || !fits.length ? sortedVariants(v) : fits) as row (row.include ?? row.name)}
                   <div class="qrow" class:sel={v.pick === row.include} class:loaded={row.downloaded} class:companion={row.companion}
                     onclick={() => pickVariant(activeRepo, row.include)}
                     role="button" tabindex="0"
@@ -1071,6 +1101,11 @@
                     </span>
                   </div>
                 {/each}
+                {#if fits.length && rest.length}
+                  <button class="oomtoggle" onclick={() => (showOom = !showOom)}>
+                    {showOom ? 'Hide quants that don’t fit' : `${rest.length} more don’t fit this GPU`}
+                  </button>
+                {/if}
               </div>
               {/if}
             {/if}
@@ -1319,6 +1354,18 @@
   }
 
   .qrow.companion { opacity: 0.55; }
+  .nofit {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+    padding: 12px 14px; border-radius: calc(12px * var(--rf));
+    border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent);
+    background: color-mix(in srgb, var(--yellow) 8%, transparent);
+    font-size: 12.5px; color: var(--text-dim); margin-bottom: 10px;
+  }
+  .oomtoggle {
+    margin-top: 6px; padding: 6px 8px; font-size: 11.5px; color: var(--text-faint);
+    background: none; border: none; cursor: pointer;
+  }
+  .oomtoggle:hover { color: var(--text); }
   .dlbtn.load { background: var(--accent); border-color: var(--accent); }
   .dlbtn.eject { background: none; border-color: var(--border); color: var(--text-dim); }
 

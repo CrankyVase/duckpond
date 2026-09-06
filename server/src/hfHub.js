@@ -33,7 +33,7 @@ export function assertRepoId(id) {
 
 const SORT_KEYS = new Set(['trendingScore', 'downloads', 'likes', 'lastModified', 'createdAt']);
 
-export async function searchModels(query, { limit = 30, sort, pipelineTag, author, cursor } = {}) {
+export async function searchModels(query, { limit = 30, sort, pipelineTag, author, cursor, filter } = {}) {
   const q = String(query ?? '').trim();
   const params = new URLSearchParams({
     search: q,
@@ -44,6 +44,7 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
   if (sort && SORT_KEYS.has(sort)) { params.set('sort', sort); params.set('direction', '-1'); }
   if (pipelineTag) params.set('pipeline_tag', pipelineTag);
   if (author) params.set('author', author);
+  if (filter) params.set('filter', String(filter));
   const res = await fetch(`${HF_API}/api/models?${params}`, { signal: AbortSignal.timeout(12_000) });
   if (!res.ok) throw new Error(`huggingface.co ${res.status}`);
   // HF paginates with a Link header (rel="next") carrying an opaque cursor —
@@ -561,7 +562,9 @@ export async function modelVariants(repoId) {
     ...grouped,
     variants: enriched,
     recommended: rec.recommended ? rec.pick?.include ?? null : null,
-    pick: rec.pick?.include ?? null,
+    // Only pre-select a quant that actually fits. An 86 GB IQ1_S on a 16 GB
+    // card must not land in the Download button as if it were the default.
+    pick: rec.recommended ? rec.pick?.include ?? null : null,
     vramFreeBytes: hw.gpuFreeBytes != null ? Math.round(hw.gpuFreeBytes) : null,
     vramTotalBytes: hw.gpuTotalBytes != null ? Math.round(hw.gpuTotalBytes) : null,
     ramAvailableBytes: hw.ramAvailableBytes != null ? Math.round(hw.ramAvailableBytes) : null,
