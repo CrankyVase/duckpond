@@ -94,17 +94,21 @@
   // Tab destinations — see popularModels()/modalityModels() in hfHub.js for
   // what each one actually fetches.
   const TABS = [
-    ['unsloth', 'Unsloth'],
-    ['popular', 'Popular'],
+    ['llm', 'LLM'],
     ['image', 'Image'],
     ['audio', 'Audio'],
     ['video', 'Video'],
   ];
-  // one-click jump to the mainstream model families Lewis actually wants —
-  // browsing raw trending doesn't surface these reliably by name alone.
-  const POPULAR = [
-    'Kimi', 'DeepSeek', 'Qwen', 'Llama', 'GLM', 'MiniMax', 'Gemma', 'Mistral', 'GPT-OSS', 'Phi',
-  ];
+  const LIST_HEADING = {
+    llm: 'Latest Unsloth models',
+    image: 'Image models',
+    audio: 'Audio models',
+    video: 'Video models',
+  };
+  function normalizeTab(t) {
+    if (t === 'unsloth' || t === 'popular') return 'llm';
+    return TABS.some(([v]) => v === t) ? t : 'llm';
+  }
 
   // Task-type badge — HF's pipeline_tag, mapped to Unsloth's own vocabulary
   // ("Conversational" for a chat model, etc.) and a color so a card reads at
@@ -242,7 +246,7 @@
   }
 
   let q = $state('');
-  let activeTab = $state(prefs.hubDefaultTab ?? 'unsloth');
+  let activeTab = $state(normalizeTab(prefs.hubDefaultTab));
   let results = $state([]);
   let searching = $state(false);
   let loadingMore = $state(false);      // fetching the next cursor page
@@ -282,7 +286,7 @@
   const isOwner = $derived(app.user?.role === 'owner');
   const displayedResults = $derived.by(() => {
     let list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
-    if (activeTab === 'unsloth' && !q.trim()) {
+    if (activeTab === 'llm' && !q.trim()) {
       list = list.filter((m) => /-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id));
     }
     return sortedResults(list);
@@ -325,10 +329,11 @@
     return gb >= 10 ? `${Math.round(gb)} GB` : gb.toFixed(1);
   });
 
+  const isMediaTab = $derived(activeTab === 'image' || activeTab === 'audio' || activeTab === 'video');
+
   function tabEndpoint(tab, cursor) {
     const p = cursor ? { cursor } : {};
-    if (tab === 'unsloth') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified', filter: 'gguf', ...p })}`;
-    if (tab === 'popular') return '/api/hf/popular';
+    if (tab === 'llm') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified', filter: 'gguf', ...p })}`;
     return `/api/hf/modality/${tab}`;
   }
 
@@ -336,8 +341,15 @@
   // fetchMore() can re-run it with the cursor for endless scroll.
   let queryUrl = $state(null);
   function currentQueryUrl(cursor) {
-    const p = cursor ? { cursor } : {};
-    if (q.trim()) return `/api/hf/search?${new URLSearchParams({ q: q.trim(), sort: 'trendingScore', ...p })}`;
+    const p = { sort: 'trendingScore', ...(cursor ? { cursor } : {}) };
+    if (q.trim()) {
+      p.q = q.trim();
+      if (activeTab === 'llm') p.filter = 'gguf';
+      if (activeTab === 'image') p.pipeline_tag = 'text-to-image';
+      if (activeTab === 'audio') p.pipeline_tag = 'text-to-audio';
+      if (activeTab === 'video') p.pipeline_tag = 'text-to-video';
+      return `/api/hf/search?${new URLSearchParams(p)}`;
+    }
     return tabEndpoint(activeTab, cursor);
   }
 
@@ -349,10 +361,8 @@
       results = models;
       nextCursor = nc;
       hasMore = !!nc;
-      // Land on something that fits this GPU, not whatever Unsloth published
-      // last (those are usually 70B+ "Does not fit" cards).
-      const landing = recModels[0]?.id
-        ?? results.find((m) => /-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id))?.id
+      const landing = (activeTab === 'llm' ? recModels[0]?.id : null)
+        ?? results.find((m) => activeTab !== 'llm' || (/-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id)))?.id
         ?? results[0]?.id
         ?? null;
       if (landing) select(landing);
@@ -447,7 +457,13 @@
       const extra = recModels.find((m) => m.id === repoId);
       if (extra) results = [extra, ...results];
     }
-    void loadQuantizers(repoId);
+    if (isMediaTab || !GGUF_REPO_RE.test(repoId)) {
+      quantizers.set(repoId, { loading: false, list: [] });
+      quantizers = new Map(quantizers);
+      void loadVariants(repoId);
+    } else {
+      void loadQuantizers(repoId);
+    }
     void loadReadme(repoId);
   }
 
@@ -495,7 +511,12 @@
     variants = new Map(variants);
     try {
       const v = await api(`/api/hf/variants/${repoId}`);
-      variants.set(repoId, { loading: false, ...v, pick: v.recommended ?? v.pick ?? null });
+      const media = ['image', 'audio', 'video'].includes(activeTab);
+      variants.set(repoId, {
+        loading: false,
+        ...v,
+        pick: media ? (v.variants[0]?.include ?? null) : (v.recommended ?? v.pick ?? null),
+      });
       void loadReadme(repoId);
     } catch (e) {
       variants.set(repoId, { loading: false, error: e.message ?? 'failed to load files' });
@@ -749,25 +770,21 @@
       </button>
     </div>
     {#if mode === 'discover'}
+      <div class="tabs">
+        {#each TABS as [val, label] (val)}
+          <button class="tab" class:active={activeTab === val && !q.trim()}
+            onclick={() => loadTab(val)}>{label}</button>
+        {/each}
+      </div>
       <div class="searchbox">
         <SearchIcon size={14} />
-        <input type="search" inputmode="search" placeholder="Search all models"
+        <input type="search" inputmode="search" placeholder="Search {activeTab === 'llm' ? 'LLMs' : activeTab + ' models'}"
           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
           data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
           name={searchInputName}
           bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
         {#if q}<button class="ghost searchclear" onclick={clearSearch} title="Clear"><X size={13} /></button>{/if}
       </div>
-      <label class="fselect">
-        <select value={activeTab} onchange={(e) => loadTab(e.target.value)}>
-          {#each TABS as [val, label] (val)}<option value={val}>{label}</option>{/each}
-        </select>
-      </label>
-      <label class="fselect">
-        <select bind:value={typeFilter}>
-          {#each TYPE_FILTERS as [val, label] (val)}<option value={val}>{label}</option>{/each}
-        </select>
-      </label>
       <label class="fselect">
         <select bind:value={sortBy}>
           {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
@@ -817,7 +834,7 @@
   {/if}
 
   {#if mode === 'discover'}
-  {#if !q.trim() && recModels.length}
+  {#if activeTab === 'llm' && !q.trim() && recModels.length}
     <section class="recstrip">
       <h2>Recommended for this GPU <ChevronRight size={16} /></h2>
       <div class="carousel">
@@ -859,7 +876,7 @@
   {#if displayedResults.length || (!searching && searched)}
     <div class="split">
       <div class="list" bind:this={listEl}>
-        <div class="lhead">{q.trim() ? 'Search results' : activeTab === 'unsloth' ? 'Latest Unsloth models' : TABS.find(([v]) => v === activeTab)?.[1] ?? 'Models'}</div>
+        <div class="lhead">{q.trim() ? 'Search results' : (LIST_HEADING[activeTab] ?? 'Models')}</div>
         {#each displayedResults as m (m.id)}
           {@const badge = taskBadge(m.pipelineTag, m.kind)}
           {@const logo = logoFor(m.id)}
@@ -876,7 +893,7 @@
             </span>
             <span class="rinfo">
               <span class="rname">
-                {repoNameOf(m.id)}
+                <span class="rnametext">{repoNameOf(m.id)}</span>
                 <span class="dots">
                   {#if m.curated}<span class="staffpick" title="Staff Pick"><Sparkles size={11} /></span>{/if}
                   {#if badge}<span class="dot task {badge[1]}" title={badge[0]}></span>{/if}
@@ -946,7 +963,9 @@
           </div>
 
           {@const qz = selectedQuantizers}
-          {#if !qz}
+          {#if isMediaTab}
+            <!-- image/audio/video download the repo as a pipeline, not GGUF quants -->
+          {:else if !qz}
             <div class="qmrow"><span class="qmhint">Click a model on the left to load its quantizations…</span></div>
           {:else if qz?.loading}
             <div class="qmrow"><span class="qmhint">Loading available quantizations…</span></div>
@@ -989,7 +1008,30 @@
               {@const picked = pickedVariant(v)}
               {@const fits = fittingRows(v)}
               {@const rest = otherRows(v)}
-              {#if !picked && !fits.length}
+              {#if isMediaTab}
+              <div class="vhead mediahead">
+                <span class="qtrigger">
+                  <span class="mono">{picked?.name ?? 'Full model'}</span>
+                  <span class="qsize mono">{fmtBytes(picked?.size ?? v.total)}</span>
+                </span>
+                {#if isOwner}
+                  {@const dlJob = getJob(activeRepo, v.pick)}
+                  {#if dlJob?.state === 'running' || dlJob?.state === 'cancelling'}
+                    <button class="dlbtn running" disabled>
+                      <span class="spinner"></span>
+                      {dlJob.downloadedBytes > 0 ? `${fmtBytes(dlJob.downloadedBytes)}…` : 'starting…'}
+                    </button>
+                    <button class="dlbtn cancel" onclick={() => cancel(activeRepo, v.pick)} title="Cancel"><X size={13} /></button>
+                  {:else if picked?.downloaded || dlJob?.state === 'done'}
+                    <button class="dlbtn done" disabled><Download size={13} /> On device</button>
+                  {:else}
+                    <button class="dlbtn" onclick={() => download(activeRepo, v.pick, picked?.name ?? 'model')}>
+                      <Download size={13} /> Download
+                    </button>
+                  {/if}
+                {/if}
+              </div>
+              {:else if !picked && !fits.length}
                 <div class="nofit">
                   <span>Nothing in this repo fits {hw?.gpuLabel ?? 'this GPU'}.
                     Smallest real quant is {fmtBytes(rest.filter((r) => !r.companion)[0]?.size ?? v.total)}.</span>
@@ -1046,7 +1088,7 @@
                 {/if}
               </div>
               {/if}
-              {#if quantOpen || showOom}
+              {#if !isMediaTab && (quantOpen || showOom)}
               <div class="qlist">
                 {#each (showOom || !fits.length ? sortedVariants(v) : fits) as row (row.include ?? row.name)}
                   <div class="qrow" class:sel={v.pick === row.include} class:loaded={row.downloaded} class:companion={row.companion}
@@ -1285,12 +1327,14 @@
 
   /* Discover / My Models — same segmented-pill look as .tabs */
   .modebar {
-    display: flex; gap: 2px; padding: 3px; border-radius: 999px;
-    background: var(--bg-hover); width: fit-content; flex-shrink: 0; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px;
+    background: var(--bg-hover); width: fit-content; flex-shrink: 0; height: 36px;
+    box-sizing: border-box; margin: 0;
   }
   .modebtn {
-    padding: 7px 18px; border-radius: 999px; border: none; background: none;
+    padding: 0 16px; height: 30px; border-radius: 999px; border: none; background: none;
     font-size: 12.5px; font-weight: 600; color: var(--text-faint);
+    display: inline-flex; align-items: center;
     transition: color 140ms ease, background 140ms ease;
   }
   .modebtn:hover { color: var(--text-dim); }
@@ -1299,22 +1343,25 @@
     display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
     font-size: 10.5px; font-weight: 700; background: var(--accent); color: var(--bg);
   }
-  .addbtn { padding: 6px; border-radius: 999px; color: var(--text-dim); }
+  .addbtn {
+    width: 36px; height: 36px; padding: 0; border-radius: 999px; color: var(--text-dim);
+    display: grid; place-items: center;
+  }
   .addbtn:hover { background: var(--bg-hover); color: var(--text); }
 
-  .recstrip { flex-shrink: 0; margin: 4px 0 14px; }
+  .recstrip { flex-shrink: 0; margin: 0 0 16px; }
   .recstrip h2 {
-    margin: 0 0 10px; font-size: 16px; font-weight: 650; letter-spacing: -0.02em;
-    display: inline-flex; align-items: center; gap: 4px;
+    margin: 0 0 10px; font-size: 15px; font-weight: 650; letter-spacing: -0.02em;
+    display: inline-flex; align-items: center; gap: 4px; line-height: 1;
   }
   .carousel {
-    display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px;
+    display: flex; gap: 12px; overflow-x: auto; padding: 0 0 4px;
     scrollbar-width: thin;
   }
   .mcard {
-    flex: 0 0 204px; height: 128px; border-radius: 18px; padding: 14px;
-    display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
-    text-align: left; border: 1px solid transparent;
+    flex: 0 0 196px; height: 118px; border-radius: 16px; padding: 12px 14px;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+    text-align: left; border: 1px solid transparent; box-sizing: border-box;
     background:
       radial-gradient(90% 80% at 18% 10%, var(--glow, rgba(200,153,104,0.28)), transparent 60%),
       color-mix(in srgb, var(--foreground, #fff) 7%, var(--bg-raised));
@@ -1322,12 +1369,14 @@
   }
   .mcard:hover { background-color: var(--bg-hover); }
   .mcard.on { outline: 1px solid var(--accent-dim); }
-  .mcard .avatar { width: 44px; height: 44px; border-radius: 14px; }
+  .mcard .avatar { width: 40px; height: 40px; border-radius: 12px; }
   .mcname {
-    font-size: 13.5px; font-weight: 650; line-height: 1.2;
+    font-size: 13px; font-weight: 650; line-height: 1.25;
+    min-height: 2.5em; max-height: 2.5em;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    width: 100%;
   }
-  .mcowner { font-size: 11.5px; color: var(--text-faint); }
+  .mcowner { font-size: 11.5px; color: var(--text-faint); line-height: 1; }
 
   .dacts { margin-left: auto; display: flex; gap: 4px; }
   .iconbtn {
@@ -1431,16 +1480,17 @@
   .dltag.cancelled { background: var(--bg-hover); color: var(--text-faint); }
 
   .toolbar {
-    flex-shrink: 0; display: flex; align-items: center; gap: 12px;
-    flex-wrap: wrap; margin-bottom: 12px;
+    flex-shrink: 0; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; margin-bottom: 16px; min-height: 36px;
   }
   .tabs {
-    display: flex; gap: 2px; padding: 3px; border-radius: 999px;
-    background: var(--bg-hover); flex-shrink: 0;
+    display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px;
+    background: var(--bg-hover); flex-shrink: 0; height: 36px; box-sizing: border-box;
   }
   .tab {
-    padding: 6px 16px; border-radius: 999px; border: none; background: none;
-    font-size: 12.5px; font-weight: 500; color: var(--text-faint);
+    padding: 0 14px; height: 30px; border-radius: 999px; border: none; background: none;
+    font-size: 12.5px; font-weight: 600; color: var(--text-faint);
+    display: inline-flex; align-items: center;
     transition: color 140ms ease, background 140ms ease;
   }
   .tab:hover { color: var(--text-dim); }
@@ -1454,9 +1504,9 @@
   }
   .pchip:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border); }
   .searchbox {
-    display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 160px; max-width: 340px;
-    padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border-soft);
-    background: var(--bg-raised); color: var(--text-faint);
+    display: flex; align-items: center; gap: 8px; flex: 1 1 200px; min-width: 160px; max-width: 280px;
+    height: 36px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border-soft);
+    background: var(--bg-raised); color: var(--text-faint); box-sizing: border-box;
   }
   .searchbox:focus-within { border-color: var(--accent-dim); color: var(--text-dim); }
   .searchbox input {
@@ -1480,10 +1530,10 @@
 
   /* Type / sort filters — client-side over whatever's already loaded */
   .filterbar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-shrink: 0; flex-wrap: wrap; }
-  .fselect { display: flex; align-items: center; gap: 7px; }
+  .fselect { display: flex; align-items: center; gap: 7px; height: 36px; }
   .fslabel { font-size: 11px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; }
   .fselect select {
-    font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border-soft);
+    font-size: 12.5px; height: 36px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border-soft);
     background: var(--bg-raised); color: var(--text);
   }
   .fselect select:focus { outline: none; border-color: var(--accent-dim); }
@@ -1502,16 +1552,16 @@
   .loading-more { display: flex; flex-direction: column; gap: 6px; }
 
   /* Two panes, each with its own scrollbar — the page never scrolls. */
-  .split { flex: 1; min-height: 0; display: flex; gap: 14px; align-items: stretch; }
+  .split { flex: 1; min-height: 0; display: flex; gap: 16px; align-items: stretch; }
   .list {
-    flex: 0 0 380px; min-height: 0; display: flex; flex-direction: column; gap: 4px;
+    flex: 0 0 420px; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 2px;
     overflow-y: auto; overscroll-behavior: contain;
-    padding: 2px 4px 16px 2px; -webkit-overflow-scrolling: touch;
+    padding: 0 4px 16px 0; -webkit-overflow-scrolling: touch;
   }
   .lhead {
-    flex-shrink: 0; font-size: 10.5px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.07em; color: var(--text-faint); padding: 0 12px 4px;
-    position: sticky; top: 0; background: var(--bg); z-index: 1;
+    flex-shrink: 0; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-faint); padding: 0 12px 8px;
+    position: sticky; top: 0; background: var(--bg); z-index: 1; line-height: 1;
   }
   .sentinel { height: 1px; flex-shrink: 0; }
   .morerr {
@@ -1524,16 +1574,18 @@
 
   /* Unsloth's result card: flat raised surface, hover lift */
   .rrow {
-    display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
-    padding: 10px 12px; border-radius: calc(13px * var(--rf)); border: 1px solid transparent;
+    display: grid; grid-template-columns: 40px minmax(0, 1fr) 78px; align-items: center; gap: 10px;
+    width: 100%; text-align: left;
+    padding: 8px 10px; border-radius: calc(12px * var(--rf)); border: 1px solid transparent;
     background: color-mix(in srgb, var(--foreground, #fff) 4%, transparent); flex-shrink: 0;
-    transition: background 140ms ease, border-color 140ms ease, transform 160ms ease;
+    box-sizing: border-box;
+    transition: background 140ms ease, border-color 140ms ease;
   }
   .rstats {
-    margin-left: auto; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
-    font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+    display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 2px;
+    font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; line-height: 1.25;
   }
-  .rstats span { display: inline-flex; align-items: center; gap: 4px; }
+  .rstats span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
   .rago { opacity: 0.8; }
   .rrow:hover { background: var(--bg-hover); }
   .rrow.active {
@@ -1547,7 +1599,7 @@
      and turns a clean logo into a colored smudge. The hue is now reserved
      for the no-image fallback only (set inline, see avatarStyle callers). */
   .avatar {
-    width: 48px; height: 48px; border-radius: 12px; flex-shrink: 0;
+    width: 40px; height: 40px; border-radius: 11px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
     font-size: 16px; font-weight: 700;
     overflow: hidden; position: relative;
@@ -1564,10 +1616,12 @@
   .avatar.logo img.cover { object-fit: cover; padding: 0; }
   .avatar .initial { position: relative; }
 
-  .rinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2.5px; }
+  .rinfo { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .rname {
-    font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; display: flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; min-width: 0;
+  }
+  .rnametext {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
   }
   .dots { display: inline-flex; gap: 4px; flex-shrink: 0; }
   .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
@@ -1597,9 +1651,9 @@
     border-radius: calc(16px * var(--rf)); padding: 22px;
     -webkit-overflow-scrolling: touch;
   }
-  .dhead { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
-  .dtitle { min-width: 0; }
-  h2 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -0.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dhead { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; min-width: 0; }
+  .dtitle { min-width: 0; flex: 1; }
+  h2 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -0.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2; }
   .downer { font-size: 12px; color: var(--text-faint); }
 
   .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -1640,10 +1694,11 @@
 
   /* Unsloth-style quant picker */
   .vhead {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     padding-bottom: 10px; margin-bottom: 8px;
     border-bottom: 1px solid var(--border-soft);
   }
+  .vhead.mediahead { flex-wrap: nowrap; }
   .vpicklabel { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
   .vpicklabel :global(.qchevron) { color: var(--text-faint); flex-shrink: 0; transition: transform 160ms ease; }
   .vpicklabel :global(.qchevron.open) { transform: rotate(180deg); }
@@ -1680,16 +1735,16 @@
   .qrow {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 10px; border-radius: calc(11px * var(--rf));
-    cursor: pointer; border: 1px solid transparent;
+    cursor: pointer; border: 1px solid transparent; min-width: 0;
   }
   .qrow:hover { background: var(--bg-hover); }
   .qrow.sel { background: var(--bg-hover); border-color: var(--border-soft); }
   .qleft { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
   .qname {
-    font-size: 12.5px; font-weight: 500; letter-spacing: -0.01em; flex-shrink: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px;
+    font-size: 12.5px; font-weight: 500; letter-spacing: -0.01em; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .qright { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
+  .qright { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
   .qsize {
     font-size: 11px; color: var(--text-dim); flex-shrink: 0; font-variant-numeric: tabular-nums;
     padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-soft);
@@ -1736,7 +1791,7 @@
   @media (max-width: 900px) {
     .hub { padding: 14px 14px 10px; }
     .split { flex-direction: column; overflow-y: auto; }
-    .list { flex: 0 0 auto; max-height: 46vh; }
+    .list { flex: 0 0 auto; max-height: 46vh; width: 100%; }
     .detail { overflow-y: visible; min-height: 0; }
     .head { flex-direction: column; gap: 8px; }
   }
