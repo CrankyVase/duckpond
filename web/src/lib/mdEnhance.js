@@ -32,11 +32,11 @@ function openHtmlPreview(source, lang) {
       <div class="html-preview-head">
         <span class="html-preview-title">Preview — in-canvas</span>
         <button type="button" class="html-preview-btn" data-act="reload" title="Reload">reload</button>
-        <button type="button" class="html-preview-btn" data-act="newtab" title="Open in new tab">open</button>
+        <button type="button" class="html-preview-btn" data-act="download" title="Download source">download</button>
         <button type="button" class="html-preview-btn" data-act="close" title="Close">close</button>
       </div>
       <iframe class="html-preview-frame" title="HTML preview"
-        sandbox="allow-scripts allow-forms allow-modals allow-popups allow-same-origin"></iframe>
+        sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
     </div>`;
   document.body.appendChild(overlay);
 
@@ -60,8 +60,11 @@ function openHtmlPreview(source, lang) {
     // re-assign same blob url to force reload
     requestAnimationFrame(() => { frame.src = url; });
   });
-  overlay.querySelector('[data-act="newtab"]').addEventListener('click', () => {
-    window.open(url, '_blank', 'noopener');
+  overlay.querySelector('[data-act="download"]').addEventListener('click', () => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `preview.${lang === 'svg' ? 'svg' : 'html'}`;
+    a.click();
   });
 }
 

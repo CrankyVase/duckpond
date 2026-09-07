@@ -6,8 +6,8 @@ already installed and GPU-verified there — see ~/.unsloth/studio/unsloth_studi
 so there's no separate container or dependency set to maintain. Models are
 discovered straight out of the shared HF cache (HF_HOME) that `hf download`
 (DuckPond's Model Hub), the llama router, and Unsloth Studio all already
-write to — download a diffusers-format or single-file checkpoint through the
-Hub's Image/Video/Audio tabs and it shows up here with no extra wiring.
+write to. Complete supported models are selectable; incomplete downloads and
+architectures requiring another adapter are listed with a reason.
 
 Contract (matches server/src/imagegen.js in the duckpond repo):
   GET  /health                     -> {ok, models:{id:{ready,kind}}, default_model}
@@ -19,6 +19,8 @@ Contract (matches server/src/imagegen.js in the duckpond repo):
 """
 import base64
 import io
+import inspect
+import gc
 import json
 import os
 import threading
@@ -26,10 +28,22 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 import torch
 import numpy as np
+
+# Native speech support is optional. Diffusion and MusicGen do not depend
+# on Studio's private image/video modules remaining import-compatible.
+try:
+    from studio.backend.core.inference.native_audio import (
+        NativeAudioBackend,
+        native_audio_type_from_local_path,
+    )
+    UNSLOTH = True
+except Exception as _e:
+    print(f"[bridge] unsloth modules unavailable ({_e}) — using built-in heuristics")
+    UNSLOTH = False
 
 HF_HOME = Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
 HUB_DIR = HF_HOME / "hub"
@@ -51,118 +65,217 @@ class JobCancelled(Exception):
 
 
 # ---------------------------------------------------------------- discovery
+def _heuristic_task(cls):
+    """Fallback classifier when Unsloth modules are unavailable."""
+    lower = (cls or "").lower()
+    if "video" in lower or "ltx" in lower or "wan" in lower or "cogvideo" in lower or "hunyuan" in lower or "mochi" in lower or "allegro" in lower:
+        return "video"
+    if "audio" in lower or "music" in lower or "stableaudio" in lower or "audioldm" in lower:
+        return "audio"
+    return "image"
+
+
 def discover_models():
-    """Scan HF_HOME for anything that looks like a media checkpoint.
-    diffusers-format repo (model_index.json with a *Pipeline that isn't purely
-    text) or a single big .safetensors file at the repo root (Civitai-style
-    single-file SDXL/SD checkpoints)."""
-    models = {}
-    if not HUB_DIR.is_dir():
-        return models
-    for repo_dir in HUB_DIR.iterdir():
-        if not repo_dir.name.startswith("models--"):
-            continue
-        model_id = repo_dir.name[len("models--"):].replace("--", "/", 1)
-        snaps = repo_dir / "snapshots"
-        if not snaps.is_dir():
-            continue
-        snapshot_dirs = sorted(snaps.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not snapshot_dirs:
-            continue
-        snap = snapshot_dirs[0]
-        idx = snap / "model_index.json"
-        if idx.is_file():
+    # Discovery is metadata-only: health checks never import model code or
+    # download weights. A config.json alone is not a completed model.
+    from media_catalog import scan_models
+    models = scan_models(HUB_DIR, native_available=UNSLOTH)
+    import diffusers
+    for model_id, info in models.items():
+        if info['ready'] and info['kind'] == 'diffusers' and getattr(diffusers, info.get('class', ''), None) is None:
+            info.update(ready=False, reason=f"Install a Diffusers version with {info.get('class')}")
+        if info['ready'] and info['kind'] == 'native_audio':
             try:
-                cls = json.loads(idx.read_text()).get("_class_name", "")
-            except Exception:
-                cls = ""
-            # classify by pipeline class name
-            if "Pipeline" in cls:
-                kind = "diffusers"
-                lower = cls.lower()
-                if "video" in lower or "ltx" in lower or "wan" in lower or "cogvideo" in lower or "hunyuan" in lower or "mochi" in lower or "allegro" in lower:
-                    task = "video"
-                elif "audio" in lower or "music" in lower or "stableaudio" in lower or "audioldm" in lower:
-                    task = "audio"
-                elif "image" in lower or "text2image" in lower or "xl" in lower or "flux" in lower or "sd" in lower:
-                    task = "image"
-                else:
-                    task = "image"  # default to image for unknown pipelines
-                models[model_id] = {"ready": True, "kind": kind, "task": task, "path": str(snap), "class": cls}
-            continue
-        top_level_safetensors = [f for f in snap.glob("*.safetensors") if f.stat().st_size > 500_000_000]
-        if top_level_safetensors:
-            models[model_id] = {"ready": True, "kind": "single_file", "task": "image", "path": str(top_level_safetensors[0])}
+                cfg = _tts_config(model_id, info)
+                if cfg.audio_type == 'minimax_music3' and (DEVICE != 'cuda' or getattr(torch.version, 'hip', None)):
+                    info.update(ready=False, reason='MiniMax Music 3 requires an NVIDIA CUDA GPU')
+            except RuntimeError as e:
+                info.update(ready=False, reason=str(e))
     return models
 
 
 def resolve_model(requested, task=None):
-    models = discover_models()
-    if not models:
-        raise RuntimeError(f"no {task or 'media'} models downloaded yet — grab one from Model Hub")
-    if requested and requested != "auto" and requested in models:
-        return requested, models[requested]
-    # filter by task if given
-    if task:
-        task_models = {k: v for k, v in models.items() if v.get("task") == task}
-        if task_models:
-            models = task_models
-    if DEFAULT_MODEL and DEFAULT_MODEL in models:
-        return DEFAULT_MODEL, models[DEFAULT_MODEL]
-    first_id = next(iter(models))
-    return first_id, models[first_id]
+    from media_catalog import select_model
+    return select_model(discover_models(), requested, task or "image", DEFAULT_MODEL)
+
+
+# Single NativeAudioBackend for all TTS requests — one resident model at a
+# time, same as the diffusers pipe above. Grows lazily on first TTS call so
+# image/video-only hosts never pay the transformers import cost.
+_tts = {"backend": None}
+
+def _tts_backend():
+    if not UNSLOTH:
+        raise RuntimeError("native TTS needs Unsloth modules (import failed at boot)")
+    if _tts["backend"] is None:
+        _tts["backend"] = NativeAudioBackend()
+    return _tts["backend"]
+
+
+def _tts_config(model_id, info):
+    """Minimal config object NativeAudioBackend.load_model expects
+    (.identifier/.audio_type/.path). audio_type resolved from the local
+    snapshot when the repo id isn't in the curated list."""
+    from types import SimpleNamespace
+    audio_type = None
+    if UNSLOTH:
+        try:
+            audio_type = native_audio_type_from_local_path(str(info.get("path", "")))
+        except Exception:
+            audio_type = None
+    if not audio_type:
+        raise RuntimeError(f"could not determine TTS architecture for {model_id}")
+    return SimpleNamespace(identifier=model_id, audio_type=audio_type, path=str(info.get("path", "")))
+
+
+def release_models(except_id=None):
+    backend = _tts.get("backend")
+    active_tts = getattr(backend, "active_model_name", None)
+    if _loaded["id"] in (None, except_id) and active_tts in (None, except_id):
+        return
+    if _loaded["id"] != except_id:
+        _loaded.update(id=None, pipe=None, kind=None)
+    if backend and getattr(backend, "active_model_name", None) not in (None, except_id):
+        backend.unload_model(backend.active_model_name)
+    gc.collect()
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
 
 
 def load_pipeline(model_id, info):
     if _loaded["id"] == model_id and _loaded["pipe"] is not None:
         return _loaded["pipe"]
-    from diffusers import AutoPipelineForText2Image, AutoPipelineForText2Audio
-
-    if _loaded["pipe"] is not None:
-        del _loaded["pipe"]
-        _loaded["pipe"] = None
-        if DEVICE == "cuda":
-            torch.cuda.empty_cache()
-
-    dtype = torch.float16 if DEVICE == "cuda" else torch.float32
-    task = info.get("task", "image")
-
-    if task == "audio":
-        if info["kind"] == "diffusers":
-            pipe = AutoPipelineForText2Audio.from_pretrained(info["path"], torch_dtype=dtype)
-        else:
-            raise RuntimeError("single-file audio checkpoints not supported")
-    elif task == "video":
-        # video pipelines are loaded via their own class names
-        cls_name = info.get("class", "")
-        if not cls_name:
-            raise RuntimeError("video pipeline class unknown")
-        import diffusers
-        pipe_cls = getattr(diffusers, cls_name, None)
-        if pipe_cls is None:
-            raise RuntimeError(f"pipeline class {cls_name} not available in diffusers {diffusers.__version__}")
-        if info["kind"] == "diffusers":
-            pipe = pipe_cls.from_pretrained(info["path"], torch_dtype=dtype)
-        else:
-            raise RuntimeError("single-file video checkpoints not supported")
-    else:
-        # image
-        if info["kind"] == "diffusers":
-            pipe = AutoPipelineForText2Image.from_pretrained(info["path"], torch_dtype=dtype)
-        else:
-            pipe = AutoPipelineForText2Image.from_single_file(info["path"], torch_dtype=dtype)
-
-    # Keeps only the active submodule resident on GPU — this card is shared
-    # with the llama router, so a full `.to("cuda")` load risks OOMing
-    # whatever LLM is already loaded.
-    try:
+    release_models(model_id)
+    import diffusers
+    # No AutoPipelineForText2Audio exists in several supported diffusers
+    # versions. Resolve the declared class for each task independently.
+    pipe_cls = getattr(diffusers, info.get("class", ""), None)
+    if pipe_cls is None:
+        raise RuntimeError(f"Pipeline {info.get('class')} is unavailable; update the media runtime")
+    dtype = torch.float32
+    if DEVICE == "cuda":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    if info["kind"] != "diffusers":
+        raise RuntimeError("This checkpoint needs a dedicated loader; choose a complete Diffusers repository")
+    pipe = pipe_cls.from_pretrained(info["path"], torch_dtype=dtype, local_files_only=True)
+    # Preserve image size, steps, and LLM context. Offload only on a GPU;
+    # CPU hosts never enter Accelerate's GPU offload path.
+    if DEVICE == "cuda":
         pipe.enable_model_cpu_offload()
-    except Exception:
+    else:
         pipe.to(DEVICE)
-    _loaded["id"] = model_id
-    _loaded["pipe"] = pipe
-    _loaded["kind"] = task
+    _loaded.update(id=model_id, pipe=pipe, kind=info["task"])
     return pipe
+
+
+def call_pipeline(pipe, kwargs):
+    from media_catalog import pipeline_kwargs
+    with torch.inference_mode():
+        return pipe(**pipeline_kwargs(pipe, kwargs))
+
+
+def encode_audio(audio, sample_rate):
+    import soundfile as sf
+    if hasattr(audio, "detach"):
+        audio = audio.detach().float().cpu().numpy()
+    audio = np.asarray(audio)
+    # Diffusers/MusicGen use [channels, samples]; soundfile uses the reverse.
+    if audio.ndim == 2 and audio.shape[0] <= 8:
+        audio = audio.T
+    buf = io.BytesIO()
+    sf.write(buf, audio, sample_rate, format="WAV")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def audio_sample_rate(pipe):
+    for component in (getattr(pipe, "vocoder", None), getattr(pipe, "vae", None), pipe):
+        cfg = getattr(component, "config", None)
+        for obj in (component, cfg):
+            for key in ("sampling_rate", "sample_rate"):
+                value = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+                if value:
+                    return int(value)
+    raise RuntimeError("Audio model does not declare a sample rate; refusing to save at the wrong pitch")
+
+
+def run_musicgen_job(body, tag, model_id, info):
+    duration = float(body.get("audio_duration") or 10)
+    if duration > 30:
+        raise ValueError("MusicGen supports up to 30 seconds per generation")
+    from transformers import AutoProcessor, MusicgenForConditionalGeneration, StoppingCriteria, StoppingCriteriaList
+    if _loaded["id"] != model_id:
+        release_models(model_id)
+        processor = AutoProcessor.from_pretrained(info["path"], local_files_only=True)
+        model = MusicgenForConditionalGeneration.from_pretrained(info["path"], local_files_only=True).to(DEVICE).eval()
+        _loaded.update(id=model_id, pipe=(processor, model), kind="audio")
+    processor, model = _loaded["pipe"]
+    rate = int(model.config.audio_encoder.sampling_rate)
+    frame_rate = float(model.config.audio_encoder.frame_rate)
+    class Cancel(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs):
+            if tag in CANCEL_TAGS:
+                raise JobCancelled(tag)
+            with STATE_LOCK:
+                STATE.update(phase="generating", step=input_ids.shape[-1], steps=int(duration * frame_rate))
+            return False
+    inputs = processor(text=[body["prompt"]], padding=True, return_tensors="pt").to(DEVICE)
+    data = []
+    # Seeded RNG is scoped so one request does not change later random jobs.
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()] if DEVICE == "cuda" else []):
+        if body.get("seed") is not None:
+            torch.manual_seed(int(body["seed"]))
+        for i in range(int(body.get("n", 1))):
+            with STATE_LOCK:
+                STATE.update(image=i + 1, n=int(body.get("n", 1)))
+            with torch.inference_mode():
+                audio = model.generate(**inputs, do_sample=True, max_new_tokens=int(duration * frame_rate),
+                                       stopping_criteria=StoppingCriteriaList([Cancel()]))
+            data.append({"b64_json": encode_audio(audio[0], rate)})
+    return {"data": data, "model_used": model_id, "task": "audio", "sample_rate": rate}
+
+
+def run_omnivoice_job(body, tag, model_id, info):
+    from omnivoice import OmniVoice
+    import tempfile
+    # A transcript avoids a hidden ASR download and a second resident model.
+    reference = body.get("ref_audio_b64")
+    if reference and not str(body.get("ref_text") or "").strip():
+        raise ValueError("Add the reference clip transcript to clone this voice")
+    if _loaded["id"] != model_id:
+        release_models(model_id)
+        model = OmniVoice.from_pretrained(info["path"], device_map=DEVICE,
+                                         dtype=torch.float32 if DEVICE == "cpu" else torch.float16,
+                                         local_files_only=True)
+        _loaded.update(id=model_id, pipe=model, kind="tts")
+    model = _loaded["pipe"]
+    data = []
+    with tempfile.TemporaryDirectory(prefix="duckpond-voice-") as tmp:
+        kwargs = {"text": body["prompt"]}
+        if reference:
+            import soundfile as sf
+            raw = base64.b64decode(reference, validate=True)
+            if len(raw) > 10 * 1024 * 1024:
+                raise ValueError("Reference clip must be under 10 MB")
+            audio, rate = sf.read(io.BytesIO(raw))
+            if not 1 <= len(audio) / rate <= 30:
+                raise ValueError("Reference clip must be 1–30 seconds long")
+            path = str(Path(tmp) / "reference.wav")
+            sf.write(path, audio, rate)
+            kwargs.update(ref_audio=path, ref_text=body["ref_text"])
+        with torch.random.fork_rng(devices=[torch.cuda.current_device()] if DEVICE == "cuda" else []):
+            if body.get("seed") is not None:
+                torch.manual_seed(int(body["seed"]))
+            for i in range(int(body.get("n", 1))):
+                if tag in CANCEL_TAGS:
+                    raise JobCancelled(tag)
+                with STATE_LOCK:
+                    STATE.update(phase="generating", image=i + 1, n=int(body.get("n", 1)))
+                with torch.inference_mode():
+                    audio = model.generate(**kwargs)
+                if tag in CANCEL_TAGS:
+                    raise JobCancelled(tag)
+                data.append({"b64_json": encode_audio(audio[0], 24000)})
+    return {"data": data, "model_used": model_id, "task": "tts", "sample_rate": 24000}
 
 
 # ------------------------------------------------------------------- job
@@ -207,6 +320,8 @@ def _callback_kwargs(pipe, on_step):
 
 
 def run_job(body, tag):
+    from media_catalog import validate_request
+    validate_request(body)
     prompt = body["prompt"]
     model_req = body.get("model") or "auto"
     task = body.get("task", "image")  # image | video | audio
@@ -221,21 +336,35 @@ def run_job(body, tag):
     fps = int(body.get("fps") or 8)
     # audio-specific
     audio_duration = float(body.get("audio_duration") or 10.0)
-    sample_rate = int(body.get("sample_rate") or 44100)
 
     model_id, info = resolve_model(model_req, task=task)
+
+    # Native TTS (Higgs/MOSS via Unsloth's NativeAudioBackend) doesn't go
+    # through diffusers at all — text in, wav bytes out, one blocking call.
+    if info.get("kind") == "musicgen":
+        return run_musicgen_job(body, tag, model_id, info)
+    if info.get("kind") == "omnivoice":
+        return run_omnivoice_job(body, tag, model_id, info)
+    if body.get("ref_audio_b64"):
+        raise ValueError("This runtime does not support reference-audio cloning for the selected model")
+    if info.get("kind") == "native_audio":
+        return run_tts_job(body, tag, model_id, info)
+
     pipe = load_pipeline(model_id, info)
 
     generator = None
-    if seed:
+    if seed is not None:
         generator = torch.Generator(device=DEVICE).manual_seed(int(seed))
 
-    def on_step(pipe_, step, timestep, kwargs):
+    def on_step(*args):
+        # callback_on_step_end(pipe, i, t, kwargs) — 4 args;
+        # legacy callback(step, timestep, latents) — 3 args
         if tag in CANCEL_TAGS:
             raise JobCancelled(tag)
+        step = args[1] if len(args) == 4 else args[0]
         with STATE_LOCK:
             STATE.update(phase="denoising", step=step + 1, steps=steps)
-        return kwargs
+        return args[-1] if len(args) == 4 else None
 
     results_b64 = []
     for i in range(n):
@@ -244,42 +373,27 @@ def run_job(body, tag):
         with STATE_LOCK:
             STATE.update(phase="generating", image=i + 1, n=n, step=0, steps=steps)
 
+        kwargs = dict(prompt=prompt, negative_prompt=negative, num_inference_steps=steps,
+                      generator=generator, **_callback_kwargs(pipe, on_step))
         if task == "audio":
-            result = pipe(
-                prompt=prompt, negative_prompt=negative,
-                num_inference_steps=steps,
-                audio_length_in_s=audio_duration,
-                generator=generator,
-                **_callback_kwargs(pipe, on_step),
-            )
-            audio = result.audios[0] if hasattr(result, 'audios') else result[0]
-            buf = io.BytesIO()
-            import soundfile as sf
-            sf.write(buf, audio.T if audio.ndim > 1 else audio, sample_rate, format='WAV')
-            results_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+            params = inspect.signature(pipe.__call__).parameters
+            duration_key = "audio_end_in_s" if "audio_end_in_s" in params else "audio_length_in_s"
+            kwargs[duration_key] = audio_duration
+            result = call_pipeline(pipe, kwargs)
+            results_b64.append(encode_audio(result.audios[0], audio_sample_rate(pipe)))
         elif task == "video":
-            result = pipe(
-                prompt=prompt, negative_prompt=negative,
-                num_inference_steps=steps,
-                num_frames=num_frames,
-                generator=generator,
-                **_callback_kwargs(pipe, on_step),
-            )
-            frames = result.frames[0] if hasattr(result, 'frames') else result[0]
+            result = call_pipeline(pipe, dict(kwargs, num_frames=num_frames, width=w, height=h))
+            frames = result.frames[0]
             buf = io.BytesIO()
             _encode_video_mp4(buf, frames, fps)
             results_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
         else:
-            result = pipe(
-                prompt=prompt, negative_prompt=negative,
-                num_inference_steps=steps, width=w, height=h,
-                generator=generator,
-                **_callback_kwargs(pipe, on_step),
-            )
-            img = result.images[0]
+            result = call_pipeline(pipe, dict(kwargs, width=w, height=h))
             buf = io.BytesIO()
-            img.save(buf, format="PNG")
+            result.images[0].save(buf, format="PNG")
             results_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+        if tag in CANCEL_TAGS:
+            raise JobCancelled(tag)
 
         with STATE_LOCK:
             STATE.update(phase="image_done")
@@ -292,6 +406,68 @@ def run_job(body, tag):
         "steps_requested": steps,
         "steps_capped": False,
         "task": task,
+    }
+
+
+def run_tts_job(body, tag, model_id, info):
+    """Native synthesis only. Reference cloning uses the OmniVoice adapter;
+    this runtime's generate_audio_response contract has no reference input.
+    """
+    import threading as _th
+    text = body["prompt"]
+    temperature = float(body.get("temperature") or 0.6)
+    top_p = float(body.get("top_p") or 0.95)
+    top_k = int(body.get("top_k") or 50)
+    seed = body.get("seed")
+    seed = int(seed) if seed is not None else None
+
+    release_models(model_id)
+    backend = _tts_backend()
+    with STATE_LOCK:
+        STATE.update(phase="starting", step=None, steps=None, image=None, n=None)
+    if tag in CANCEL_TAGS:
+        raise JobCancelled(tag)
+    with STATE_LOCK:
+        STATE.update(phase="generating")
+
+    cancel_event = _th.Event()
+    finished = _th.Event()
+    # bridge cancel tags are global; poll into the backend's cancel event
+    def _watch():
+        while not finished.wait(0.3):
+            if tag in CANCEL_TAGS:
+                cancel_event.set()
+                return
+            with STATE_LOCK:
+                if not STATE.get("active"):
+                    return
+    _th.Thread(target=_watch, daemon=True).start()
+
+    cfg = _tts_config(model_id, info)
+    try:
+        if getattr(backend, "active_model_name", None) != model_id:
+            backend.load_model(cfg, trust_remote_code=True)
+        with torch.inference_mode():
+            wav_bytes, sample_rate = backend.generate_audio_response(
+                text, temperature=temperature, top_p=top_p, top_k=top_k,
+                max_new_tokens=int(body.get("max_new_tokens") or 2048),
+                cancel_event=cancel_event, instructions=body.get("instructions"), seed=seed,
+            )
+        if tag in CANCEL_TAGS:
+            raise JobCancelled(tag)
+    finally:
+        finished.set()
+    with STATE_LOCK:
+        STATE.update(phase="image_done")
+    return {
+        "data": [{"b64_json": base64.b64encode(wav_bytes).decode("ascii")}],
+        "prompt_enhanced": None,
+        "model_used": model_id,
+        "steps_used": 0,
+        "steps_requested": 0,
+        "steps_capped": False,
+        "task": "tts",
+        "sample_rate": sample_rate,
     }
 
 
@@ -324,12 +500,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         length = int(self.headers.get("content-length", 0))
+        if length < 0 or length > 16 * 1024 * 1024:
+            return self._json(413, {"error": "Request too large"})
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             return self._json(400, {"error": "bad json"})
+        if not isinstance(body, dict):
+            return self._json(400, {"error": "JSON object required"})
 
-        if parsed.path == "/v1/images/generations/cancel":
+        if parsed.path in {f"{path}/cancel" for path in ("/v1/images/generations", "/v1/videos/generations", "/v1/audio/generations", "/v1/audio/speech")}:
             tag = body.get("tag")
             if tag:
                 CANCEL_TAGS.add(tag)
@@ -342,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/images/generations": "image",
             "/v1/videos/generations": "video",
             "/v1/audio/generations": "audio",
-            "/v1/audio/speech": "audio",
+            "/v1/audio/speech": "tts",
         }
         body["task"] = task_map.get(parsed.path, "image")
 
@@ -353,6 +533,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = run_job(body, tag)
                 return self._json(200, result)
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
             except JobCancelled:
                 return self._json(499, {"error": "cancelled"})
             except Exception as e:

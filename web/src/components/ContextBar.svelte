@@ -7,8 +7,9 @@
 
   const pct = $derived(Math.min(100, (app.context.used / Math.max(1, app.context.budget)) * 100));
   const color = $derived(pct < 60 ? 'var(--green)' : pct < 85 ? 'var(--yellow)' : 'var(--red)');
+  const left = $derived(Math.max(0, app.context.budget - app.context.used));
   const label = $derived(
-    `${(app.context.used / 1000).toFixed(1)}k / ${(app.context.budget / 1024).toFixed(0)}k tokens (${pct.toFixed(0)}%)`);
+    `${app.context.estimated ? '~' : ''}${(app.context.used / 1000).toFixed(1)}k used / ${(app.context.budget / 1024).toFixed(0)}k · ${(left / 1000).toFixed(1)}k left (${pct.toFixed(0)}%)`);
   const canCompact = $derived((app.conv?.messages?.length ?? 0) > 6 && !app.streaming);
 
   async function compact() {
@@ -24,7 +25,7 @@
 
 <div class="ctx" title="Context window · {label}">
   <span class="ico"><Gauge size={13} /></span>
-  <span class="num">{(app.context.used / 1000).toFixed(1)}k/{Math.round(app.context.budget / 1024)}k</span>
+  <span class="num" title={label}>{app.context.estimated ? '~' : ''}{(app.context.used / 1000).toFixed(1)}k/{Math.round(app.context.budget / 1024)}k</span>
   <div class="track">
     <div class="fill" style="width:{pct}%; background:{color};"></div>
   </div>

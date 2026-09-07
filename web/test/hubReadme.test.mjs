@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { renderHubReadme } from '../src/lib/hubReadme.js';
+const out = renderHubReadme('# Model\n\n**Details**\n\n![image](https://blocked.test/image.png)\n\n<img src="https://blocked.test/pixel" onerror="alert(1)">\n\n<script>alert(1)</script>\n\n[bad](javascript:alert%281%29)\n\n[docs](https://huggingface.co/docs)');
+assert(out.includes('<h1>Model</h1>'));
+assert(out.includes('<strong>Details</strong>'));
+assert(!/<img|<script|<iframe|<style/.test(out));
+assert(!/href="javascript:/.test(out));
+assert(out.includes('rel="noopener noreferrer"'));
+assert(!renderHubReadme('<svg><image href="https://blocked.test/a" /></svg>').includes('<svg>'));
+console.log('Hub README: formatting retained; active HTML and automatic third-party media blocked.');

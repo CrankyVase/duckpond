@@ -113,6 +113,8 @@
       </figure>
     {:else if e.type === 'error'}
       <div class="err">{e.message}</div>
+    {:else if e.type === 'notice'}
+      <div class="runnotice">{e.message}</div>
     {/if}
   {/each}
 
@@ -265,6 +267,14 @@
     border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
     background: color-mix(in srgb, var(--red) 8%, transparent);
     color: var(--red); border-radius: calc(8px * var(--rf)); padding: 8px 11px; font-size: 12.5px;
+  }
+
+  .runnotice {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--text-dim);
+    padding: 5px 9px; border-radius: calc(8px * var(--rf));
+    background: color-mix(in srgb, var(--yellow) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--yellow) 22%, transparent);
   }
 
   .live {

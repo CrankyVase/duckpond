@@ -1,0 +1,77 @@
+# Duckpond — hardest to easiest
+
+Started 2026-09-06; updated 2026-09-07. Preserve the broad main chat layout.
+User constraint: do not load or run models yet. No inference, cloning-quality tests,
+weight downloads, or performance benchmarks until the user resumes that work.
+
+1. Media backend compatibility and model lifecycle
+   - [x] Classify architecture/task/runtime and detect incomplete local weights.
+   - [x] Strict explicit selection; no silent cross-task model substitution.
+   - [x] Repair diffusion dispatch, music duration/rate, seed 0, cancellation paths.
+   - [x] Reuse resident models and inference mode without shrinking context.
+   - [x] Synthetic cache and fake pipeline regression tests.
+   - [ ] Add dedicated GGUF media and conditioning-image/video adapters.
+   - [ ] Validate compatible downloaded weights on actual hardware (deferred).
+2. Durable chat and agent jobs, timeouts, and hidden limits
+   - [ ] Trace app, llama router, native runtime, tunnel, and provider timeouts.
+   - [ ] Persist resumable job checkpoints across server/deployment restarts.
+   - [ ] Review agent step/research limits, reasoning watchdog, output caps, and
+         command timeouts; make appropriate limits visible/configurable and
+         recoverable instead of cutting off productive work without explanation.
+   - [ ] Avoid automatic deployment restarts interrupting active jobs.
+   - [x] Preserve context accounting in reconnect snapshots; initialize counts
+         before decoding and consume prompt timings; ignore stale count fetches.
+   - [ ] Complete live counts for all remote/agent routes and test long turns.
+   - [ ] Reproduce the reported history disappearance after errors; verify saved
+         tree/branch/partial-work recovery through disconnects and process exit.
+   - [x] Isolate individual message render failures with a raw-text fallback.
+   - Local Cloudflare operational notes: /home/cranky/Desktop/cloudflair.txt.
+     Contains credentials: never copy into source, logs, commits, or handoff notes.
+3. Speech and voice cloning adapters
+   - [x] Separate music and speech; list ready local voices explicitly.
+   - [x] Honor local selection and reject unsupported reference clips.
+   - [x] Implement optional OmniVoice reference-audio/transcript contract.
+   - [x] Preserve actual WAV/sample-rate metadata and correct cache extensions.
+   - [ ] Install missing OmniVoice runtime and validate synthesis/cloning later.
+   - [ ] Add further architecture adapters with per-model capability declarations.
+4. Server-side network dependencies
+   - [x] Proxy Hugging Face avatar bytes; validate every redirect and asset size.
+   - [x] Prevent model README HTML/images from fetching in the browser.
+   - [x] Proxy OpenFreeMap style, font, sprite, and tile requests via the server.
+   - [x] Verify Hub/Media browser requests with mocked APIs and blocked externals.
+   - [ ] Verify map interaction and remaining embedded media on restricted networks.
+5. Agentic coding backend and preview reliability
+   - [ ] Improve tool execution contracts, progress, recovery and artifact handling.
+   - [ ] Reproduce intermittent HTML/project preview failures, including relative
+         assets, nested projects, module scripts, runtime errors and reloads.
+   - [x] Isolate inline code-block preview scripts from the app origin.
+   - [ ] Give multi-file project previews an isolated origin with reliable assets.
+   - [ ] Preserve code, tool output, and errors throughout retries and reconnects.
+6. Equal-context performance work
+   - [x] Avoid needless media reloads/cleanup; enable inference mode.
+   - [ ] Profile attention, batching, prompt caching, allocation and transfer costs.
+   - [ ] Benchmark before/after at identical context/output settings (deferred).
+7. Media Studio, Model Hub, and navigation
+   - [x] Image / Video / Music / Voice workspace, ready models and useful reasons.
+   - [x] Task controls, Stop, persistent errors, saved gallery, download/delete.
+   - [x] Responsive desktop/mobile Media layouts and keyboard controls.
+   - [x] Discover / My Models / Downloads hierarchy; quieter filters and cards.
+   - [x] Fix Hub startup initialization and stale search response races.
+   - [x] Simplify sidebar without changing the main chat layout.
+   - [ ] Browser review with real catalog metadata and larger saved galleries.
+8. Coding/tool-call presentation and remaining visual polish
+   - [ ] Redesign agent run feed: clear current action, compact completed tools,
+         readable file/diff previews, progress, useful error and resume states.
+         User screenshot: Snake project run, oversized stacked green diff blocks.
+         Do this with the agent backend work, after higher-priority reliability.
+   - [x] First spacing/typography consistency pass across auxiliary panels.
+   - [ ] Full interaction/accessibility/responsive pass for Speech, Settings,
+         Providers, Files, Stats and Costs; preserve chat's broad layout.
+9. Verification and archival
+   - [x] Add no-model regression tests and reusable mocked browser smoke script.
+   - [x] Final server/media/web checks and production build for this checkpoint.
+   - [ ] Commit source and push to existing GitHub origin.
+
+Scope: arbitrary downloaded weights need matching runtime adapters. Unsupported
+and incomplete models must remain visibly distinct from usable ones. Metadata
+readiness is not a guarantee of GPU fit or generation quality.

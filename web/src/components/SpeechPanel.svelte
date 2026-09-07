@@ -422,8 +422,8 @@
         <div class="sect">Model</div>
         <div class="card static">
           <span class="mico"><AudioWaveform size={14} /></span>
-          <span class="cname">Voxtral</span>
-          <span class="cmeta">{status?.mode === 'local' ? 'local' : status?.mode === 'mistral' ? 'hosted' : 'offline'}</span>
+          <span class="cname">{status?.model?.split('/').pop() ?? 'Speech engine'}</span>
+          <span class="cmeta">{['local', 'bridge'].includes(status?.mode) ? 'local' : status?.mode === 'mistral' ? 'hosted' : 'offline'}</span>
         </div>
 
         <div class="sect">Voice</div>

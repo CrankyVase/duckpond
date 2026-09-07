@@ -48,6 +48,33 @@ import {
   runAgentTurn, runDiffusionTurn, runImageTurn, runInlineSearch,
 } from '../chatflow.js';
 
+// ---------- agentic guard: keep project code OUT of the chat bubble ----------
+// Local models love to narrate a multi-file build as markdown ("file 1 of 4…")
+// or draft the entire thing inside their thinking and answer with an empty
+// bubble — the turn never becomes an agent run and nothing lands in the
+// workspace. When the first attempt looks like that, one pointed retry asks
+// for the start_project call; if the model still declines, chat wins.
+
+const NAMED_FILE_RE = /(?:^|\n)\s*(?:#{1,4}\s*)?(?:\*\*)?[\w./@-]+\.(?:html?|css|m?js|jsx|ts|tsx|svelte|vue|py|json|ya?ml|toml|md|sh|c(?:pp|c)?|h|java|go|rs|cs|php|rb|kt|swift|sql)\b/i;
+const FILE_MARCH_RE = /file\s+\d+\s*(?:\/|of|—|-)\s*\d+|(?:the\s+)?(?:first|second|third|fourth|next)\s+file|next,?\s+(?:let'?s |I'?ll |we'?ll )?(?:create|write|make)\b[^.\n]{0,60}\.(?:html?|css|m?js|py|ts|tsx|json|md|sh)/i;
+
+function looksLikeProjectNarration(text, reasoning = '') {
+  const check = (s) => {
+    if (!s) return false;
+    const fences = (s.match(/```/g) ?? []).length;
+    const numbered = FILE_MARCH_RE.test(s);
+    const named = NAMED_FILE_RE.test(s);
+    return numbered || (named && fences >= 4) || fences >= 6;
+  };
+  return check(text) || (!String(text ?? '').trim() && check(reasoning));
+}
+
+const PROJECT_NUDGE = 'Stop. You are writing a multi-file project as chat text instead of using your tools — '
+  + 'that is not what the user wants and it does not go anywhere. This is project work: call the start_project '
+  + 'tool NOW with a short kebab-case name and a concise plan (the code you drafted becomes the plan). '
+  + 'After the workspace opens, create the files with write_file, change them with edit_file, and verify with '
+  + 'one-shot commands that exit. Do not paste project code into the chat.';
+
 export function registerChatPost(app) {
   // The main event: send a user message (or regenerate) and stream the reply.
   // body: { content?, parentId?, regenerateFrom? } — exactly one of content|regenerateFrom.
@@ -497,6 +524,30 @@ export function registerChatPost(app) {
             });
           }
         }
+      } else {
+        // LOCAL turns compact too now — a long coding chat used to walk straight
+        // into the context wall and die there. Cheap guard: chars/4 estimate
+        // first, exact router count only when the estimate says we're close.
+        const est = estimateTokens(promptMessages);
+        const budget = Number(conv._settings.ctx_size) > 0 ? Number(conv._settings.ctx_size) : 32_768;
+        if (est > budget * 0.75) {
+          let used = est;
+          try { used = await countInputTokens(conv.model_id, promptMessages) ?? est; } catch { /* estimate stands */ }
+          if (used > budget * 0.8) {
+            send({ type: 'notice', message: `Auto-compacting older history to fit the context window (~${Math.round(used / 1000)}k → ${Math.round(budget / 1000)}k tokens)…` });
+            req.log.info({ used, budget }, 'local auto-compaction fired');
+            const r = await autoCompactMessages(promptMessages, conv.model_id, abort.signal, req.log);
+            if (r) {
+              promptMessages = r.messages;
+              try {
+                const now = await countInputTokens(conv.model_id, promptMessages);
+                if (now != null) send({ type: 'context', used: now, budget });
+              } catch { /* bar refreshes later */ }
+            }
+          }
+        }
+      }
+      if (remote) {
         const cacheOn = cacheEligible({
           remote, wsRow, constrained, regenerateFrom,
           cacheEnabled: remoteInfo?.provider?.cache_enabled !== 0,
@@ -527,6 +578,7 @@ export function registerChatPost(app) {
         }
       }
 
+      send({ type: 'context', used: estimateTokens(promptMessages), budget: conv._settings.ctx_size, estimated: true });
       const spec = makeSpeculator(req.log);
       turnDelta = makeTurnDelta({
         send, abort, log: req.log, spec,
@@ -567,10 +619,40 @@ export function registerChatPost(app) {
       }
 
       let { content: text, reasoning, timings, usage } = res;
+      // live context accounting: the first attempt's real prompt size, so the
+      // bar moves before the reply even finishes (agent runs update per step)
+      {
+        const usedNow = res.usage?.prompt_tokens ?? res.timings?.prompt_n ?? null;
+        if (usedNow != null) send({ type: 'context', used: usedNow, budget: conv._settings.ctx_size });
+      }
       text = stripFakeImages(text);
+      // the guard itself — one retry, only when project mode is available
+      if (toolsOn && !remote && !constrained && !wsRow && !res.toolCalls?.length
+          && !disabledTools.has('start_project')
+          && looksLikeProjectNarration(text, reasoning)) {
+        send({ type: 'notice', message: 'That belongs in a workspace — starting project mode…' });
+        req.log.info({ conv: conv.id }, 'project narration in chat — nudging to start_project');
+        res = await streamChat({
+          model: conv.model_id,
+          messages: [
+            ...promptMessages,
+            { role: 'assistant', content: text },
+            { role: 'user', content: PROJECT_NUDGE },
+          ],
+          params: { ...params, tools: turnTools, tool_choice: 'auto' },
+          abortSignal: abort.signal, onDelta, onEvent: fbNotice,
+        });
+        text = stripFakeImages(res.content ?? '');
+        reasoning = res.reasoning ?? reasoning;
+        timings = res.timings ?? timings;
+        usage = res.usage ?? usage;
+        const usedNudge = res.usage?.prompt_tokens ?? res.timings?.prompt_n ?? null;
+        if (usedNudge != null) send({ type: 'context', used: usedNudge, budget: conv._settings.ctx_size });
+      }
       let runId = null;
       let searchData = null;
 
+      let finalLoopMessages = null;
       const callNames = new Set((res.toolCalls ?? []).map((t) => t.function.name));
       const wantsInlineTools = callNames.has('web_search') || callNames.has('fetch_page')
         || [...WIDGET_TOOL_NAMES].some((n) => callNames.has(n))
@@ -615,6 +697,7 @@ export function registerChatPost(app) {
         timings = r.timings ?? timings;
         usage = r.usage ?? usage;
         runId = r.runId ?? runId;
+        finalLoopMessages = r.messages ?? null;
       }
 
       const tokPerSec = timings?.predicted_per_second
@@ -662,7 +745,10 @@ export function registerChatPost(app) {
       // remote models get a chars/4 estimate from the dispatcher instead)
       if (!abort.signal.aborted) {
         try {
-          const used = await countInputTokens(conv.model_id, [...promptMessages, { role: 'assistant', content: text }]);
+          // agent runs rewrite the transcript in place (gate path replaces the
+          // array) — count the REAL final prompt, or a long run's usage is lost
+          const finalPrompt = finalLoopMessages ?? promptMessages;
+          const used = await countInputTokens(conv.model_id, [...finalPrompt, { role: 'assistant', content: text }]);
           if (used != null) send({ type: 'context', used, budget: conv._settings.ctx_size });
         } catch { /* non-fatal */ }
       }
@@ -746,10 +832,17 @@ export function registerChatPost(app) {
         }
       } catch (err) { req.log.warn({ err }, 'workspace run cleanup failed'); }
       if (!job.finalMsg && promptLeaf) {
+        let parked = null;
         try {
-          persistInterruptedReply(job, conv, promptLeaf, { aborted, log: req.log });
+          parked = persistInterruptedReply(job, conv, promptLeaf, { aborted, log: req.log });
         } catch (err) {
           req.log.error({ err }, 'partial reply persist failed');
+        }
+        // Nothing worth parking (no output, no error — e.g. dropped while
+        // queued in the GPU lane): still advance the leaf to the user's prompt,
+        // or the conversation silently forgets it was ever asked.
+        if (!parked && conv.id) {
+          try { setLeaf(conv.id, promptLeaf.id); } catch { /* non-fatal */ }
         }
       }
       job.listeners.delete(writePrimary);

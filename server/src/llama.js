@@ -120,10 +120,29 @@ function extractCtx(args) {
   return i >= 0 ? Number(args[i + 1]) : null;
 }
 
+// True when the model is already resident (loaded/sleeping/loading) — a
+// cheap status check that never triggers --models-autoload itself, unlike
+// any inference or tokenize call. Lets read paths (context bar) serve an
+// estimate instead of waking the GPU.
+export async function isModelLoaded(model) {
+  try {
+    const models = await listModels();
+    const m = models.find((x) => x.id === model);
+    return m?.status === 'loaded' || m?.status === 'sleeping' || m?.status === 'loading';
+  } catch { return true; } // router down — fall through to the normal path
+}
+
 export const loadModel = (model) =>
   jfetch('/models/load', { method: 'POST', body: JSON.stringify({ model }) });
 export const unloadModel = (model) =>
   jfetch('/models/unload', { method: 'POST', body: JSON.stringify({ model }) });
+// Drop a model from the RUNNING router's registry (DELETE /models?model=…).
+// Only works for dynamically-added (cache) models — preset models refuse.
+export const removeModel = (model) =>
+  jfetch(`/models?model=${encodeURIComponent(model)}`, { method: 'DELETE' });
+// Force the router to re-read its preset ini: deleted models whose sections
+// were stripped stop listing immediately (GET /models?reload=1 → load_models()).
+export const reloadRouterModels = () => jfetch('/models?reload=1');
 
 export async function countInputTokens(model, messages) {
   // remote endpoints have no token counter — chars/4 estimate is all we need
@@ -253,7 +272,7 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
       if (payload === '[DONE]') continue;
       let json;
       try { json = JSON.parse(payload); } catch { continue; }
-      if (json.timings) timings = json.timings;
+      if (json.timings) { timings = json.timings; onDelta?.('', { timings }); }
       if (json.usage) usage = json.usage;
       if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
       const delta = json.choices?.[0]?.delta ?? {};

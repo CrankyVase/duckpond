@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   // Model Hub: search + download Hugging Face repos through the server, so
   // the browser never talks to huggingface.co directly — it's blocked on
   // Lewis's school network. Search is open to any logged-in user; actually
@@ -17,7 +18,7 @@
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import { resolveHubLogo, cardGlow } from '../lib/hubLogos.js';
-  import { renderBlock, splitBlocks } from '../lib/markdown.js';
+  import { renderHubReadme } from '../lib/hubReadme.js';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -51,6 +52,9 @@
   function logoFor(id) { return resolveHubLogo(ownerOf(id), repoNameOf(id)); }
 
   let hw = $state(null);
+  let mediaModels = $state([]);
+  api('/api/images/models').then((m) => (mediaModels = m.models ?? [])).catch(() => {});
+  function openStudio(id) { sessionStorage.setItem('dp:media-selection', id); app.view = 'media'; }
   let recModels = $state([]);
   let recLoading = $state(false);
   let readme = $state(new Map()); // repoId -> { loading, text, error }
@@ -68,12 +72,11 @@
     } catch { recModels = []; }
     recLoading = false;
   }
-  void loadHardware();
-  void loadLocal();
+  onMount(() => { void loadHardware(); void loadLocal(); });
 
   function readmeHtml(text) {
     if (!text) return '';
-    return splitBlocks(text).map((b) => renderBlock(b)).join('');
+    return renderHubReadme(text);
   }
   async function loadReadme(repoId) {
     if (!repoId || readme.has(repoId)) return;
@@ -94,9 +97,9 @@
   // Tab destinations — see popularModels()/modalityModels() in hfHub.js for
   // what each one actually fetches.
   const TABS = [
-    ['llm', 'LLM'],
+    ['llm', 'Chat'],
     ['image', 'Image'],
-    ['audio', 'Audio'],
+    ['audio', 'Voice & music'],
     ['video', 'Video'],
   ];
   const LIST_HEADING = {
@@ -418,11 +421,14 @@
     return tabEndpoint(activeTab, cursor);
   }
 
+  let querySequence = 0;
   async function runQuery(fetchFn) {
+    const sequence = ++querySequence;
     searching = true;
     loadMoreFailed = false;
     try {
       const { models, nextCursor: nc } = await fetchFn();
+      if (sequence !== querySequence) return;
       results = models;
       nextCursor = nc;
       hasMore = !!nc;
@@ -433,6 +439,7 @@
       if (landing) select(landing);
       else selected = null;
     } catch (e) {
+      if (sequence !== querySequence) return;
       toast(e.message ?? 'search failed', 'error');
       results = [];
       selected = null;
@@ -455,7 +462,7 @@
   }
   // Wait for the "fits this GPU" strip before the Unsloth tab so landing
   // can open LFM2-700M instead of the newest 80GB drop.
-  void (async () => { await loadRecommended(); await loadTab(activeTab); })();
+  onMount(() => { void (async () => { await loadRecommended(); await loadTab(activeTab); })(); });
 
   // Reinstated 2026-09-02 after notes/HUB-2.md's "no free-text inputs"
   // removal (password managers were autofilling into search fields) — user
@@ -489,15 +496,20 @@
     fetchingMore = true;
     loadingMore = true;
     loadMoreFailed = false;
+    const sequence = querySequence;
     try {
       const { models, nextCursor: nc } = await api(currentQueryUrl(nextCursor));
-      const seen = new Set(results.map((m) => m.id));
-      results = [...results, ...models.filter((m) => !seen.has(m.id))];
-      nextCursor = nc;
-      hasMore = !!nc;
+      if (sequence === querySequence) {
+        const seen = new Set(results.map((m) => m.id));
+        results = [...results, ...models.filter((m) => !seen.has(m.id))];
+        nextCursor = nc;
+        hasMore = !!nc;
+      }
     } catch (e) {
-      loadMoreFailed = true;
-      hasMore = false; // stop auto-firing; Retry restores it
+      if (sequence === querySequence) {
+        loadMoreFailed = true;
+        hasMore = false; // stop auto-firing; Retry restores it
+      }
     }
     fetchingMore = false;
     loadingMore = false;
@@ -672,12 +684,6 @@
   }
 
   async function loadIntoVram(repoId, include, name) {
-    const ok = await confirmDialog({
-      title: 'Load into VRAM?',
-      message: `This will load ${name} onto the GPU. Big models lag the box — stick to sub-1B / 4B quants if you just want a smoke test.`,
-      confirmLabel: 'Load',
-    });
-    if (!ok) return;
     await registerVariant(repoId, include, { load: true });
   }
 
@@ -717,7 +723,7 @@
   }
 
   $effect(() => {
-    return () => stopPolling();
+    return () => { stopPolling(); if (searchTimer) clearTimeout(searchTimer); };
   });
 
   function fmtN(n) {
@@ -803,13 +809,10 @@
 <div class="hub">
   <div class="head">
     <div class="title">
-      <h1>Model hub</h1>
-      <p>Discover, download, and run inference models locally.</p>
+      <div class="eyebrow">DISCOVER SOMETHING CAPABLE</div><h1>Model Hub<span class="title-dot">.</span></h1>
+      <p>Find your next model. Give it a home on your machine.</p>
     </div>
     <div class="pills">
-      {#if hw?.cacheCount != null}
-        <span class="pill" title="Hugging Face cache repos"><Package size={13} /> {hw.cacheCount} Cache</span>
-      {/if}
       {#if localModels.length}
         <span class="pill" title="Models on disk"><HardDrive size={13} /> {localModels.length} Local</span>
       {/if}
@@ -819,21 +822,18 @@
       {#if hw?.ramLabel}
         <span class="pill" title="System RAM"><HardDrive size={13} /> {hw.ramLabel} RAM</span>
       {/if}
-      {#if hw?.cpuLabel}
-        <span class="pill" title="CPU threads"><Cpu size={13} /> {hw.cpuLabel} CPU</span>
-      {/if}
       {#if vramLabel}<span class="pill live"><span class="dot live"></span> {vramLabel} free</span>{/if}
     </div>
   </div>
 
-  <div class="toolbar">
-    <div class="modebar">
+  <div class="modebar" aria-label="Model library views">
       <button class="modebtn" class:on={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
-      <button class="modebtn" class:on={mode === 'my-models'} onclick={() => setMode('my-models')}>On Device</button>
+      <button class="modebtn" class:on={mode === 'my-models'} onclick={() => setMode('my-models')}>My Models</button>
       <button class="modebtn" class:on={mode === 'downloads'} onclick={() => setMode('downloads')}>
         Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
       </button>
-    </div>
+  </div>
+  <div class="toolbar">
     {#if mode === 'discover'}
       <div class="tabs">
         {#each TABS as [val, label] (val)}
@@ -843,7 +843,7 @@
       </div>
       <div class="searchbox">
         <SearchIcon size={14} />
-        <input type="search" inputmode="search" placeholder="Search {activeTab === 'llm' ? 'LLMs' : activeTab + ' models'}"
+        <input aria-label="Search models" type="search" inputmode="search" placeholder="Search {activeTab === 'llm' ? 'LLMs' : activeTab + ' models'}"
           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
           data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
           name={searchInputName}
@@ -851,7 +851,7 @@
         {#if q}<button class="ghost searchclear" onclick={clearSearch} title="Clear"><X size={13} /></button>{/if}
       </div>
       <label class="fselect">
-        <select bind:value={sortBy}>
+        <select aria-label="Sort models" bind:value={sortBy}>
           {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
         </select>
       </label>
@@ -869,6 +869,7 @@
   {/if}
 
   {#if mode === 'discover'}
+    <details class="filters-shell"><summary>Filter models{#if taskFilter || sizeFilter || formatFilter}<span class="filter-dot"></span>{/if}</summary>
     <div class="filters">
       <div class="fg">
         {#each TASK_FILTERS as [val, label] (val)}
@@ -889,6 +890,7 @@
         {/each}
       </div>
     </div>
+    </details>
   {/if}
 
   {#if mode !== 'downloads' && [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
@@ -1081,6 +1083,15 @@
             <div class="qmrow"><span class="qmhint">No community GGUF quantization found — browsing this repo's own files.</span></div>
           {/if}
 
+          {#if isMediaTab}
+            {@const runtime = mediaModels.find((m) => m.id === activeRepo)}
+            {#if runtime}
+              <div class="runtime-note" class:ready={runtime.ready}>
+                <div><strong>{runtime.ready ? 'Ready to create' : 'Setup needed'}</strong><p>{runtime.ready ? 'Available in your local Media Studio.' : runtime.reason}</p></div>
+                {#if runtime.ready}<button class="dlbtn" onclick={() => openStudio(runtime.id)}><Play size={13} /> Open Studio</button>{/if}
+              </div>
+            {:else}<p class="media-hint">Compatibility depends on the model architecture and installed runtime. Media Studio checks downloaded models before use.</p>{/if}
+          {/if}
           <div class="varbar">
             {#if !v}
               <span class="vhint">Click a model on the left to load its files…</span>
@@ -1391,17 +1402,19 @@
      pinned, only the two columns scroll. No page-level scrolling at all. */
   .hub {
     flex: 1; min-height: 0; display: flex; flex-direction: column;
-    max-width: 1680px; width: 100%; margin: 0 auto;
-    padding: 22px 28px 10px;
+    max-width: 1600px; width: 100%; margin: 0 auto;
+    padding: 30px 36px 24px;
     padding-bottom: max(10px, calc(10px + env(safe-area-inset-bottom)));
     box-sizing: border-box;
   }
 
   .head {
     display: flex; align-items: flex-start; justify-content: space-between;
-    gap: 16px; margin-bottom: 16px; flex-shrink: 0; flex-wrap: wrap;
+    gap: 16px; margin-bottom: 26px; flex-shrink: 0; flex-wrap: wrap;
   }
-  h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.03em; }
+  .eyebrow { font-size:10px; letter-spacing:.14em; color:var(--text-faint); font-weight:600; }
+  .title-dot { color:var(--accent); }
+  h1 { margin: 6px 0; font-size:30px; font-weight:600; letter-spacing:-1.1px; }
   .title p { margin: 4px 0 0; font-size: 13px; color: var(--text-dim); max-width: 560px; }
   .pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
   .pill {
@@ -1416,18 +1429,18 @@
 
   /* Discover / My Models — same segmented-pill look as .tabs */
   .modebar {
-    display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px;
+    display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 9px;
     background: var(--bg-hover); width: fit-content; flex-shrink: 0; height: 36px;
-    box-sizing: border-box; margin: 0;
+    box-sizing: border-box; margin: 0 0 18px;
   }
   .modebtn {
-    padding: 0 16px; height: 30px; border-radius: 999px; border: none; background: none;
+    padding: 0 16px; height: 30px; border-radius: 6px; border: none; background: none;
     font-size: 12.5px; font-weight: 600; color: var(--text-faint);
     display: inline-flex; align-items: center;
     transition: color 140ms ease, background 140ms ease;
   }
   .modebtn:hover { color: var(--text-dim); }
-  .modebtn:focus-visible { outline: none; color: var(--text); }
+  .modebtn:focus-visible { outline: 2px solid var(--accent); outline-offset:2px; }
   .modebtn.on { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
   .modebadge {
     display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
@@ -1452,9 +1465,7 @@
     flex: 0 0 196px; height: 118px; border-radius: 16px; padding: 12px 14px;
     display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
     text-align: left; border: 1px solid transparent; box-sizing: border-box;
-    background:
-      radial-gradient(90% 80% at 18% 10%, var(--glow, rgba(200,153,104,0.28)), transparent 60%),
-      color-mix(in srgb, var(--foreground, #fff) 7%, var(--bg-raised));
+    background: var(--bg-raised); border-color:var(--border-soft);
     transition: background 160ms ease;
   }
   .mcard:hover { background-color: var(--bg-hover); }
@@ -1588,24 +1599,24 @@
     color: var(--text); background: var(--bg-card);
     box-shadow: inset 0 0 0 1px var(--border);
   }
-  .fchip:focus-visible { outline: none; color: var(--text); background: var(--bg-hover); }
+  .fchip:focus-visible { outline: 2px solid var(--accent); color: var(--text); background: var(--bg-hover); }
 
   .toolbar {
     flex-shrink: 0; display: flex; align-items: center; gap: 10px;
     flex-wrap: wrap; margin-bottom: 16px; min-height: 36px;
   }
   .tabs {
-    display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px;
+    display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 9px;
     background: var(--bg-hover); flex-shrink: 0; height: 36px; box-sizing: border-box;
   }
   .tab {
-    padding: 0 14px; height: 30px; border-radius: 999px; border: none; background: none;
+    padding: 0 14px; height: 30px; border-radius: 6px; border: none; background: none;
     font-size: 12.5px; font-weight: 600; color: var(--text-faint);
     display: inline-flex; align-items: center;
     transition: color 140ms ease, background 140ms ease;
   }
   .tab:hover { color: var(--text-dim); }
-  .tab:focus-visible { outline: none; color: var(--text); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset:2px; }
   .tab.active { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
 
   .popular { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; flex-shrink: 0; }
@@ -1907,4 +1918,13 @@
     .detail { overflow-y: visible; min-height: 0; }
     .head { flex-direction: column; gap: 8px; }
   }
+  .filters-shell { margin:0 0 18px; flex-shrink:0; }
+  .filters-shell summary { cursor:pointer; font-size:11px; color:var(--text-dim); }
+  .filters-shell .filters { margin:12px 0 0; }
+  .filter-dot { display:inline-block; width:5px; height:5px; margin-left:6px; border-radius:50%; background:var(--accent); }
+  .runtime-note { display:flex; gap:16px; align-items:center; justify-content:space-between; padding:14px; margin:16px 0; border:1px solid var(--border); border-radius:10px; background:var(--bg-raised); font-size:12px; }
+  .runtime-note p,.media-hint { font-size:11px; color:var(--text-dim); line-height:1.6; margin:5px 0; }
+  .runtime-note.ready strong { color:var(--green); }
+  .runtime-note .dlbtn { flex-shrink:0; }
+  @media(max-width:760px) { .hub { padding:20px 16px 12px; }.runtime-note { flex-wrap:wrap; } }
 </style>

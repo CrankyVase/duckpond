@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import {
-  createVoice, customVoices, deleteVoice, presetVoices, previewVoice,
+  bridgeTtsModels, createVoice, customVoices, deleteVoice, presetVoices, previewVoice,
   saveSpeechSettings, speak, speechConfig, speechStatus, DEFAULT_VOICE, EMOTIONS,
 } from '../speechEngine.js';
 
@@ -49,7 +49,10 @@ export default async function speechRoutes(app) {
   // ----- voices -----
   app.get('/api/speech/voices', async () => {
     const custom = await customVoices().catch(() => []);
-    return { presets: presetVoices(), custom, emotions: EMOTIONS, default_voice: DEFAULT_VOICE };
+    const local = await bridgeTtsModels();
+    const voices = local.map((m) => ({ id: m.id, name: m.id.split('/').pop(), language: 'Local model', emotions: [], local: true }));
+    const hosted = speechConfig().mode !== 'off' ? presetVoices() : [];
+    return { presets: [...voices, ...hosted], custom, emotions: EMOTIONS, default_voice: voices[0]?.id ?? DEFAULT_VOICE };
   });
 
   // clone from a reference clip (body = raw wav bytes, audio/wav)

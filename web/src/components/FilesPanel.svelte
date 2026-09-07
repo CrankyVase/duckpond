@@ -534,7 +534,7 @@
 <style>
   .files {
     flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
-    padding: 22px 28px 48px; max-width: 1100px; width: 100%; margin: 0 auto;
+    padding: 30px 36px 48px; max-width: 1400px; width: 100%; margin: 0 auto;
     padding-bottom: max(48px, calc(24px + env(safe-area-inset-bottom)));
     box-sizing: border-box;
   }
@@ -544,7 +544,7 @@
     margin-bottom: 16px;
   }
   .title { display: flex; align-items: center; gap: 14px; }
-  h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: -0.035em; }
   .title p { margin: 3px 0 0; font-size: 13px; color: var(--text-dim); }
   .refresh { padding: 8px; border-radius: 9px; }
 

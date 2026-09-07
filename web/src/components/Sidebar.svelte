@@ -10,11 +10,11 @@
   // setting — this list is the single source of truth for both the sidebar
   // and the Settings toggle list that controls prefs.pinnedNav.
   export const NAV_ITEMS = [
+    { id: 'hub', label: 'Model Hub', icon: Download },
+    { id: 'media', label: 'Media Studio', icon: Clapperboard },
     { id: 'files', label: 'Files', icon: Files },
-    { id: 'media', label: 'Media', icon: Clapperboard },
     { id: 'stats', label: 'Stats', icon: BarChart3 },
     { id: 'providers', label: 'Providers', icon: Cloud },
-    { id: 'hub', label: 'Model Hub', icon: Download },
     { id: 'costs', label: 'Costs', icon: PiggyBank },
   ];
 </script>
@@ -239,6 +239,7 @@
         <a class="page"
           href={navHref(item.id)}
           onclick={(e) => { e.preventDefault(); goView(item.id); }}
+          aria-current={app.view === item.id ? 'page' : undefined}
           class:active={app.view === item.id}>
           <item.icon size={14} /> {item.label}
         </a>
@@ -432,8 +433,8 @@
   }
 
   .pages {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 6px; padding: 10px 12px 8px;
+    display: grid; grid-template-columns: 1fr;
+    gap: 2px; padding: 10px 12px 8px;
     border-top: 1px solid var(--border-soft);
     flex-shrink: 0;
   }
@@ -441,15 +442,15 @@
   .page.control { grid-column: 1 / -1; }
   .page {
     all: unset; cursor: pointer; flex: 1 1 0; min-width: 0;
-    display: flex; align-items: center; justify-content: center; gap: 7px;
+    display: flex; align-items: center; justify-content: flex-start; gap: 10px;
     padding: 8px 10px; border-radius: calc(9px * var(--rf));
     text-decoration: none; box-sizing: border-box;
     font-size: 12px; font-weight: 500; color: var(--text-dim);
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    background: transparent; border: 1px solid transparent;
     transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
   }
   .page:hover { background: var(--bg-hover); color: var(--text); }
-  .page.active { color: var(--text); border-color: var(--border); background: var(--bg-card); }
+  .page.active { color: var(--text); border-color: var(--border-soft); background: var(--bg-card); box-shadow: inset 2px 0 var(--accent); }
   .page :global(svg) { color: var(--text-faint); flex-shrink: 0; }
   .page.active :global(svg) { color: var(--text-dim); }
 

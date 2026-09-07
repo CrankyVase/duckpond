@@ -4,3 +4,5 @@ dist/
 nohup.out
 *.log
 .last-deploy
+__pycache__/
+*.py[cod]

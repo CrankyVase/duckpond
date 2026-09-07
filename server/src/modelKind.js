@@ -25,7 +25,7 @@ const CHAT_TAG_RE = /^(text-generation|text2text-generation|conversational|image
 const IMAGE_RE = /diffusion|llada|(^|[-_.])dream|dllm|flux|sdxl|sd3|sd-?xl|stable-?diffusion|pixart|playground-?v|auraflow|lumina|kolors|cogview|hunyuan-?dit|dreamshaper|chroma|z-?image/i;
 const VIDEO_RE = /wan[-_.]?2|hunyuan-?video|cogvideox|ltx-?v(ideo)?|mochi|allegro|pyramid-?flow|open-?sora|genmo/i;
 const EMBED_RE = /embed|bge|gte-|e5-|minilm|nomic|snowflake|jina|sentence-?transform|rerank|arctic-?embed/i;
-const AUDIO_RE = /whisper|piper|kokoro|(^|[-_.])bark|vits|parler|wav2vec|silero|vosk|clap|tts/i;
+const AUDIO_RE = /whisper|piper|kokoro|(^|[-_.])bark|vits|parler|wav2vec|silero|vosk|clap|tts|musicgen|omnivoice|stable-?audio|audioldm|chatterbox/i;
 // tags that exist on HF but aren't in either known set above (mixed
 // image+video pipelines etc.) — a video-output pipeline with image
 // conditioning, not a reason to hide a GGUF text model from the chat filter

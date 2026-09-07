@@ -6,6 +6,7 @@
 // images table — even if whoever asked has already disconnected.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,15 +46,18 @@ const min4 = (n) => Math.max(1, Math.min(Number(n) || 1, 4));
 
 // Bridge jobs block for many minutes; fetch's default timeouts would kill the
 // request, so the long POST goes over a plain node:http request instead.
-function bridgePost(path, body) {
+export function bridgePost(path, body) {
   return new Promise((resolve, reject) => {
     const u = new URL(path, BRIDGE);
     const payload = JSON.stringify(body);
-    const req = httpRequest({
-      hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+    const request = u.protocol === 'https:' ? httpsRequest : httpRequest;
+    const req = request(u, {
+      method: 'POST',
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
     }, (res) => {
       const chunks = [];
+      res.on('error', reject);
+      res.on('aborted', () => reject(new Error('Media bridge connection closed before completion')));
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8');
@@ -65,6 +69,7 @@ function bridgePost(path, body) {
       });
     });
     req.on('error', reject);
+    req.setTimeout(30 * 60_000, () => req.destroy(new Error('Media bridge timed out')));
     req.end(payload);
   });
 }
@@ -84,23 +89,38 @@ const ENDPOINTS = {
   image: '/v1/images/generations',
   video: '/v1/videos/generations',
   audio: '/v1/audio/generations',
+  tts: '/v1/audio/speech',
 };
 
 // onProgress receives:
 //   { type:'progress', phase, step, steps, image, n, enhanced_prompt }
 //   { type:'preview', b64, seq }
 // Resolves { images:[{id,url}], enhanced, model_used }; throws on bridge error.
+export async function bridgeModels() {
+  const health = await bridgeGet('/health').catch(() => null);
+  if (!health?.ok) return { available: false, models: [] };
+  const models = [];
+  for (const [id, info] of Object.entries(health.models ?? {})) {
+    models.push({ id, task: info.task ?? 'image', kind: info.kind ?? null, family: info.family ?? null,
+      ready: !!info.ready, reason: info.reason ?? null, cloning: !!info.cloning,
+      maxDuration: info.max_duration ?? null });
+  }
+  return { available: true, models, default_model: health.default_model ?? 'auto' };
+}
+
 export async function generateViaBridge({
   userId, prompt, model = null, size = '1024x1024', steps = null, n = 1,
   negative = '', enhance = true, seed = null, task = 'image',
   numFrames = null, fps = null, audioDuration = null,
+  temperature = null, topP = null, topK = null, refAudioB64 = null, refText = null,
+  maxNewTokens = null,
   onProgress = () => {}, signal = null,
 }) {
   const prefs = getUserImagePrefs(userId);
   // Explicit non-auto model wins; otherwise the user's preferred model; else auto.
   const resolvedModel = (model && model !== 'auto')
     ? model
-    : (prefs.model && prefs.model !== 'auto' ? prefs.model : (model || 'auto'));
+    : (task === 'image' && prefs.model && prefs.model !== 'auto' ? prefs.model : (model || 'auto'));
   const tag = randomUUID().replace(/-/g, '').slice(0, 12);
   const body = {
     prompt: prompt.trim(), model: resolvedModel, size, tag, enhance,
@@ -108,12 +128,19 @@ export async function generateViaBridge({
   };
   if (steps) body.steps = Math.max(1, Math.min(Number(steps) || 1, 80));
   if (negative?.trim()) body.negative_prompt = negative.trim();
-  if (seed != null && seed !== '' && Number.isFinite(Number(seed)) && Number(seed) > 0) {
+  if (seed != null && seed !== '' && Number.isFinite(Number(seed)) && Number(seed) >= 0) {
     body.seed = Math.floor(Number(seed));
   }
   if (numFrames != null) body.num_frames = Math.max(1, Math.min(Number(numFrames) || 25, 500));
   if (fps != null) body.fps = Math.max(1, Math.min(Number(fps) || 8, 60));
   if (audioDuration != null) body.audio_duration = Math.max(0.5, Math.min(Number(audioDuration) || 10, 600));
+  // TTS knobs (native self-hosted voices via the bridge's /v1/audio/speech)
+  if (temperature != null) body.temperature = Number(temperature);
+  if (topP != null) body.top_p = Number(topP);
+  if (topK != null) body.top_k = Number(topK);
+  if (maxNewTokens != null) body.max_new_tokens = Number(maxNewTokens);
+  if (refAudioB64) body.ref_audio_b64 = refAudioB64;
+  if (refText) body.ref_text = String(refText).slice(0, 2000);
 
   // refuse before burning GPU if the user is over the 15 GB Files quota
   try {
@@ -123,7 +150,9 @@ export async function generateViaBridge({
     if (e?.code === 'QUOTA') throw e;
   }
 
-  const endpoint = ENDPOINTS[task] ?? ENDPOINTS.image;
+  const endpoint = ENDPOINTS[task];
+  if (!endpoint) throw new Error('Unknown media task');
+  signal?.throwIfAborted();
   const post = bridgePost(endpoint, body)
     .then((r) => ({ ok: true, r })).catch((e) => ({ ok: false, e }));
 
@@ -191,7 +220,7 @@ export async function generateViaBridge({
   // Stagger timestamps so multi-image batches never collide on the same ms
   // name, and always keep every sample the bridge returned. Media files get
   // their own dir; images stay in IMAGES_DIR for backward compat.
-  const ext = task === 'video' ? 'mp4' : task === 'audio' ? 'wav' : 'png';
+  const ext = task === 'video' ? 'mp4' : task === 'image' ? 'png' : 'wav';
   const dir = task === 'image' ? IMAGES_DIR : MEDIA_DIR;
   let i = 0;
   for (const item of result.r.data ?? []) {

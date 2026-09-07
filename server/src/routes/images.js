@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { checkUserContent } from '../contentFilter.js';
-import { bridgeGet, generateViaBridge, getUserImagePrefs, IMAGES_DIR, MEDIA_DIR, stepsForQuality } from '../imagegen.js';
+import { bridgeModels, generateViaBridge, getUserImagePrefs, IMAGES_DIR, MEDIA_DIR, stepsForQuality } from '../imagegen.js';
 import { acquireGpu } from '../gpuqueue.js';
 
 const MIME = { png: 'image/png', mp4: 'video/mp4', wav: 'audio/wav' };
@@ -16,23 +16,22 @@ export default async function imageRoutes(app) {
 
   // model list for the picker: auto + every ready model on the bridge, grouped by task
   app.get('/api/images/models', async () => {
-    const health = await bridgeGet('/health').catch(() => null);
-    if (!health?.ok) return { available: false, models: [] };
-    const models = [{ id: 'auto' }];
-    for (const [id, info] of Object.entries(health.models ?? {})) {
-      if (info.ready) models.push({ id, task: info.task ?? 'image' });
-    }
-    return { available: true, models, default_model: health.default_model ?? 'auto' };
+    const m = await bridgeModels().catch(() => ({ available: false, models: [] }));
+    if (!m.available) return { available: false, models: [] };
+    return { available: true, models: m.models, default_model: m.default_model ?? 'auto' };
   });
 
   app.get('/api/images', async (req) => db.prepare(`
-    SELECT id, prompt, enhanced_prompt, model, size, steps, created_at
-    FROM images WHERE user_id = ? ORDER BY id DESC LIMIT 200`).all(req.user.id));
+    SELECT id, prompt, enhanced_prompt, model, size, steps, created_at,
+      CASE WHEN file LIKE '%.mp4' THEN 'video' WHEN file LIKE 'tts-%' THEN 'tts'
+        WHEN file LIKE '%.wav' THEN 'audio' ELSE 'image' END AS task
+    FROM images WHERE user_id = ? ORDER BY id DESC LIMIT 200`).all(req.user.id)
+    .map((row) => ({ ...row, url: `/api/images/${row.id}/file` })));
 
   // One file endpoint for images AND media (video/audio) — the images table
   // stores the filename; the dir is picked by extension.
   app.get('/api/images/:id/file', async (req, reply) => {
-    const row = db.prepare('SELECT file FROM images WHERE id = ?').get(Number(req.params.id));
+    const row = db.prepare('SELECT file FROM images WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
     if (!row) return reply.code(404).send({ error: 'not found' });
     const ext = row.file.split('.').pop()?.toLowerCase() ?? 'png';
     const dir = ext === 'png' ? IMAGES_DIR : MEDIA_DIR;
@@ -49,7 +48,7 @@ export default async function imageRoutes(app) {
       return reply.code(404).send({ error: 'not found' });
     }
     db.prepare('DELETE FROM images WHERE id = ?').run(row.id);
-    try { unlinkSync(join(IMAGES_DIR, row.file)); } catch { /* already gone */ }
+    try { unlinkSync(join(row.file.endsWith('.png') ? IMAGES_DIR : MEDIA_DIR, row.file)); } catch { /* already gone */ }
     try {
       const max = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM images').get()?.m ?? 0;
       const keep = Math.max(max, row.id);
@@ -67,13 +66,15 @@ export default async function imageRoutes(app) {
 
   // SSE: {type:'progress'} phases/steps, {type:'preview', b64} frames,
   // {type:'done', images:[...]} — or {type:'error', message}.
-  app.post('/api/images/generate', async (req, reply) => {
+  app.post('/api/images/generate', { bodyLimit: 16 * 1024 * 1024 }, async (req, reply) => {
     const {
       prompt, model = 'auto', size = '1024x1024', steps = null, n = 1,
       negative = '', enhance = true, seed = null, quality = null,
       task = 'image', numFrames = null, fps = null, audioDuration = null,
+      refAudioB64 = null, refText = null,
     } = req.body ?? {};
-    if (!prompt?.trim()) return reply.code(400).send({ error: 'prompt required' });
+    if (typeof prompt !== 'string' || !prompt.trim()) return reply.code(400).send({ error: 'prompt required' });
+    if (!['image', 'video', 'audio', 'tts'].includes(task)) return reply.code(400).send({ error: 'unknown media task' });
 
     const filter = checkUserContent(req.user.id, prompt, 'image');
     if (!filter.ok) {
@@ -119,7 +120,7 @@ export default async function imageRoutes(app) {
         userId: req.user.id, prompt, model, size,
         steps: resolvedSteps,
         n, negative, enhance, seed, task,
-        numFrames, fps, audioDuration,
+        numFrames, fps, audioDuration, refAudioB64, refText,
         onProgress: send, signal: abort.signal,
       });
       send({

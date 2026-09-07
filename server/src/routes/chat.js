@@ -4,7 +4,8 @@
 // in ../chatflow.js — the original single chat.js outgrew one file.
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
-import { countInputTokens, streamChat } from '../llama.js';
+import { countInputTokens, isModelLoaded, streamChat } from '../llama.js';
+import { estimateTokens } from '../providers.js';
 import { stopRunsForWorkspace } from './agent.js';
 import {
   attachListener, getLiveJob, stopLiveJob,
@@ -18,6 +19,7 @@ import {
   buildPrompt, convForUser, insertMessage, pathToRoot, setLeaf,
 } from '../chatkit.js';
 import { registerChatPost } from './chatPost.js';
+import { COMPACT_PROMPT } from '../chatflow.js';
 
 // ---------- routes ----------
 
@@ -227,10 +229,7 @@ export default async function chatRoutes(app) {
       model: auxModel,
       messages: [{
         role: 'user',
-        content: 'Compress this chat history into a context brief for a language model. '
-          + 'Keep: user goals, decisions made, key facts (names, numbers, file paths, code identifiers), '
-          + 'and unresolved tasks. Terse bullet points under the headings Goals / Decisions / Facts / Open items. '
-          + `No preamble, no commentary.\n\n---\n${transcript}\n---`,
+        content: `${COMPACT_PROMPT}\n\n---\n${transcript}\n---`,
       }],
       params: { max_tokens: 900, temperature: 0.2, chat_template_kwargs: { enable_thinking: false } },
     });
@@ -267,17 +266,23 @@ export default async function chatRoutes(app) {
     return { ok: true, node, compacted: toCompact.length, used, budget: conv._settings.ctx_size };
   });
 
-  // exact context usage for the current active path (drives the bar on load)
+  // context usage for the current active path (drives the bar on load).
+  // Never triggers a model load: when the model isn't resident, serve a
+  // chars/4 estimate instead of asking the router for an exact count (the
+  // router's --models-autoload would pull the model into VRAM on any call).
   app.get('/api/conversations/:id/context', async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
     if (!conv.model_id || !conv.active_leaf_id) return { used: 0, budget: conv?._settings?.ctx_size ?? 32768 };
     const msgs = buildPrompt(conv, conv.active_leaf_id);
     try {
+      if (!isRemoteId(conv.model_id) && !(await isModelLoaded(conv.model_id))) {
+        return { used: estimateTokens(msgs), budget: conv._settings.ctx_size, estimated: true };
+      }
       const used = await countInputTokens(conv.model_id, msgs);
       return { used: used ?? 0, budget: conv._settings.ctx_size };
     } catch {
-      return { used: 0, budget: conv._settings.ctx_size, unavailable: true };
+      return { used: estimateTokens(msgs), budget: conv._settings.ctx_size, estimated: true };
     }
   });
 

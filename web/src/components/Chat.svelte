@@ -7,7 +7,7 @@
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import ChatFiles from './ChatFiles.svelte';
-  import Message from './Message.svelte';
+  import Message from './SafeMessage.svelte';
   import RunFeed from './RunFeed.svelte';
   import Welcome from './Welcome.svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
@@ -168,6 +168,10 @@
       case 'tok_s':
         if (s) { s.tokS = ev.value; s.n = ev.n; }
         // live "tokens left": prompt baseline + what this reply has generated so far
+        if (Number.isFinite(ev.promptN)) {
+          ctxPromptBaseline = ev.promptN;
+          if (here) app.context.estimated = false;
+        }
         if (here && ctxPromptBaseline != null && app.context.budget > 0) {
           app.context.used = Math.min(app.context.budget, ctxPromptBaseline + (ev.n ?? 0));
         }
@@ -322,7 +326,7 @@
         if (here) scrollToBottom();
         break;
       case 'context':
-        if (here) app.context = { used: ev.used, budget: ev.budget };
+        if (here) app.context = { used: ev.used, budget: ev.budget, estimated: !!ev.estimated };
         ctxPromptBaseline = ev.used;
         break;
       case 'title':
@@ -336,6 +340,10 @@
         if (here && ev.message) toast(`Generation hit an error — work kept. Say continue to pick up.`, 'error', 4200);
         break;
       case 'resume': {
+        if (here && ev.context) {
+          app.context = ev.context;
+          ctxPromptBaseline = ev.promptN ?? ev.context.used;
+        }
         // Reattach after refresh: restore the live bubble from the server snapshot.
         // If the job already finished, apply the final message and clear.
         if (ev.status === 'done' && ev.finalMsg) {
@@ -425,6 +433,7 @@
   async function run(body) {
     if (!app.conv || app.streaming) return;
     const convId = app.conv.id;
+    ctxPromptBaseline = app.context.used;
     app.streaming = emptyStreaming(convId);
     pendText = ''; pendThink = ''; toolBuf = null;
     intentionalStop = false;

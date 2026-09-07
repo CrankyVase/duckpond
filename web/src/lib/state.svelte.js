@@ -53,11 +53,14 @@ export async function openConversation(id) {
   refreshContext();
 }
 
+let contextRequest = 0;
 export async function refreshContext() {
-  if (!app.conv?.id) return;
+  const conv = app.conv;
+  if (!conv?.id) return;
+  const request = ++contextRequest;
   try {
-    const c = await api(`/api/conversations/${app.conv.id}/context`);
-    app.context = c;
+    const c = await api(`/api/conversations/${conv.id}/context`);
+    if (app.conv === conv && request === contextRequest && !app.streaming) app.context = c;
   } catch { /* non-fatal */ }
 }
 

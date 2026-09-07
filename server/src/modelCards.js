@@ -88,15 +88,17 @@ export function extractBlurb(md) {
   return null;
 }
 
-// cache-only read used by /api/models
+// cache-only read used by /api/models — a row counts once a repo matched,
+// even if the README had no usable blurb (pipeline_tag still drives kind)
 export function cardFor(modelId) {
   const row = db.prepare('SELECT * FROM model_cards WHERE model_id = ?').get(modelId);
-  return row?.ok ? row : null;
+  return (row && (row.ok || row.pipeline_tag)) ? row : null;
 }
 
 async function fetchCard(modelId, log) {
   const terms = searchTerms(modelId);
   let found = null;
+  let bestTag = null;
   try {
     if (terms.length) {
       const results = await hfSearch(terms);
@@ -106,11 +108,12 @@ async function fetchCard(modelId, log) {
         if (!id) continue;
         const score = scoreRepo(terms, id);
         if (score > bestScore || (score === bestScore && (r.downloads ?? 0) > (best?.downloads ?? 0))) {
-          best = { id, downloads: r.downloads ?? 0 }; bestScore = score;
+          best = { id, downloads: r.downloads ?? 0, tag: r.pipeline_tag ?? null }; bestScore = score;
         }
       }
       // demand a solid match — a wrong card is worse than the heuristic blurb
       if (best && bestScore >= 0.6) {
+        bestTag = best.tag;
         const blurb = extractBlurb(await hfReadme(best.id));
         if (blurb) found = { repo: best.id, url: `${HF}/${best.id}`, blurb };
       }
@@ -119,12 +122,13 @@ async function fetchCard(modelId, log) {
     log?.warn?.({ err: err.message, model: modelId }, 'model card lookup failed');
     return; // transient (network/rate limit) — leave uncached so it retries on a later listing
   }
-  db.prepare(`INSERT INTO model_cards (model_id, repo, url, blurb, ok, fetched_at)
-              VALUES (@modelId, @repo, @url, @blurb, @ok, @now)
+  db.prepare(`INSERT INTO model_cards (model_id, repo, url, blurb, pipeline_tag, ok, fetched_at)
+              VALUES (@modelId, @repo, @url, @blurb, @tag, @ok, @now)
               ON CONFLICT(model_id) DO UPDATE SET
                 repo = excluded.repo, url = excluded.url, blurb = excluded.blurb,
+                pipeline_tag = COALESCE(excluded.pipeline_tag, model_cards.pipeline_tag),
                 ok = excluded.ok, fetched_at = excluded.fetched_at`)
-    .run({ modelId, repo: found?.repo ?? null, url: found?.url ?? null, blurb: found?.blurb ?? null, ok: found ? 1 : 0, now: nowSec() });
+    .run({ modelId, repo: found?.repo ?? null, url: found?.url ?? null, blurb: found?.blurb ?? null, tag: bestTag, ok: found ? 1 : 0, now: nowSec() });
   if (found) log?.info?.({ model: modelId, repo: found.repo }, 'model card cached');
 }
 

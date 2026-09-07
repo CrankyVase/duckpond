@@ -14,42 +14,63 @@ export const downloads = $state(new Map());
 
 let pollTimer = null;
 let polling = false;
+let inFlight = false;
+let rateMs = null;
+
+// Poll cadence: 1s while anything is running (live progress), 3s while idle
+// so a download started in another tab / on another device still shows up
+// here without a refresh. The loop stays alive the whole time the Hub is
+// mounted — the old "only poll while active" scheme let a fresh download
+// start into a dead poll loop (the previous job had already cleared the
+// interval and startPolling() early-returned), leaving the job bar frozen
+// at "starting…" until a manual refresh.
+const ACTIVE_MS = 1000;
+const IDLE_MS = 3000;
+
+function restartTimer(ms) {
+  if (pollTimer != null && rateMs === ms) return;
+  if (pollTimer != null) clearInterval(pollTimer);
+  rateMs = ms;
+  pollTimer = setInterval(() => { void tick(); }, ms);
+}
 
 async function tick() {
-  let jobs;
+  if (inFlight) return;
+  inFlight = true;
   try {
-    ({ jobs } = await api('/api/hf/downloads'));
-  } catch { return; } // server unreachable — next tick retries
-  const next = new Map();
-  for (const j of jobs) {
-    const key = `${j.repoId}::${j.include ?? ''}`;
-    next.set(key, { ...j, key });
-  }
-  // Merge in any local-only jobs (started optimistically, not yet confirmed)
-  for (const [key, j] of downloads) {
-    if (!next.has(key) && j.state === 'running') next.set(key, j);
-  }
-  downloads.clear();
-  for (const [key, j] of next) downloads.set(key, j);
+    let jobs;
+    try {
+      ({ jobs } = await api('/api/hf/downloads'));
+    } catch {
+      if (polling) restartTimer(IDLE_MS);
+      return; // server unreachable — next tick retries
+    }
+    const next = new Map();
+    for (const j of jobs) {
+      const key = `${j.repoId}::${j.include ?? ''}`;
+      next.set(key, { ...j, key });
+    }
+    // Merge in any local-only jobs (started optimistically, not yet confirmed)
+    for (const [key, j] of downloads) {
+      if (!next.has(key) && j.state === 'running') next.set(key, j);
+    }
+    downloads.clear();
+    for (const [key, j] of next) downloads.set(key, j);
 
-  // Keep polling while anything is running; stop when idle
-  const anyActive = [...next.values()].some((j) => j.state === 'running' || j.state === 'cancelling');
-  if (anyActive && pollTimer == null) {
-    pollTimer = setInterval(tick, 1000);
-  } else if (!anyActive && pollTimer != null) {
-    clearInterval(pollTimer);
-    pollTimer = null;
+    if (polling) restartTimer([...next.values()].some((j) => j.state === 'running' || j.state === 'cancelling') ? ACTIVE_MS : IDLE_MS);
+  } finally {
+    inFlight = false;
   }
 }
 
 export function startPolling() {
-  if (polling) return;
   polling = true;
   void tick();
 }
 export function stopPolling() {
   polling = false;
   if (pollTimer != null) { clearInterval(pollTimer); pollTimer = null; }
+  rateMs = null;
 }
 
 export function jobKey(repoId, include) {

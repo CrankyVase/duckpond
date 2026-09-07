@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './db.js';
+import { healOrphanedPrompts } from './chatkit.js';
 import { reapOrphans } from './downloadManager.js';
 import { reapIdleModels } from './llama.js';
 import { backfillMissing, pruneMemories } from './memory.js';
@@ -18,6 +19,7 @@ import githubRoutes from './routes/github.js';
 import { BUILD, versionLine } from './version.js';
 import hfRoutes, { publicHfRoutes } from './routes/hf.js';
 import imageRoutes from './routes/images.js';
+import mapRoutes from './routes/maps.js';
 import modelRoutes from './routes/models.js';
 import docRoutes from './routes/docs.js';
 import exportRoutes from './routes/exports.js';
@@ -52,6 +54,7 @@ await app.register(chatRoutes);
 await app.register(statsRoutes);
 await app.register(agentRoutes);
 await app.register(imageRoutes);
+await app.register(mapRoutes);
 await app.register(publicHfRoutes);
 await app.register(hfRoutes);
 await app.register(ttsRoutes);
@@ -88,6 +91,10 @@ setInterval(() => reapIdleSandboxes(app.log).catch(() => {}), 120_000).unref();
 setInterval(() => {
   try { reapStaleAgentRuns(app.log); } catch { /* next sweep */ }
 }, 5 * 60_000).unref();
+// prompt healer: user messages orphaned off the active path by a crashed turn
+// (process kill, dropped GPU-queue wait) — put the last prompt back in play
+try { healOrphanedPrompts(app.log); } catch { /* next sweep */ }
+setInterval(() => { try { healOrphanedPrompts(app.log); } catch { /* next sweep */ } }, 5 * 60_000).unref();
 // embedding backfill: index any messages missed while the embed service was
 // down (and the whole pre-feature history on first boot)
 setTimeout(() => backfillMissing(app.log).catch(() => {}), 5_000).unref();

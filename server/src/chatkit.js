@@ -17,7 +17,7 @@ import {
   deleteMemory, indexMessage, saveMemoryDirect, updateMemory,
 } from './memory.js';
 import { corePrompt } from './settings.js';
-import { broadcast } from './liveJobs.js';
+import { broadcast, hasActiveJob } from './liveJobs.js';
 // remote providers + cost saver (feat/remote-providers)
 import { isRemoteId } from './chatBackend.js';
 import { modelRowForRemoteId, priceRemoteTurn, recordEvent } from './costs.js';
@@ -106,6 +106,31 @@ export function insertMessage(convId, parentId, role, content, extra = {}) {
 export function setLeaf(convId, leafId) {
   db.prepare('UPDATE conversations SET active_leaf_id = ?, updated_at = unixepoch() WHERE id = ?')
     .run(leafId, convId);
+}
+
+/**
+ * Crash recovery for the chat tree: when a turn dies before anything is saved
+ * (process kill, dropped GPU-queue wait, a stream error with zero output), the
+ * user's message stays in the DB but OFF the active path — the conversation
+ * silently "forgets" the last prompt. Heal: any conversation whose newest
+ * message is an unreplied user message gets it re-attached as the active leaf.
+ */
+export function healOrphanedPrompts(log) {
+  const rows = db.prepare(`
+    SELECT m.id, m.conv_id FROM messages m
+    JOIN conversations c ON c.id = m.conv_id
+    WHERE m.id = (SELECT MAX(id) FROM messages WHERE conv_id = m.conv_id)
+      AND m.role = 'user'
+      AND c.active_leaf_id IS NOT m.id
+      AND NOT EXISTS (SELECT 1 FROM messages k WHERE k.parent_id = m.id)`).all();
+  let n = 0;
+  for (const r of rows) {
+    if (hasActiveJob(r.conv_id)) continue; // turn still in flight — wait for it
+    setLeaf(r.conv_id, r.id);
+    n += 1;
+  }
+  if (n) log?.info?.({ n }, 'healed orphaned user prompts back onto the active path');
+  return n;
 }
 
 /** True if the live job has anything worth parking as an assistant bubble. */

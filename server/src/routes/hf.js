@@ -1,4 +1,5 @@
 import { requireAuth } from '../auth.js';
+import { fetchHubAsset } from '../hfAssets.js';
 import {
   cancelDownload, clearFinished, downloadStatus, listDownloads, startDownload,
 } from '../downloadManager.js';
@@ -25,7 +26,9 @@ export async function publicHfRoutes(app) {
     try {
       const url = await ownerAvatar(req.params.owner);
       if (!url) return reply.code(404).send();
-      return reply.redirect(url);
+      const asset = await fetchHubAsset(url);
+      return reply.header('cache-control', 'public, max-age=43200')
+        .header('x-content-type-options', 'nosniff').type(asset.type).send(asset.bytes);
     } catch { return reply.code(404).send(); }
   });
 }

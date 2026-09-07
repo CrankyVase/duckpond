@@ -713,7 +713,7 @@
         {#each NAV_ITEMS as item (item.id)}
           <div class="row">
             <div class="rlabel"><div class="rt"><item.icon size={13} /> {item.label}</div></div>
-            <button class="tog" class:on={prefs.pinnedNav.includes(item.id)}
+            <button class="tog" class:on={prefs.pinnedNav.includes(item.id)} aria-label={`Show ${item.label} in sidebar`}
               role="switch" aria-checked={prefs.pinnedNav.includes(item.id)}
               onclick={() => {
                 if (prefs.pinnedNav.includes(item.id)) {
@@ -1029,8 +1029,8 @@
   }
   .wrap {
     display: flex; gap: 34px;
-    width: 100%; max-width: 1080px; margin: 0 auto;
-    min-height: 0; padding: 0 28px;
+    width: 100%; max-width: 1400px; margin: 0 auto;
+    min-height: 0; padding: 0 36px;
     box-sizing: border-box;
   }
   .secnav {
@@ -1040,7 +1040,7 @@
     overflow-y: auto;
   }
   .navhead {
-    font-size: 21px; font-weight: 650; letter-spacing: -0.02em;
+    font-size: 28px; font-weight: 600; letter-spacing: -0.035em;
     padding: 2px 10px 16px; user-select: none;
   }
   .navitem {

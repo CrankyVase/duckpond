@@ -9,6 +9,7 @@
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Info from '@lucide/svelte/icons/info';
+  import Play from '@lucide/svelte/icons/play';
   import Power from '@lucide/svelte/icons/power';
   import Star from '@lucide/svelte/icons/star';
   import Trash2 from '@lucide/svelte/icons/trash-2';
@@ -21,48 +22,57 @@
   const current = $derived(app.models.find((m) => m.id === app.conv?.model_id));
 
   // Remote ids look like `r{providerId}:{model_id}` — show just the model part.
-  const dispName = (m) => (m?.remote ? m.id.slice(m.id.indexOf(':') + 1) : m?.id);
+  const dispName = (m) => (m?.remote ? String(m.id).slice(String(m.id).indexOf(':') + 1) : String(m?.id ?? ''));
   // Same stripping for a bare id string (fallback when the models list hasn't
   // loaded) — the r1: plumbing prefix should never reach the screen.
   const stripRemote = (id) => (id && /^r\d+:/.test(id) ? id.slice(id.indexOf(':') + 1) : id);
 
   // USD per 1M tokens, compact: $0.005 / $0.50 / $12.30
+  // Coerce everything: a single non-numeric price from a provider must never
+  // throw mid-render — in Svelte 5 that poisons the whole effect graph and
+  // every button on the page stops responding.
   function perM(p) {
-    if (p == null) return null;
-    const s = p < 0.01 ? p.toPrecision(2) : p.toFixed(2);
+    const n = Number(p);
+    if (p == null || !Number.isFinite(n)) return null;
+    const s = n < 0.01 ? n.toPrecision(2) : n.toFixed(2);
     return `$${String(s).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')}`;
   }
   function pricingMeta(m) {
-    const p = m.pricing;
-    if (!p || (p.in == null && p.out == null)) return 'no pricing yet';
-    let s = `${perM(p.in)} in · ${perM(p.out)} out /1M`;
-    if (p.cachedIn != null) s += ` · cached ${perM(p.cachedIn)}`;
+    const p = m?.pricing;
+    if (!p || typeof p !== 'object' || (p.in == null && p.out == null)) return 'no pricing yet';
+    let s = `${perM(p.in) ?? '?'} in · ${perM(p.out) ?? '?'} out /1M`;
+    if (p.cachedIn != null) s += ` · cached ${perM(p.cachedIn) ?? '?'}`;
     return s;
   }
 
   // Whole list, in the grouped order below. No text filter.
-  const filtered = $derived(app.models);
+  // Array guard: a bad /api/models payload must never break the derived.
+  const filtered = $derived(Array.isArray(app.models) ? app.models : []);
 
   // Favorites first (stars from Providers curation + your default), then Local,
   // then one group per provider — providers + their models alphabetically.
   // Items keep their flat index into `filtered` so keyboard hover/pick stays correct.
+  // Groups carry a stable unique `key` (provider id, not name): two providers
+  // with the same display name used to produce duplicate each-block keys and
+  // glitch the dropdown's DOM.
   const groups = $derived.by(() => {
     const favs = [];
     const locals = [];
     const byProv = new Map();
     filtered.forEach((m, i) => {
+      if (!m || typeof m.id !== 'string') return;
       if (m.favorite || m.id === app.user?.default_model_id) { favs.push({ m, i }); return; }
       if (!m.remote) { locals.push({ m, i }); return; }
       const key = m.provider?.id ?? '?';
-      if (!byProv.has(key)) byProv.set(key, { label: m.provider?.name ?? 'Remote', items: [] });
+      if (!byProv.has(key)) byProv.set(key, { key: `p${key}`, label: m.provider?.name ?? 'Remote', items: [] });
       byProv.get(key).items.push({ m, i });
     });
     const provs = [...byProv.values()];
     for (const g of provs) g.items.sort((a, b) => dispName(a.m).localeCompare(dispName(b.m)));
     provs.sort((a, b) => a.label.localeCompare(b.label));
     const out = [];
-    if (favs.length) out.push({ label: 'Favorites', items: favs });
-    if (locals.length) out.push({ label: 'Local', items: locals });
+    if (favs.length) out.push({ key: 'favs', label: 'Favorites', items: favs });
+    if (locals.length) out.push({ key: 'local', label: 'Local', items: locals });
     return [...out, ...provs];
   });
 
@@ -104,24 +114,28 @@
 
   async function pick(m) {
     app.modelPickerOpen = false;
-    if (!app.conv || app.conv.model_id === m.id) return;
-    const prevLocal = app.models.find((x) => x.id === app.conv.model_id && !x.remote);
+    if (!m || !app.conv || app.conv.model_id === m.id) return;
+    const prevId = app.conv.model_id;
+    const prevLocal = app.models.find((x) => x.id === prevId && !x.remote);
     app.conv.model_id = m.id;
-    await api(`/api/conversations/${app.conv.id}`, { method: 'PATCH', body: { model_id: m.id } });
-    // Switching models is a VRAM switch, not just a label: ask the router to
-    // load the new model now — with --models-max 1 it preempts the previously
-    // loaded one, which is exactly what "where did the old model go" expects.
-    // Fire-and-forget: generation would trigger the same load lazily anyway.
-    if (!m.remote) {
-      api(`/api/models/${m.id}/load`, { method: 'POST', body: {} })
-        .catch(() => { /* lazy load on next message instead */ });
-      setTimeout(loadModels, 2500);
-      setTimeout(loadModels, 8000);
-    } else if (prevLocal) {
-      // leaving a local model for a remote one — free the VRAM right away
-      api(`/api/models/${prevLocal.id}/unload`, { method: 'POST', body: {} })
-        .catch(() => { /* idle reaper gets it in 10 min */ });
-      setTimeout(loadModels, 2500);
+    try {
+      await api(`/api/conversations/${app.conv.id}`, { method: 'PATCH', body: { model_id: m.id } });
+      // Switching models never loads anything: picking is a label change, the
+      // model loads on first send (or via the explicit Load button in this
+      // menu). Previously this fire-and-forget load pulled every switched-to
+      // model into VRAM immediately.
+      if (!m.remote) {
+        setTimeout(loadModels, 2500);
+      } else if (prevLocal) {
+        // leaving a local model for a remote one — free the VRAM right away
+        api(`/api/models/${prevLocal.id}/unload`, { method: 'POST', body: {} })
+          .catch(() => { /* idle reaper gets it in 10 min */ });
+        setTimeout(loadModels, 2500);
+      }
+    } catch (err) {
+      // revert the optimistic switch so the label never lies about what ran
+      app.conv.model_id = prevId;
+      toast(String(err.message ?? err), 'error');
     }
     loadModels();
   }
@@ -138,9 +152,13 @@
   async function setDefault(m, e) {
     e.stopPropagation();
     const v = app.user?.default_model_id === m.id ? null : m.id;
-    await api('/api/auth/me', { method: 'PATCH', body: { default_model_id: v } });
-    if (app.user) app.user.default_model_id = v;
-    toast(v ? `${m.id} is now your default` : 'Default cleared', 'ok');
+    try {
+      await api('/api/auth/me', { method: 'PATCH', body: { default_model_id: v } });
+      if (app.user) app.user.default_model_id = v;
+      toast(v ? `${m.id} is now your default` : 'Default cleared', 'ok');
+    } catch (err) {
+      toast(String(err.message ?? err), 'error');
+    }
   }
 
   async function unload(m, e) {
@@ -158,6 +176,23 @@
       // state doesn't lie about what's still in VRAM
       setTimeout(loadModels, 2500);
       setTimeout(loadModels, 6000);
+    }
+  }
+
+  let loading = $state(null);     // model id mid-load
+  async function load(m, e) {
+    e.stopPropagation();          // don't select the model, just load it
+    loading = m.id;
+    try {
+      await api(`/api/models/${m.id}/load`, { method: 'POST', body: {} });
+      toast(`${m.id} loading into VRAM`, 'ok');
+    } catch (err) {
+      toast(String(err.message ?? err), 'error');
+    } finally {
+      loading = null;
+      loadModels();
+      setTimeout(loadModels, 2500);
+      setTimeout(loadModels, 8000);
     }
   }
 
@@ -200,6 +235,22 @@
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
     return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
   }
+
+  // k-ctx label, tolerant of strings/undefined from providers (0 = hide)
+  function kCtx(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.round(n / 1000) : null;
+  }
+
+  // A render error inside the open menu must never take the page down with
+  // it: in Svelte 5 an uncaught template error kills the effect graph (every
+  // button dies) and the invisible full-page backdrop stays up, locking the
+  // whole UI. This boundary closes the picker instead of freezing the app.
+  function menuCrashed(err) {
+    app.modelPickerOpen = false;
+    toast(`Model picker hit an error and closed — ${err?.message ?? err}`, 'error');
+  }
+
 </script>
 
 <div class="picker">
@@ -212,13 +263,14 @@
 
   {#if app.modelPickerOpen}
     <div class="backdrop" onclick={() => (app.modelPickerOpen = false)} role="presentation"></div>
-    <div class="menu slide-up">
-      <div class="list" bind:this={listEl} role="listbox">
-        {#each groups as g (g.label)}
-          {#if groups.length > 1}
-            <div class="gh">{g.label}</div>
-          {/if}
-          {#each g.items as { m, i } (m.id)}
+    <svelte:boundary onerror={menuCrashed}>
+      <div class="menu slide-up">
+        <div class="list" bind:this={listEl} role="listbox">
+          {#each groups as g (g.key)}
+            {#if groups.length > 1}
+              <div class="gh">{g.label}</div>
+            {/if}
+            {#each g.items as { m, i } (m.id)}
             <div class="opt" class:hover={i === hoverIdx} class:sel={m.id === app.conv?.model_id}
               onclick={() => pick(m)} onmouseenter={() => (hoverIdx = i)}
               role="option" aria-selected={m.id === app.conv?.model_id} tabindex="-1"
@@ -229,11 +281,11 @@
                 <span class="meta">
                   {#if m.remote}
                     remote
-                    {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1000)}k ctx{/if}
+                    {#if kCtx(m.ctxSize)}&nbsp;·&nbsp;{kCtx(m.ctxSize)}k ctx{/if}
                     &nbsp;·&nbsp;<span class:noprice={!m.pricing || (m.pricing.in == null && m.pricing.out == null)}>{pricingMeta(m)}</span>
                   {:else}
                     {unloading === m.id ? 'unloading…' : resident(m.status) ? m.status : 'on disk'}
-                    {#if m.ctxSize}&nbsp;·&nbsp;{Math.round(m.ctxSize / 1024)}k ctx{/if}
+                    {#if kCtx(m.ctxSize)}&nbsp;·&nbsp;{kCtx(m.ctxSize)}k ctx{/if}
                   {/if}
                 </span>
               </span>
@@ -272,6 +324,11 @@
                   title="Unload from VRAM">
                   <Power size={13} />
                 </button>
+              {:else if !m.remote}
+                <button class="eject load" onclick={(e) => load(m, e)} disabled={loading === m.id}
+                  title={loading === m.id ? 'Loading…' : 'Load into VRAM'}>
+                  <Play size={13} />
+                </button>
               {/if}
               {#if isOwner && !m.remote}
                 <button class="eject del" onclick={(e) => removeModel(m, e)} disabled={deleting === m.id}
@@ -284,15 +341,19 @@
               {/if}
             </div>
           {/each}
-        {:else}
-          <div class="empty">no matches</div>
-        {/each}
+          {:else}
+            <div class="empty">no matches</div>
+          {/each}
+        </div>
+        <div class="foot">
+          <span><kbd>↑</kbd> <kbd>↓</kbd> navigate · <kbd>Enter</kbd> pick</span>
+          <span><kbd>Ctrl</kbd>+<kbd>K</kbd> opens this anywhere</span>
+        </div>
       </div>
-      <div class="foot">
-        <span><kbd>↑</kbd> <kbd>↓</kbd> navigate · <kbd>Enter</kbd> pick</span>
-        <span><kbd>Ctrl</kbd>+<kbd>K</kbd> opens this anywhere</span>
-      </div>
-    </div>
+      {#snippet failed()}
+        <div class="menu slide-up"><div class="empty">menu failed — closing…</div></div>
+      {/snippet}
+    </svelte:boundary>
   {/if}
 </div>
 
@@ -404,6 +465,7 @@
     transition: background 120ms ease, color 120ms ease;
   }
   .eject:hover { background: rgba(192, 96, 79, 0.16); color: var(--red); }
+  .eject.load:hover { background: var(--accent-glow); color: var(--accent); }
   .eject:disabled { opacity: 0.4; cursor: default; }
   .eject.del { color: var(--text-faint); }
   .eject.del:hover { background: rgba(192, 96, 79, 0.16); color: var(--red); }

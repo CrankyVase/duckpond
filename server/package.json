@@ -3,11 +3,12 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "DuckPond — self-hosted local-LLM chat + agentic coding workbench (server)",
+  "description": "DuckPond \u2014 self-hosted local-LLM chat + agentic coding workbench (server)",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs"
+    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs && node test/hfassets.test.mjs && node test/livejobs.test.mjs",
+    "test:media": "python3 -m unittest discover -s image-bridge/test -p \"*_test.py\""
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

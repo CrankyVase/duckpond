@@ -893,7 +893,7 @@ export async function ownerAvatar(owner) {
   const hit = avatarCache.get(key);
   if (hit) {
     if (hit.url === null && Date.now() - hit.at < AVATAR_TTL_MS) return null; // negative cache
-    if (hit.url) return hit.url;
+    if (hit.url && Date.now() - hit.at < AVATAR_TTL_MS) return hit.url;
   }
   for (const kind of ['organizations', 'users']) {
     try {

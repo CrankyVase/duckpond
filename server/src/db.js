@@ -284,10 +284,15 @@ CREATE TABLE IF NOT EXISTS model_cards (
   repo TEXT,
   url TEXT,
   blurb TEXT,
+  pipeline_tag TEXT,
   ok INTEGER NOT NULL DEFAULT 0,
   fetched_at INTEGER NOT NULL
 );
 `);
+
+// HF pipeline_tag per model card (drives non-chat model classification —
+// image/embed/audio models stay out of the LLM picker).
+try { db.exec('ALTER TABLE model_cards ADD COLUMN pipeline_tag TEXT'); } catch { /* exists */ }
 
 // Speech Lab clips: audio rendered from cloned/designed voices by the speech
 // bridge (:8766). Files live in data/speech-clips/<user_id>/; rows are the

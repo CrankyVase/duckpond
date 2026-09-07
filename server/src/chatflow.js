@@ -67,10 +67,10 @@ export function makeTurnDelta({ send, abort, log, thinkTimeoutMs, spec }) {
     if (meta?.toolFrag) { disarmThink(); spec.onFrag(meta.toolFrag); send({ type: 'tool_delta', ...meta.toolFrag }); }
     if (chunk) { disarmThink(); reasoningTail = ''; send({ type: 'delta', text: chunk }); }
     const now = Date.now();
-    if (now - lastTick > 500 && meta?.timings?.predicted_per_second
-        && (meta.timings.predicted_n ?? 0) >= 5) {
+    if (now - lastTick > 500 && meta?.timings) {
       lastTick = now;
-      send({ type: 'tok_s', value: meta.timings.predicted_per_second, n: meta.timings.predicted_n ?? 0 });
+      send({ type: 'tok_s', value: meta.timings.predicted_per_second ?? null,
+        n: meta.timings.predicted_n ?? 0, promptN: meta.timings.prompt_n });
     }
   };
   return { onDelta, disarmThink, clearTimer: disarmThink };
@@ -312,6 +312,10 @@ export async function runInlineSearch({
       params: capped ? params : { ...params, tools: searchTools, tool_choice: 'auto' },
       abortSignal: abort.signal, onDelta, onEvent: fallbackNotice(send),
     });
+    // live context accounting: the round's real prompt size (usage when the
+    // backend reports it, timings.prompt_n as the local llama.cpp fallback)
+    const usedNow = res.usage?.prompt_tokens ?? res.timings?.prompt_n ?? null;
+    if (usedNow != null) send({ type: 'context', used: usedNow, budget: conv._settings.ctx_size });
     if (capped) { finalText = res.content ?? ''; if (res.reasoning) reasons.push(res.reasoning); break; }
   }
 
@@ -383,6 +387,20 @@ function parseFollowupLines(raw) {
 // turns with the cheap aux model and splice the summary into the leading
 // system message. The DB tree is untouched (the manual feature still exists
 // for permanent compaction); this just keeps the turn alive AND cheaper.
+
+// Shared by the manual /compact endpoint (routes/chat.js) so both paths hand
+// the model the same instructions. Coding runs are the case that hurts: a
+// generic "goals/decisions" summary makes the model restart the task or ask
+// what to do — the brief must carry the build state so it RESUMES mid-code.
+export const COMPACT_PROMPT = 'Compress this chat history into a context brief for a language model '
+  + 'that must CONTINUE this conversation seamlessly, mid-task if a task is running. '
+  + 'Keep: the user\'s goals, decisions made, key facts (names, numbers, file paths, code identifiers), '
+  + 'and any work in progress — files created or edited (with paths), commands run and their outcomes, '
+  + 'errors hit and fixes applied. '
+  + 'Terse bullet points under the headings: Goal / Decisions / Facts / Work done / Open items. '
+  + 'End with the single NEXT ACTION if work is unfinished. '
+  + 'No preamble, no commentary.';
+
 export async function autoCompactMessages(messages, auxModel, abortSignal, log) {
   const KEEP = 8;
   const sys = messages[0]?.role === 'system' ? messages[0] : null;
@@ -397,10 +415,7 @@ export async function autoCompactMessages(messages, auxModel, abortSignal, log) 
       model: auxModel,
       messages: [{
         role: 'user',
-        content: 'Compress this chat history into a context brief for a language model. '
-          + 'Keep: user goals, decisions made, key facts (names, numbers, file paths, code identifiers), '
-          + 'and unresolved tasks. Terse bullet points under the headings Goals / Decisions / Facts / Open items. '
-          + `No preamble, no commentary.\n\n---\n${transcript}\n---`,
+        content: `${COMPACT_PROMPT}\n\n---\n${transcript}\n---`,
       }],
       params: { max_tokens: 900, temperature: 0.2 },
       abortSignal,
@@ -444,21 +459,26 @@ const run = createRun(wsRow.id, req.user.id, conv.model_id, promptLeaf.content);
 runId = run.id;
 bindRunAbort(run.id, abort);
 send({ type: 'agent_start', run, workspace: wsRow });
-const unsub = subscribeRun(run.id, (e) => {
-  if (e.type === 'delta') {
-    if (e.text) send({ type: 'delta', text: e.text });
-    else if (e.reasoning) send({ type: 'thinking', text: e.reasoning });
-  } else if (e.type === 'tool_delta') {
-    send({ type: 'tool_delta', index: e.index, name: e.name, args: e.args });
-  } else if (e.type === 'image_job' || e.type === 'image_progress'
-      || e.type === 'image_preview' || e.type === 'image_done') {
-    // live image progress from an agent-run generate_image → the same
-    // top-level events (and imgjob UI) a plain chat image turn uses
-    send({ type: e.type, prompt: e.prompt, phase: e.phase, step: e.step, steps: e.steps, b64: e.b64 });
-  } else {
-    send({ type: 'agent', event: e });
-  }
-});
+  const unsub = subscribeRun(run.id, (e) => {
+    if (e.type === 'delta') {
+      if (e.text) send({ type: 'delta', text: e.text });
+      else if (e.reasoning) send({ type: 'thinking', text: e.reasoning });
+    } else if (e.type === 'tool_delta') {
+      send({ type: 'tool_delta', index: e.index, name: e.name, args: e.args });
+    } else if (e.type === 'context') {
+      // live context accounting straight from the agent loop (per step)
+      send({ type: 'context', used: e.used, budget: e.budget });
+    } else if (e.type === 'notice') {
+      send({ type: 'notice', message: e.message });
+    } else if (e.type === 'image_job' || e.type === 'image_progress'
+        || e.type === 'image_preview' || e.type === 'image_done') {
+      // live image progress from an agent-run generate_image → the same
+      // top-level events (and imgjob UI) a plain chat image turn uses
+      send({ type: e.type, prompt: e.prompt, phase: e.phase, step: e.step, steps: e.steps, b64: e.b64 });
+    } else {
+      send({ type: 'agent', event: e });
+    }
+  });
 if (gateCall) {
   // record the gate step (now visible live), write PLAN.md, and
   // rebuild the transcript under the active-project policy
@@ -487,6 +507,7 @@ try {
     run, ws: wsRow, messages: loopMessages, model: conv.model_id,
     genParams: params, abortSignal: abort.signal, firstResult,
     tools: filterTools(imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'), disabledTools),
+    ctxBudget: Number(conv._settings.ctx_size) > 0 ? Number(conv._settings.ctx_size) : null,
   });
 } catch (err) {
   req.log.error({ err, run: run.id }, 'agent loop failed');
@@ -503,20 +524,21 @@ if (result.status === 'final') {
     timings: result.timings ?? timings,
     usage: result.usage ?? usage,
     runId: run.id,
+    messages: loopMessages,
   };
 }
 if (result.status === 'aborted') {
   finishRun(run.id, 'stopped');
-  return { text: 'Stopped — everything done so far is saved in the workspace.', reasoning, timings, usage, runId: run.id };
+  return { text: 'Stopped — everything done so far is saved in the workspace.', reasoning, timings, usage, runId: run.id, messages: loopMessages };
 }
 if (result.status === 'steplimit') {
   finishRun(run.id, 'error');
-  return { text: 'I hit the step limit for this run — everything done so far is saved in the workspace.', reasoning, timings, usage, runId: run.id };
+  return { text: 'I hit the step limit for this run — everything done so far is saved in the workspace.', reasoning, timings, usage, runId: run.id, messages: loopMessages };
 }
 finishRun(run.id, 'error');
 return {
   text: `The run hit an error (${result.message ?? 'unknown'}) — everything done so far is saved in the workspace.`,
-  reasoning, timings, usage, runId: run.id,
+  reasoning, timings, usage, runId: run.id, messages: loopMessages,
 };
       
 }

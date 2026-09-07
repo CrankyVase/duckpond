@@ -215,6 +215,7 @@ function agentSystemPrompt(ws) {
     'Environment: Debian, Node 24 + npm, Python 3.13 + pip, git, bash. No GUI.',
     '',
     'Rules:',
+    '- AGENTIC MEANS TOOLS, NOT TEXT: never deliver code as chat markdown or draft it in your reasoning. Every file is created with write_file or edit_file; the reply text is only short progress notes and the final summary.',
     '- Look before you leap: list or read files before editing them.',
     '- For changes to an existing file, use edit_file with exact search/replace blocks — never rewrite a whole file to change a few lines. Reserve write_file for new files or total rewrites; write complete content, never fragments or placeholders.',
     '- Big files: read a window with start_line/max_lines instead of the whole file.',
@@ -511,6 +512,83 @@ function trimHistory(messages, keep = 8) {
   }
 }
 
+// ---------- mid-run compaction (context wall during coding) ----------
+// A long build can outgrow the context window while the model is mid-task.
+// Compacting must NOT reset it to "hello, what shall I build?" — the brief
+// below preserves the coding state (files touched, commands run, what's next)
+// and the bridge message orders the loop to resume exactly where it stopped.
+
+const OVERFLOW_RE = /exceeds?.{0,20}(available )?context|context (size|window|full)|too many tokens|maximum context/i;
+
+export function isContextOverflow(err) {
+  return OVERFLOW_RE.test(String(err?.message ?? err));
+}
+
+function cutIndexForCompaction(rest, keepFromEnd) {
+  // A safe cut is immediately before an assistant-with-tool_calls message:
+  // everything before it ends on a completed assistant/tool pair (or the task
+  // user message), so no dangling tool results are left behind.
+  let j = Math.max(0, rest.length - keepFromEnd);
+  while (j > 0 && rest[j].role === 'tool') j -= 1;
+  if (j > 0 && rest[j]?.role === 'assistant' && rest[j].tool_calls?.length) return j;
+  return -1;
+}
+
+/**
+ * Compact an in-flight agent transcript in place: summarize the older
+ * exchanges (tool results included) into a coding-state brief and splice it
+ * in as a user message right before the recent verbatim tail. Returns true
+ * when the transcript was rewritten and the loop may retry its step.
+ */
+export async function compactAgentLoopMessages({ messages, model, abortSignal, log, reason = 'context pressure' }) {
+  const KEEP = 8;
+  if (messages.length <= KEEP + 4) return false;
+  const sys = messages[0]?.role === 'system' ? messages[0] : null;
+  const rest = sys ? messages.slice(1) : [...messages];
+  const cut = cutIndexForCompaction(rest, KEEP);
+  if (cut <= 1) return false;
+  const middle = rest.slice(0, cut);
+  const kept = rest.slice(cut);
+  const textOf = (m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''));
+  const transcript = middle.map((m) => {
+    const calls = m.tool_calls
+      ?.map((t) => `${t.function?.name}(${String(t.function?.arguments ?? '').slice(0, 100)})`)
+      .join('; ');
+    return `${m.role.toUpperCase()}${calls ? ` [tools: ${calls}]` : ''}: ${textOf(m).slice(0, 1200)}`;
+  }).join('\n\n').slice(0, 60_000);
+  try {
+    const { content: brief } = await streamChat({
+      model,
+      messages: [{
+        role: 'user',
+        content: 'This coding run is still IN PROGRESS and just ran out of context window. '
+          + 'Compress the transcript below into a handover brief so the next model instance continues seamlessly. '
+          + 'Keep under headings: Goal / Decisions / Facts (paths, identifiers, versions) / Work done (every file '
+          + 'created or edited, with paths; commands run and their outcomes; errors hit and fixes applied) / '
+          + 'Open items. End with the single NEXT ACTION. Never invent work that is not in the transcript.\n\n---\n'
+          + transcript + '\n---',
+      }],
+      params: { max_tokens: 900, temperature: 0.2, chat_template_kwargs: { enable_thinking: false } },
+      abortSignal,
+    });
+    if (!brief?.trim()) return false;
+    const bridge = {
+      role: 'user',
+      content: `[Mid-run compaction (${reason}) — your older context was summarized to fit the window.\n`
+        + `Handover brief:\n${brief.trim()}\n\nContinue exactly where the work left off: do not re-create files `
+        + 'that exist, do not restart the task, and do not summarize what you already did — make the next tool call.]',
+    };
+    messages.length = 0;
+    if (sys) messages.push(sys);
+    messages.push(bridge, ...kept);
+    log?.info({ compacted: middle.length, kept: kept.length }, 'mid-run agent compaction');
+    return true;
+  } catch (err) {
+    log?.warn?.({ err }, 'mid-run compaction failed');
+    return false;
+  }
+}
+
 // ---------- shared loop (workbench runs AND chat agent mode) ----------
 
 // Live-tail a run's events. Returns unsubscribe.
@@ -617,22 +695,57 @@ export function reapStaleAgentRuns(log) {
 // tool calls (→ {status:'final', ...}), the signal aborts (→ 'aborted'), or the
 // step budget runs out (→ 'steplimit'). `firstResult` lets a caller hand in an
 // already-streamed first response so the loop picks up from its tool calls.
+// `ctxBudget` (tokens) turns on live context accounting: every step emits a
+// 'context' run event with the real prompt size, and near the wall the loop
+// compacts mid-run — preserving coding state — instead of dying on overflow.
 export async function agentLoop({
   run, ws, messages, model, genParams = {}, abortSignal, firstResult = null, tools = AGENT_TOOLS,
+  ctxBudget = null,
 }) {
+  const callStream = () => streamChat({
+    model, messages,
+    params: { tools, tool_choice: 'auto', ...genParams },
+    abortSignal,
+    onDelta: (text, meta) => {
+      if (text) emit(run.id, 'delta', { text }, { store: false });
+      else if (meta?.reasoning) emit(run.id, 'delta', { reasoning: meta.reasoning }, { store: false });
+      else if (meta?.toolFrag) emit(run.id, 'tool_delta', meta.toolFrag, { store: false });
+    },
+  });
+  const emitContext = (res) => {
+    const used = res?.usage?.prompt_tokens ?? res?.timings?.prompt_n ?? null;
+    if (used != null && ctxBudget > 0) {
+      emit(run.id, 'context', { used, budget: ctxBudget }, { store: false });
+    }
+    return used;
+  };
+  // Compact BEFORE the wall when we can see it coming (>92%), and once after
+  // an actual overflow error — both keep the run mid-task instead of crashing.
+  const maybeCompact = async (reason) => {
+    emit(run.id, 'notice', { message: `Context ${reason} — compacting mid-run (progress kept, task continues)…` }, { store: true });
+    const ok = await compactAgentLoopMessages({ messages, model, abortSignal, log: null, reason });
+    if (!ok) emit(run.id, 'notice', { message: 'Mid-run compaction produced nothing — continuing as-is.' }, { store: false });
+    return ok;
+  };
+  let lastUsed = 0;
   for (let step = 0; step < MAX_STEPS; step++) {
     if (abortSignal?.aborted) return { status: 'aborted' };
     trimHistory(messages);
-    const res = (step === 0 && firstResult) ? firstResult : await streamChat({
-      model, messages,
-      params: { tools, tool_choice: 'auto', ...genParams },
-      abortSignal,
-      onDelta: (text, meta) => {
-        if (text) emit(run.id, 'delta', { text }, { store: false });
-        else if (meta?.reasoning) emit(run.id, 'delta', { reasoning: meta.reasoning }, { store: false });
-        else if (meta?.toolFrag) emit(run.id, 'tool_delta', meta.toolFrag, { store: false });
-      },
-    });
+    if (ctxBudget > 0 && lastUsed > ctxBudget * 0.92) {
+      await maybeCompact('nearly full');
+      lastUsed = 0; // re-measured from the next response
+    }
+    let res;
+    try {
+      res = (step === 0 && firstResult) ? firstResult : await callStream();
+    } catch (err) {
+      if (!abortSignal?.aborted && isContextOverflow(err) && await maybeCompact('overflowed')) {
+        res = await callStream();
+      } else {
+        throw err;
+      }
+    }
+    lastUsed = emitContext(res) ?? lastUsed;
 
     if (!res.toolCalls?.length) {
       return { status: 'final', content: res.content, reasoning: res.reasoning,

@@ -88,7 +88,18 @@ export function applyLiveEvent(job, ev) {
       s.loading = false;
       s.text = (s.text || '') + (ev.text || '');
       break;
+    case 'context':
+      s.context = { used: ev.used, budget: ev.budget, estimated: !!ev.estimated };
+      s.promptN = ev.used;
+      break;
     case 'tok_s':
+      if (Number.isFinite(ev.promptN)) {
+        s.promptN = ev.promptN;
+        if (s.context) s.context.estimated = false;
+      }
+      if (s.context && Number.isFinite(s.promptN)) {
+        s.context.used = Math.min(s.context.budget, s.promptN + (ev.n ?? 0));
+      }
       s.tokS = ev.value;
       s.n = ev.n;
       break;

@@ -221,6 +221,14 @@
     return () => window.removeEventListener('hashchange', onHash);
   });
 
+  // Last-resort render boundary: in Svelte 5 one uncaught template error
+  // kills the whole effect graph — every button stops responding with no
+  // clue why. Catch it here, explain it, and offer a way out.
+  function appCrashed(err) {
+    console.error('[duckpond] render error:', err);
+    toast(`Something broke while rendering: ${err?.message ?? err}`, 'error', 6000);
+  }
+
   function shortcuts(e) {
     if (!app.user) return;
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); app.modelPickerOpen = !app.modelPickerOpen; }
@@ -257,34 +265,49 @@
   <!-- Deep links never skip auth — only the login form is shown -->
   <Login />
 {:else}
-  <div class="layout">
-    <Sidebar />
-    <main>
-      <Topbar />
-      {#key app.view}
-        {#if app.view === 'stats'}
-          <div class="panel-enter view-panel"><StatsPanel /></div>
-        {:else if app.view === 'speech'}
-          <div class="panel-enter view-panel"><SpeechPanel /></div>
-        {:else if app.view === 'files'}
-          <div class="panel-enter view-panel"><FilesPanel /></div>
-        {:else if app.view === 'media'}
-          <div class="panel-enter view-panel"><MediaPanel /></div>
-        {:else if app.view === 'providers'}
-          <div class="panel-enter view-panel"><ProvidersPanel /></div>
-        {:else if app.view === 'costs'}
-          <div class="panel-enter view-panel"><CostsPanel /></div>
-        {:else if app.view === 'hub'}
-          <div class="panel-enter view-panel"><HubPanel /></div>
-        {:else if app.view === 'settings'}
-          <div class="panel-enter view-panel"><SettingsPanel /></div>
-        {:else}
-          <div class="view-panel"><Chat /></div>
-        {/if}
-      {/key}
-    </main>
-    <ThemeStudio />
-  </div>
+  <!-- Last-resort boundary: in Svelte 5 an uncaught render error anywhere in
+       the layout kills the whole effect graph — every button stops responding
+       with no visible reason. Catching it here keeps the failure visible and
+       recoverable (reload) instead of silently freezing the app. -->
+  <svelte:boundary onerror={appCrashed}>
+    <div class="layout">
+      <Sidebar />
+      <main>
+        <Topbar />
+        {#key app.view}
+          {#if app.view === 'stats'}
+            <div class="panel-enter view-panel"><StatsPanel /></div>
+          {:else if app.view === 'speech'}
+            <div class="panel-enter view-panel"><SpeechPanel /></div>
+          {:else if app.view === 'files'}
+            <div class="panel-enter view-panel"><FilesPanel /></div>
+          {:else if app.view === 'media'}
+            <div class="panel-enter view-panel"><MediaPanel /></div>
+          {:else if app.view === 'providers'}
+            <div class="panel-enter view-panel"><ProvidersPanel /></div>
+          {:else if app.view === 'costs'}
+            <div class="panel-enter view-panel"><CostsPanel /></div>
+          {:else if app.view === 'hub'}
+            <div class="panel-enter view-panel"><HubPanel /></div>
+          {:else if app.view === 'settings'}
+            <div class="panel-enter view-panel"><SettingsPanel /></div>
+          {:else}
+            <div class="view-panel"><Chat /></div>
+          {/if}
+        {/key}
+      </main>
+      <ThemeStudio />
+    </div>
+    {#snippet failed({ error })}
+      <div class="crashed">
+        <h1>Something broke</h1>
+        <p>The interface hit an unexpected error. Reloading usually fixes it —
+          your chats are safe.</p>
+        {#if error?.message}<code>{error.message}</code>{/if}
+        <button onclick={() => location.reload()}>Reload DuckPond</button>
+      </div>
+    {/snippet}
+  </svelte:boundary>
 {/if}
 <Toast />
 <ConfirmDialog />
@@ -323,6 +346,28 @@
     flex-direction: column;
     overflow: hidden;
   }
+  /* boundary failure screen — the last thing standing when rendering dies */
+  .crashed {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 24px;
+    text-align: center;
+    height: 100dvh;
+  }
+  .crashed h1 { margin: 0; font-size: 20px; }
+  .crashed p { margin: 0; color: var(--text-dim); max-width: 420px; }
+  .crashed code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--red);
+    max-width: 560px;
+    overflow-wrap: anywhere;
+  }
+  .crashed button { margin-top: 8px; }
   @media (max-width: 768px) {
     .layout {
       position: relative;

@@ -22,6 +22,9 @@
     map = new maplibregl.Map({
       container: el,
       style: STYLE,
+      // MapLibre resolves style/sprite/glyph/tile URLs, then every request
+      // goes through our authenticated server. No browser-side map API calls.
+      transformRequest: (url) => ({ url: `/api/maps/resource?url=${encodeURIComponent(url)}` }),
       center: [data.lon, data.lat],
       zoom, pitch: 55, bearing: -18,
       attributionControl: false,

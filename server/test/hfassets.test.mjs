@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { allowedAssetUrl, fetchHubAsset } from '../src/hfAssets.js';
+assert(allowedAssetUrl('https://cdn-avatars.huggingface.co/a.png'));
+for (const u of ['http://huggingface.co/a', 'https://huggingface.co.evil.test/a', 'https://user@huggingface.co/a', 'https://127.0.0.1/a']) assert(!allowedAssetUrl(u));
+let calls = 0;
+const fetcher = async () => { calls++; return new Response(new Uint8Array([1,2,3]), { headers:{'content-type':'image/png'} }); };
+const assets = await Promise.all([fetchHubAsset('https://huggingface.co/test.png',fetcher),fetchHubAsset('https://huggingface.co/test.png',fetcher)]);
+assert.equal(calls,1);
+assert.equal(assets[0].bytes.length,3);
+await fetchHubAsset('https://huggingface.co/test.png',fetcher);
+assert.equal(calls,1);
+await assert.rejects(fetchHubAsset('https://huggingface.co/redirect',async () => new Response(null,{status:302,headers:{location:'http://127.0.0.1/private'}})), /host/);
+await assert.rejects(fetchHubAsset('https://huggingface.co/svg',async () => new Response('<svg/>',{headers:{'content-type':'image/svg+xml'}})), /Unsupported/);
+await assert.rejects(fetchHubAsset('https://huggingface.co/large',async () => new Response('x',{headers:{'content-type':'image/png','content-length':3*1024*1024}})), /Unsupported/);
+console.log('Hub asset proxy: host/redirect/type/size checks and cache deduplication pass.');

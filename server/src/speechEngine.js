@@ -1,4 +1,5 @@
-// Voxtral TTS engine — the ONLY speech backend. Two interchangeable modes:
+// Speech synthesis via local media adapters or explicitly configured hosted voices.
+// Hosted modes:
 //   mistral  — Mistral's hosted API (api.mistral.ai), the same Voxtral model,
 //              needs an API key (owner pastes it in the Speech page).
 //   local    — any vLLM-Omni server speaking POST /v1/audio/speech
@@ -137,12 +138,47 @@ let chain = Promise.resolve();
 
 const MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', opus: 'audio/ogg', pcm: 'application/octet-stream' };
 
+
+// Self-hosted TTS via the media bridge (Unsloth NativeAudioBackend —
+// Higgs/MOSS). voiceId doubles as the bridge model id when it names a
+// native-audio model; otherwise the bridge auto-picks. refAudioB64 =
+// voice-clone reference clip (Higgs v2). Returns { buf, mime, ext } like the
+// hosted path, or null when the bridge has no TTS model (caller falls
+// through to the configured engine).
+async function speakViaBridge({ text, voiceId, refAudioB64 }) {
+  const { bridgeModels, bridgePost } = await import('./imagegen.js');
+  const m = await bridgeModels().catch(() => null);
+  const ttsModels = (m?.models ?? []).filter((x) => x.task === 'tts' && x.ready);
+  if (!ttsModels.length) return null;
+  if (voiceId?.includes('/') && !ttsModels.some((x) => x.id === voiceId)) throw new Error('Selected local voice is not ready');
+  const model = ttsModels.some((x) => x.id === voiceId) ? voiceId : 'auto';
+  const { randomUUID } = await import('node:crypto');
+  const tag = randomUUID().replace(/-/g, '').slice(0, 12);
+  const data = await bridgePost('/v1/audio/speech', {
+      prompt: text, model, tag, task: 'tts',
+      ...(refAudioB64 ? { ref_audio_b64: refAudioB64 } : {}),
+  });
+  const b64 = data?.data?.[0]?.b64_json;
+  if (!b64) throw new Error('Local speech returned no audio');
+  return { buf: Buffer.from(b64, 'base64'), mime: 'audio/wav', ext: 'wav' };
+}
+
 export function speak({ text, voiceId, refAudioB64, format = 'mp3' }) {
   const cfg = speechConfig();
   const input = String(text ?? '').slice(0, MAX_TTS_CHARS);
   if (!input.trim()) return Promise.resolve(null);
   const job = chain.then(async () => {
-    if (cfg.mode === 'off') throw Object.assign(new Error('speech engine not configured'), { status: 503 });
+    // A chosen local voice must never silently change voice/provider on failure.
+    if (voiceId?.includes('/') || cfg.mode === 'off') {
+      const { acquireGpu } = await import('./gpuqueue.js');
+      const release = await acquireGpu({});
+      try {
+        const local = await speakViaBridge({ text: input, voiceId, refAudioB64 });
+        if (local) return local;
+        if (voiceId?.includes('/')) throw new Error('Selected local voice is unavailable');
+      } finally { release(); }
+    }
+    if (cfg.mode === 'off') throw Object.assign(new Error('speech engine not configured — no local TTS model downloaded and no API key set'), { status: 503 });
     if (cfg.mode === 'local') {
       const res = await fetch(`${cfg.localUrl}/v1/audio/speech`, {
         method: 'POST',
@@ -192,12 +228,13 @@ export async function synthReadAloud(text, voiceId) {
   const clean = stripForSpeech(text).slice(0, MAX_TTS_CHARS);
   if (!clean) return null;
   const voice = voiceId || DEFAULT_VOICE;
-  const hash = createHash('sha256').update(voice + '\0' + clean).digest('hex').slice(0, 32);
-  const file = join(CACHE_DIR, `${hash}.mp3`);
-  const cached = await readFile(file).catch(() => null);
-  if (cached) return { buf: cached, mime: 'audio/mpeg' };
+  const hash = createHash('sha256').update('v2\0' + speechConfig().mode + '\0' + voice + '\0' + clean).digest('hex').slice(0, 32);
+  for (const ext of ['wav', 'mp3']) {
+    const cached = await readFile(join(CACHE_DIR, `${hash}.${ext}`)).catch(() => null);
+    if (cached) return { buf: cached, mime: MIME[ext] };
+  }
   const out = await speak({ text: clean, voiceId: voice, format: 'mp3' });
-  if (out) await writeFile(file, out.buf).catch(() => {});
+  if (out) await writeFile(join(CACHE_DIR, `${hash}.${out.ext}`), out.buf).catch(() => {});
   return out;
 }
 
@@ -216,16 +253,32 @@ const PREVIEW_LINES = {
 
 export async function previewVoice(voiceId) {
   const emotion = Object.keys(PREVIEW_LINES).find((e) => voiceId.endsWith(`_${e}`)) ?? 'neutral';
-  const file = join(CACHE_DIR, `preview-${voiceId.replace(/[^\w-]/g, '')}.mp3`);
-  const cached = await readFile(file).catch(() => null);
-  if (cached) return { buf: cached, mime: 'audio/mpeg' };
+  // WAV output from a local voice must not be cached and served as MP3.
+  const key = createHash('sha256').update(`${voiceId}:${speechConfig().mode}`).digest('hex');
+  for (const ext of ['wav', 'mp3']) {
+    const cached = await readFile(join(CACHE_DIR, `preview-v2-${key}.${ext}`)).catch(() => null);
+    if (cached) return { buf: cached, mime: MIME[ext] };
+  }
   const out = await speak({ text: PREVIEW_LINES[emotion], voiceId, format: 'mp3' });
-  if (out) await writeFile(file, out.buf).catch(() => {});
+  if (out) await writeFile(join(CACHE_DIR, `preview-v2-${key}.${out.ext}`), out.buf).catch(() => {});
   return out;
+}
+
+export async function bridgeTtsModels() {
+  try {
+    const { bridgeModels } = await import('./imagegen.js');
+    const m = await bridgeModels().catch(() => null);
+    return (m?.models ?? []).filter((x) => x.task === 'tts' && x.ready);
+  } catch { return []; }
 }
 
 export async function speechStatus() {
   const cfg = speechConfig();
+  // self-hosted TTS models count as configured even with no API key
+  const local = await bridgeTtsModels().catch(() => []);
+  if (local.length) {
+    return { ok: true, mode: 'bridge', model: local[0].id, models: local.map((x) => x.id) };
+  }
   if (cfg.mode === 'off') return { ok: false, mode: 'off', error: 'not configured' };
   if (cfg.mode === 'local') {
     try {
