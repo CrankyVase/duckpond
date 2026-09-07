@@ -18,7 +18,10 @@ weight downloads, or performance benchmarks until the user resumes that work.
    - [ ] Review agent step/research limits, reasoning watchdog, output caps, and
          command timeouts; make appropriate limits visible/configurable and
          recoverable instead of cutting off productive work without explanation.
-   - [ ] Avoid automatic deployment restarts interrupting active jobs.
+   - [x] Source-only deployment detection; drain admission and wait for active
+         requests, agent jobs, downloads and embedding backfills before restart.
+   - [ ] Activate deployment guard in the live process during the next controlled
+         restart; legacy health responses defer automatically until then.
    - [x] Preserve context accounting in reconnect snapshots; initialize counts
          before decoding and consume prompt timings; ignore stale count fetches.
    - [ ] Complete live counts for all remote/agent routes and test long turns.
@@ -70,7 +73,8 @@ weight downloads, or performance benchmarks until the user resumes that work.
 9. Verification and archival
    - [x] Add no-model regression tests and reusable mocked browser smoke script.
    - [x] Final server/media/web checks and production build for this checkpoint.
-   - [ ] Commit source and push to existing GitHub origin.
+   - [x] First source checkpoint pushed to GitHub: 2094bf4.
+   - [x] Deployment follow-up verified with simulated requests and service commands.
 
 Scope: arbitrary downloaded weights need matching runtime adapters. Unsupported
 and incomplete models must remain visibly distinct from usable ones. Metadata

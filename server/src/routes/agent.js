@@ -610,6 +610,8 @@ export function createWorkspaceRow(userId, name) {
 }
 
 /** True if this run still has a live in-process abort controller (i.e. a loop). */
+export function activeRunCount() { return runAborts.size; }
+
 export function isRunLive(runId) {
   return runAborts.has(Number(runId));
 }

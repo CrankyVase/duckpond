@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs && node test/hfassets.test.mjs && node test/livejobs.test.mjs",
+    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs && node test/hfassets.test.mjs && node test/livejobs.test.mjs && node test/deployment.test.mjs && node test/deploy-script.test.mjs",
     "test:media": "python3 -m unittest discover -s image-bridge/test -p \"*_test.py\""
   },
   "dependencies": {

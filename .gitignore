@@ -6,3 +6,8 @@ nohup.out
 .last-deploy
 __pycache__/
 *.py[cod]
+.deploy.lock
+.deploy-state.json
+.deploy-drain
+.deploy-next.*
+.deploy-health.*

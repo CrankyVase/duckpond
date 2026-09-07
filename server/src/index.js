@@ -6,12 +6,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './db.js';
 import { healOrphanedPrompts } from './chatkit.js';
-import { reapOrphans } from './downloadManager.js';
+import { createDeploymentGuard } from './deployment.js';
+import { downloadBusy, reapOrphans } from './downloadManager.js';
 import { reapIdleModels } from './llama.js';
 import { backfillMissing, pruneMemories } from './memory.js';
 import { syncStaleProviders } from './providers.js';
 import { reapIdleSandboxes } from './sandbox.js';
-import agentRoutes, { reclaimOrphanRuns, reapStaleAgentRuns } from './routes/agent.js';
+import agentRoutes, { reclaimOrphanRuns, reapStaleAgentRuns, activeRunCount } from './routes/agent.js';
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
 import costRoutes from './routes/costs.js';
@@ -43,6 +44,8 @@ process.on('unhandledRejection', (err) => { console.error('UNHANDLED_REJECTION',
 
 const app = Fastify({ logger: { level: 'info' } });
 app.log.info(`duckpond server ${versionLine()}`);
+const deployment = createDeploymentGuard({ extraBusy: () => downloadBusy() || activeRunCount() > 0 });
+deployment.install(app);
 await app.register(fastifyCookie);
 // Unauthenticated on purpose: the version footer renders on the login screen
 // too, and "which build is live?" is the first question when a deploy looks
@@ -80,7 +83,7 @@ if (existsSync(dist)) {
   });
 }
 
-app.get('/api/health', async () => ({ ok: true }));
+app.get('/api/health', async () => ({ ok: true, deployment: deployment.status() }));
 
 // VRAM reaper: fully unload models idle for 10+ minutes (router "sleeping"
 // still occupies VRAM; this actually frees it)
@@ -97,8 +100,8 @@ try { healOrphanedPrompts(app.log); } catch { /* next sweep */ }
 setInterval(() => { try { healOrphanedPrompts(app.log); } catch { /* next sweep */ } }, 5 * 60_000).unref();
 // embedding backfill: index any messages missed while the embed service was
 // down (and the whole pre-feature history on first boot)
-setTimeout(() => backfillMissing(app.log).catch(() => {}), 5_000).unref();
-setInterval(() => backfillMissing(app.log).catch(() => {}), 10 * 60_000).unref();
+setTimeout(() => deployment.runBackground(() => backfillMissing(app.log)).catch(() => {}), 5_000).unref();
+setInterval(() => deployment.runBackground(() => backfillMissing(app.log)).catch(() => {}), 10 * 60_000).unref();
 // the forgetting curve: sweep decayed-to-zero memories a few times a day
 setInterval(() => { try { pruneMemories(app.log); } catch { /* next sweep */ } }, 6 * 60 * 60_000).unref();
 // provider catalog refresh: /api/models re-syncs lazily too, this catches
