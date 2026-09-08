@@ -146,7 +146,12 @@
   // disappear for the majority of the actual catalog.
   function taskBadge(pipelineTag, kind) {
     return TASK_BADGES[String(pipelineTag ?? '').toLowerCase()]
-      ?? (kind === 'chat' ? ['Conversational', 'violet'] : null);
+      ?? (kind === 'chat' ? ['Conversational', 'violet']
+        : kind === 'image' ? ['Image Generation', 'pink']
+        : kind === 'video' ? ['Video Generation', 'pink']
+        : kind === 'audio' ? ['Audio', 'amber']
+        : kind === 'embed' ? ['Embeddings', 'slate']
+        : null);
   }
 
   // Capability filter — client-side over whatever's already loaded, so it
@@ -409,14 +414,14 @@
   // fetchMore() can re-run it with the cursor for endless scroll.
   let queryUrl = $state(null);
   function currentQueryUrl(cursor) {
-    const p = { sort: 'trendingScore', ...(cursor ? { cursor } : {}) };
     if (q.trim()) {
-      p.q = q.trim();
-      if (activeTab === 'llm') p.filter = 'gguf';
-      if (activeTab === 'image') p.pipeline_tag = 'text-to-image';
-      if (activeTab === 'audio') p.pipeline_tag = 'text-to-audio';
-      if (activeTab === 'video') p.pipeline_tag = 'text-to-video';
-      return `/api/hf/search?${new URLSearchParams(p)}`;
+      if (activeTab === 'llm') {
+        return `/api/hf/search?${new URLSearchParams({ q: q.trim(), sort: 'trendingScore', filter: 'gguf', ...(cursor ? { cursor } : {}) })}`;
+      }
+      // Image/Voice/Video each cover several HF pipeline tags (TTS is
+      // text-to-speech, not text-to-audio). Searching a single tag used to
+      // hide voice models from the Voice & music tab.
+      return `/api/hf/modality/${activeTab}?${new URLSearchParams({ q: q.trim() })}`;
     }
     return tabEndpoint(activeTab, cursor);
   }
@@ -809,8 +814,8 @@
 <div class="hub">
   <div class="head">
     <div class="title">
-      <div class="eyebrow">DISCOVER SOMETHING CAPABLE</div><h1>Model Hub<span class="title-dot">.</span></h1>
-      <p>Find your next model. Give it a home on your machine.</p>
+      <h1>Model Hub</h1>
+      <p>Discover, download, and manage your local models.</p>
     </div>
     <div class="pills">
       {#if localModels.length}
@@ -1412,8 +1417,6 @@
     display: flex; align-items: flex-start; justify-content: space-between;
     gap: 16px; margin-bottom: 26px; flex-shrink: 0; flex-wrap: wrap;
   }
-  .eyebrow { font-size:10px; letter-spacing:.14em; color:var(--text-faint); font-weight:600; }
-  .title-dot { color:var(--accent); }
   h1 { margin: 6px 0; font-size:30px; font-weight:600; letter-spacing:-1.1px; }
   .title p { margin: 4px 0 0; font-size: 13px; color: var(--text-dim); max-width: 560px; }
   .pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }

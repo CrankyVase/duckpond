@@ -76,7 +76,7 @@ export default async function hfRoutes(app) {
   });
 
   app.get('/api/hf/modality/:kind', async (req, reply) => {
-    try { return await modalityModels(req.params.kind, { limit: req.query.limit }); }
+    try { return await modalityModels(req.params.kind, { limit: req.query.limit, query: req.query.q }); }
     catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
   });
 

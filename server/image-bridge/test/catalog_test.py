@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from media_catalog import inspect_snapshot, scan_models, select_model, validate_request, pipeline_kwargs
+from media_catalog import inspect_snapshot, scan_models, select_model, validate_request, pipeline_kwargs, pipeline_task, infer_task
 
 class CatalogTests(unittest.TestCase):
     def setUp(self):
@@ -75,6 +75,54 @@ class CatalogTests(unittest.TestCase):
         validate_request({'prompt':'test','seed':0,'task':'tts'})
         for extra in ({'seed':-1},{'steps':float('nan')},{'size':'9999x9999'},{'size':'513x512'},{'task':'bogus'},{'prompt':[]},{'n':1.5}):
             with self.subTest(extra=extra), self.assertRaises(ValueError): validate_request({'prompt':'test',**extra})
+    def test_speech_pipelines_are_not_images(self):
+        for cls in ('BarkPipeline', 'SpeechT5Pipeline', 'PiperPipeline', 'VitsPipeline', 'ParlerTTSPipeline'):
+            with self.subTest(cls=cls):
+                self.assertEqual(pipeline_task(cls), 'tts', cls)
+
+    def test_music_and_video_pipelines_keep_their_tasks(self):
+        self.assertEqual(pipeline_task('AudioLDMPipeline'), 'audio')
+        self.assertEqual(pipeline_task('StableAudioPipeline'), 'audio')
+        self.assertEqual(pipeline_task('MusicLDMPipeline'), 'audio')
+        self.assertEqual(pipeline_task('LTXConditionPipeline'), 'video')
+        self.assertEqual(pipeline_task('CogVideoXPipeline'), 'video')
+        self.assertEqual(pipeline_task('StableDiffusionXLPipeline'), 'image')
+        self.assertEqual(pipeline_task('FluxPipeline'), 'image')
+
+    def test_repo_name_beats_a_generic_pipeline_class(self):
+        self.assertEqual(pipeline_task('DiffusionPipeline', 'k2-fsa/OmniVoice'), 'tts')
+        self.assertEqual(infer_task('Serveurperso/OmniVoice-GGUF'), 'tts')
+        self.assertEqual(infer_task('audio-cpp/MiniMax-Music3-GGUF'), 'audio')
+        self.assertEqual(infer_task('vantagewithai/Krea-2-Turbo-GGUF'), 'image')
+        self.assertEqual(infer_task('unsloth/LTX-2-GGUF'), 'video')
+        self.assertEqual(infer_task('openmoss-team/moss-tts-nano-100m'), 'tts')
+        self.assertIsNone(infer_task('unsloth/Qwen3.8-27B-GGUF'))
+        self.assertIsNone(infer_task('OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano'))
+
+    def test_voice_gguf_is_listed_under_speech(self):
+        self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.snap = self.root / 'models--k2-fsa--OmniVoice-GGUF' / 'snapshots' / 'revision'
+        self.snap.mkdir(parents=True)
+        self.file('model.gguf')
+        info = inspect_snapshot(self.snap, repo_id='k2-fsa/OmniVoice-GGUF')
+        self.assertEqual(info['task'], 'tts')
+        self.assertEqual(info['kind'], 'gguf')
+        self.assertFalse(info['ready'])
+
+    def test_unknown_safetensors_are_not_dumped_into_images(self):
+        self.file('mystery.safetensors')
+        self.assertIsNone(inspect_snapshot(self.snap, repo_id='someone/mystery-weights'))
+
+    def test_omnivoice_config_stays_speech_even_without_class(self):
+        self.file('config.json', {'model_type': 'omnivoice', 'architectures': ['OmniVoice']})
+        self.file('model.safetensors')
+        with patch('importlib.util.find_spec', return_value=None):
+            info = inspect_snapshot(self.snap, repo_id='k2-fsa/OmniVoice')
+        self.assertEqual(info['task'], 'tts')
+        self.assertNotEqual(info['kind'], 'single_file')
+
     def test_pipeline_specific_controls(self):
         class Flux:
             def __call__(self, prompt, width=512): pass

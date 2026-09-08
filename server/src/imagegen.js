@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
+import { mediaTask } from './modelKind.js';
 
 const BRIDGE = process.env.IMAGE_BRIDGE_URL ?? 'http://127.0.0.1:8765';
 export const IMAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'images');
@@ -101,7 +102,7 @@ export async function bridgeModels() {
   if (!health?.ok) return { available: false, models: [] };
   const models = [];
   for (const [id, info] of Object.entries(health.models ?? {})) {
-    models.push({ id, task: info.task ?? 'image', kind: info.kind ?? null, family: info.family ?? null,
+    models.push({ id, task: mediaTask(id, info.task), kind: info.kind ?? null, family: info.family ?? null,
       ready: !!info.ready, reason: info.reason ?? null, cloning: !!info.cloning,
       maxDuration: info.max_duration ?? null });
   }

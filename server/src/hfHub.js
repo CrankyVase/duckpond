@@ -116,11 +116,11 @@ const MODALITY_TAGS = {
   video: ['text-to-video', 'image-to-video'],
 };
 
-export async function modalityModels(modality, { limit = 20 } = {}) {
+export async function modalityModels(modality, { limit = 20, query = '' } = {}) {
   const tags = MODALITY_TAGS[modality];
   if (!tags) throw Object.assign(new Error('unknown modality'), { status: 400 });
   const perTag = await Promise.all(tags.map((pipelineTag) =>
-    searchModels('', { limit, sort: 'trendingScore', pipelineTag }).catch(() => ({ models: [] }))));
+    searchModels(query, { limit, sort: 'trendingScore', pipelineTag }).catch(() => ({ models: [] }))));
   const seen = new Set();
   const out = [];
   for (const { models } of perTag) {
