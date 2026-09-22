@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { checkUserContent } from '../contentFilter.js';
-import { bridgeModels, generateViaBridge, getUserImagePrefs, IMAGES_DIR, MEDIA_DIR, stepsForQuality } from '../imagegen.js';
+import { bridgePost, bridgeModels, generateViaBridge, getUserImagePrefs, IMAGES_DIR, MEDIA_DIR, stepsForQuality } from '../imagegen.js';
 import { acquireGpu } from '../gpuqueue.js';
 
 const MIME = { png: 'image/png', mp4: 'video/mp4', wav: 'audio/wav' };
@@ -19,6 +19,14 @@ export default async function imageRoutes(app) {
     const m = await bridgeModels().catch(() => ({ available: false, models: [] }));
     if (!m.available) return { available: false, models: [] };
     return { available: true, models: m.models, default_model: m.default_model ?? 'auto' };
+  });
+
+  app.post('/api/images/unload', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    const model = req.body?.model;
+    if (typeof model !== 'string' || !model) return reply.code(400).send({ error: 'model required' });
+    try { return await bridgePost('/v1/models/unload', { model }); }
+    catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
   });
 
   app.get('/api/images', async (req) => db.prepare(`
@@ -66,17 +74,18 @@ export default async function imageRoutes(app) {
 
   // SSE: {type:'progress'} phases/steps, {type:'preview', b64} frames,
   // {type:'done', images:[...]} — or {type:'error', message}.
-  app.post('/api/images/generate', { bodyLimit: 16 * 1024 * 1024 }, async (req, reply) => {
+  app.post('/api/images/generate', { bodyLimit: 48 * 1024 * 1024 }, async (req, reply) => {
     const {
       prompt, model = 'auto', size = '1024x1024', steps = null, n = 1,
-      negative = '', enhance = true, seed = null, quality = null,
-      task = 'image', numFrames = null, fps = null, audioDuration = null,
-      refAudioB64 = null, refText = null,
+      negative = '', enhance = true, seed = null, quality = null, trueCfg = null,
+      task = 'image', numFrames = null, fps = null, audioDuration = null, duration = null,
+      refAudioB64 = null, refText = null, imagesB64 = null, lyrics = null,
+      speaker = null, language = null, instruct = null,
     } = req.body ?? {};
     if (typeof prompt !== 'string' || !prompt.trim()) return reply.code(400).send({ error: 'prompt required' });
     if (!['image', 'video', 'audio', 'tts'].includes(task)) return reply.code(400).send({ error: 'unknown media task' });
 
-    const filter = checkUserContent(req.user.id, prompt, 'image');
+    const filter = checkUserContent(req.user.id, [prompt, lyrics].filter(Boolean).join('\n'), 'image');
     if (!filter.ok) {
       reply.raw.writeHead(200, {
         'content-type': 'text/event-stream',
@@ -104,6 +113,12 @@ export default async function imageRoutes(app) {
     const abort = new AbortController();
     reply.raw.on('close', () => { if (!reply.raw.writableEnded) abort.abort(); });
 
+    // SSE keep-alive: Cloudflare kills quiet connections at ~100s with a 524
+    // error page. Model loading can sit silent for minutes (worse when the
+    // bridge is struggling), so emit a ping the UI ignores until real
+    // progress flows again. Never let the stream look idle from outside.
+    const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
+
     let releaseGpu = null;
     try {
       try {
@@ -118,9 +133,10 @@ export default async function imageRoutes(app) {
         : stepsForQuality(quality || prefs.quality);
       const r = await generateViaBridge({
         userId: req.user.id, prompt, model, size,
-        steps: resolvedSteps,
+        steps: resolvedSteps, quality, trueCfg,
         n, negative, enhance, seed, task,
-        numFrames, fps, audioDuration, refAudioB64, refText,
+        numFrames, fps, audioDuration, duration, refAudioB64, refText, imagesB64, lyrics,
+        speaker, language, instruct,
         onProgress: send, signal: abort.signal,
       });
       send({
@@ -136,6 +152,7 @@ export default async function imageRoutes(app) {
       req.log.error({ err: e }, `${task} generation failed`);
       send({ type: 'error', message: e.message });
     } finally {
+      clearInterval(heartbeat);
       releaseGpu?.();
       reply.raw.end();
     }

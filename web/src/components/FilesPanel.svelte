@@ -1,12 +1,12 @@
 <script>
   // Files tab: generated images + studio, chat uploads, docs, AI exports,
   // project workspaces — delete anything, respect the 15 GB per-user cap.
+  import Duck from './Duck.svelte';
   import { api, sse } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { noAutofill } from '../lib/noAutofill.js';
   import { app } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
-  import Duck from './Duck.svelte';
   import FileText from '@lucide/svelte/icons/file-text';
   import Folder from '@lucide/svelte/icons/folder';
   import ImageIcon from '@lucide/svelte/icons/image';
@@ -65,8 +65,10 @@
       data = await api('/api/files');
       const m = await api('/api/images/models').catch(() => ({ available: false, models: [] }));
       bridgeOk = !!m.available;
-      models = m.models ?? [];
+      models = (m.models ?? []).filter(model => model.task === 'image' && model.ready);
+      bridgeOk = bridgeOk && models.length > 0;
       if (app.user?.image_model) genModel = app.user.image_model;
+      if (!models.some(model => model.id === genModel)) genModel = 'auto';
     } catch (err) {
       toast(err.message ?? 'Could not load files', 'error');
     }
@@ -220,7 +222,6 @@
 <div class="files">
   <header class="head">
     <div class="title">
-      <Duck px={1.1} mood="idle" interactive />
       <div>
         <h1>Files</h1>
         <p>Generated images, uploads, docs, and projects the AI made — 15 GB per account.</p>
@@ -259,10 +260,10 @@
   {#if loading && !data}
     <div class="empty">Loading…</div>
   {:else if tab === 'images'}
-    <section class="studio">
-      <div class="stitle"><Sparkles size={14} /> Generate</div>
+    <details class="studio">
+      <summary class="stitle"><Sparkles size={14} />Quick image creation <span>Expand controls</span></summary>
       {#if !bridgeOk}
-        <div class="hint">Image bridge offline — generation unavailable right now.</div>
+        <div class="hint">No ready image model. Open Media Studio to check model compatibility.</div>
       {/if}
 
       <div class="studio-grid">
@@ -274,13 +275,8 @@
             <label class="grow">
               <span>Image model</span>
               <select value={genModel} onchange={(e) => setPreferredModel(e.target.value)} disabled={!bridgeOk || generating}>
-                {#if !models.length}
-                  <option value="auto">auto</option>
-                {:else}
-                  {#each models as m (m.id)}
-                    <option value={m.id}>{m.id}</option>
-                  {/each}
-                {/if}
+                <option value="auto">Auto · ready image models</option>
+                {#each models as m (m.id)}<option value={m.id}>{m.id}</option>{/each}
               </select>
             </label>
             <label>
@@ -437,7 +433,7 @@
           {/if}
         </aside>
       </div>
-    </section>
+    </details>
 
     <div class="gallery">
       {#each data?.images ?? [] as im (im.id)}
@@ -561,7 +557,7 @@
   }
   .qfill {
     height: 100%; border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    background: var(--accent);
     transition: width 200ms ease;
   }
   .quota.hot .qfill { background: var(--red); }
@@ -722,7 +718,7 @@
   }
   .pfill {
     height: 100%; border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    background: var(--accent);
     transition: width 200ms ease;
   }
   .pstats {
@@ -958,4 +954,32 @@
   @media (max-width: 380px) {
     .gallery { grid-template-columns: 1fr; }
   }
+
+  .files { max-width: 1180px; }
+  .head { margin-bottom: 30px; }
+  .title p { margin-top: 8px; line-height: 1.6; }
+  .empty { margin: 20px 0; padding: 64px 24px; border: 1px dashed var(--border); border-radius: calc(10px * var(--rf)); line-height: 1.7; }
+  @media(max-width: 768px) { .files { padding: 24px 16px; } .title h1 { font-size: 25px; } }
+  .quota { background: none; border: 0; padding: 0; gap: 16px; margin-bottom: 28px; }
+  .qbar { max-width: 220px; height: 4px; }
+  .qlbl { font-family: var(--sans); font-size: 12px; }
+  .tabs { width: 100%; flex-wrap: nowrap; overflow-x: auto; border: 0; border-bottom: 1px solid var(--border-soft); border-radius: 0; background: none; gap: 24px; margin-bottom: 24px; }
+  .tabs button { flex-shrink: 0; border: 0; border-bottom: 2px solid transparent; padding: 12px 0; gap: 8px; }
+  .tabs button.on { box-shadow: none; background: none; border-bottom-color: var(--text); }
+  .tabs em { background: var(--bg-raised); padding: 0 5px; border-radius: 4px; }
+  .studio { background: var(--bg); padding: 0; border-radius: calc(10px * var(--rf)); }
+  .stitle { cursor: pointer; font-size: 13px; text-transform: none; letter-spacing: 0; padding: 16px 20px; margin: 0; color: var(--text); }
+  .stitle span { margin-left: auto; color: var(--text-faint); font-size: 11px; font-weight: 400; }
+  .stitle :global(svg) { color: var(--text-dim); }
+  .studio-grid { padding: 4px 20px 20px; }
+  .studio > .hint { padding: 0 20px 16px; }
+  .list { border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); overflow: hidden; }
+  .row { border-radius: 0; padding: 18px 20px; gap: 16px; border-bottom: 1px solid var(--border-soft); }
+  .row:last-child { border-bottom: 0; }
+  .ico { width: 38px; height: 42px; display: grid; place-items: center; border: 1px solid var(--border-soft); border-radius: calc(6px * var(--rf)); color: var(--text-dim); }
+  .name { font-size: 13px; font-weight: 500; }
+  .meta { font-size: 11px; margin-top: 4px; }
+  .row .del { opacity: .6; }
+  .row:focus-within .del { opacity: 1; }
+  @media(max-width: 768px) { .quota { flex-wrap: wrap; } .tabs { gap: 20px; } .row { padding: 16px; } }
 </style>

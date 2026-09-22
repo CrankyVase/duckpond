@@ -38,7 +38,7 @@
   <div class="fbhead">
     <ListOrdered size={13} />
     <span class="fbtitle">Fallback chain</span>
-    <span class="fbhint">a transient failure retries the next model down — before anything streams</span>
+    <span class="fbhint">Tried in order when a request fails before streaming.</span>
   </div>
   {#if chain.length}
     <div class="chips">
@@ -62,7 +62,7 @@
       {/each}
     </div>
   {:else}
-    <div class="fbempty">No chain — if a model fails, the turn just errors out.</div>
+    <div class="fbempty">No fallback models yet. Add one below to give requests another route.</div>
   {/if}
   {#if isOwner && addable.length}
     <div class="fbadd">
@@ -129,4 +129,21 @@
   .addb:hover:not(:disabled) { background: var(--accent-deep, var(--accent)); }
   .addb:disabled { opacity: 0.45; cursor: default; }
   .mono { font-family: var(--mono); }
+
+  .fb { border: 0; background: none; padding: 0; margin: 0; }
+  .fbhead { flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .fbtitle { font-size: 13px; }
+  .fbhint { width: 100%; font-size: 12px; padding-left: 21px; }
+  .chips { display: flex; flex-direction: column; gap: 0; }
+  .chip { display: flex; width: 100%; gap: 10px; border: 0; border-top: 1px solid var(--border-soft); border-radius: 0; padding: 12px 0; background: none; }
+  .chipn { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text-dim); font-weight: 500; flex-shrink: 0; }
+  .chipid { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+  .icobtn { padding: 8px; min-height: 32px; min-width: 30px; justify-content: center; }
+  .icobtn:hover:not(:disabled) { background: var(--bg-hover); }
+  .fbadd { margin-top: 18px; gap: 10px; }
+  .fbadd select { padding: 10px 12px; }
+  .addb { padding: 9px 16px; background: var(--bg-raised); color: var(--text); border: 1px solid var(--border); }
+  .addb:hover:not(:disabled) { background: var(--bg-hover); }
+  .fbempty { border: 1px dashed var(--border); border-radius: 8px; padding: 24px; text-align: center; line-height: 1.6; }
+  @media(max-width: 600px) { .icobtn { min-width: 32px; min-height: 40px; } .chip { gap: 5px; } }
 </style>

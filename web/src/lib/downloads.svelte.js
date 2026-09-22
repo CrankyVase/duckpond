@@ -2,36 +2,51 @@
 // downloads, shared across every component. Polls the server (not SSE) and
 // survives page switches because it lives outside any one panel.
 //
-// Mirrors Unsloth Studio's download-manager store (Zustand + persist), but
-// simplified: no persist across reloads — the server re-adopts on boot.
+// Ownership model: the poll loop belongs to the STORE, not to any panel.
+// Panels add/remove "users" on mount/unmount; a loop also keeps running on
+// its own while any job is live, so a download started in the Hub keeps
+// making progress in the store after you navigate away — when you come back
+// the job bar is live immediately instead of frozen at "starting…".
+import { SvelteMap } from 'svelte/reactivity';
 import { api } from './api.js';
 
 /** @type {Map<string, {state:string, repoId:string, variant:string|null, include:string|null,
  *   downloadedBytes:number, totalBytes:number|null, speedBytesPerSec:number|null,
  *   etaSec:number|null, error:string|null, startedAt:number, finishedAt:number|null,
  *   generation:number, attached?:boolean}>} */
-export const downloads = $state(new Map());
+export const downloads = new SvelteMap();
 
 let pollTimer = null;
-let polling = false;
 let inFlight = false;
 let rateMs = null;
+let users = 0; // mounted panels that want idle polling
 
-// Poll cadence: 1s while anything is running (live progress), 3s while idle
-// so a download started in another tab / on another device still shows up
-// here without a refresh. The loop stays alive the whole time the Hub is
-// mounted — the old "only poll while active" scheme let a fresh download
-// start into a dead poll loop (the previous job had already cleared the
-// interval and startPolling() early-returned), leaving the job bar frozen
-// at "starting…" until a manual refresh.
+// Poll cadence: 1s while anything is running (live progress), 3s while a
+// panel is open but idle, and no timer at all when nothing is live and no
+// panel is watching. The loop restarts itself whenever a job appears, so a
+// fresh download can never start into a dead poll loop.
 const ACTIVE_MS = 1000;
 const IDLE_MS = 3000;
 
-function restartTimer(ms) {
-  if (pollTimer != null && rateMs === ms) return;
+function hasLiveJobs() {
+  for (const j of downloads.values()) {
+    if (j.state === 'running' || j.state === 'cancelling' || j.pending) return true;
+  }
+  return false;
+}
+
+function schedule() {
+  const live = hasLiveJobs();
+  const want = live ? ACTIVE_MS : (users > 0 ? IDLE_MS : null);
+  if (want == null) {
+    if (pollTimer != null) { clearInterval(pollTimer); pollTimer = null; }
+    rateMs = null;
+    return;
+  }
+  if (pollTimer != null && rateMs === want) return;
   if (pollTimer != null) clearInterval(pollTimer);
-  rateMs = ms;
-  pollTimer = setInterval(() => { void tick(); }, ms);
+  rateMs = want;
+  pollTimer = setInterval(() => { void tick(); }, want);
 }
 
 async function tick() {
@@ -42,35 +57,44 @@ async function tick() {
     try {
       ({ jobs } = await api('/api/hf/downloads'));
     } catch {
-      if (polling) restartTimer(IDLE_MS);
+      schedule();
       return; // server unreachable — next tick retries
     }
     const next = new Map();
+    if (!Array.isArray(jobs)) throw new Error('Invalid download status');
     for (const j of jobs) {
       const key = `${j.repoId}::${j.include ?? ''}`;
       next.set(key, { ...j, key });
     }
     // Merge in any local-only jobs (started optimistically, not yet confirmed)
     for (const [key, j] of downloads) {
-      if (!next.has(key) && j.state === 'running') next.set(key, j);
+      if (next.has(key)) continue;
+      if (j.localOnly) next.set(key, j);
+      else if (j.pending) next.set(key, Date.now() - j.startedAt < 15000 ? j : {
+        ...j, pending: false, localOnly: true, state: 'error', finishedAt: Date.now(),
+        error: 'The server has not confirmed this download. Check the connection and retry.',
+      });
     }
     downloads.clear();
     for (const [key, j] of next) downloads.set(key, j);
-
-    if (polling) restartTimer([...next.values()].some((j) => j.state === 'running' || j.state === 'cancelling') ? ACTIVE_MS : IDLE_MS);
+    schedule();
+  } catch {
+    schedule();
   } finally {
     inFlight = false;
   }
 }
 
+/** A panel mounted: idle-poll while it stays open. */
 export function startPolling() {
-  polling = true;
+  users += 1;
   void tick();
 }
+
+/** A panel unmounted: keep polling only if jobs are still live. */
 export function stopPolling() {
-  polling = false;
-  if (pollTimer != null) { clearInterval(pollTimer); pollTimer = null; }
-  rateMs = null;
+  users = Math.max(0, users - 1);
+  schedule();
 }
 
 export function jobKey(repoId, include) {
@@ -82,21 +106,23 @@ export function optimisticallyAdd(repoId, { include, variant, totalBytes }) {
   const key = jobKey(repoId, include);
   downloads.set(key, {
     key, repoId, include: include ?? null, variant: variant ?? include ?? null,
-    state: 'running', downloadedBytes: 0, totalBytes: totalBytes ?? null,
+    state: 'running', pending: true, downloadedBytes: 0, totalBytes: totalBytes ?? null,
     speedBytesPerSec: null, etaSec: null, error: null,
     startedAt: Date.now(), finishedAt: null, generation: 0,
   });
-  startPolling();
+  void tick(); // confirm with the server immediately; loop self-schedules
 }
 
 export async function cancelJob(repoId, include) {
   const key = jobKey(repoId, include);
   const j = downloads.get(key);
-  if (j) { j.state = 'cancelling'; downloads.set(key, { ...j }); }
+  if (j) downloads.set(key, { ...j, state: 'cancelling' });
   try {
     await api('/api/hf/download/cancel', { method: 'POST', body: { repoId, include } });
-  } catch { /* already gone */ }
-  startPolling();
+  } catch (err) {
+    if (j) downloads.set(key, j);
+    throw err;
+  } finally { void tick(); }
 }
 
 export async function clearFinished() {
@@ -104,9 +130,16 @@ export async function clearFinished() {
   for (const [key, j] of downloads) {
     if (j.state !== 'running' && j.state !== 'cancelling') downloads.delete(key);
   }
+  schedule();
 }
 
 /** Live job for a repo+variant, or null. */
 export function getJob(repoId, include) {
   return downloads.get(jobKey(repoId, include)) ?? null;
+}
+
+/** A rejected start is a visible failure, never a permanent phantom download. */
+export function failDownload(repoId, include, error) {
+  const key = jobKey(repoId, include), job = downloads.get(key);
+  if (job) downloads.set(key, { ...job, pending: false, localOnly: true, state: 'error', error, finishedAt: Date.now() });
 }

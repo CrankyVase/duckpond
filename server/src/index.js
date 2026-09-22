@@ -1,10 +1,13 @@
 import Fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
+import fastifyWebsocket from '@fastify/websocket';
+import { projectRuntimeRoutes } from './projectRuntime.js';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import './db.js';
+import { db } from './db.js';
+import { workspacePreviewRoutes } from './workspacePreview.js';
 import { healOrphanedPrompts } from './chatkit.js';
 import { createDeploymentGuard } from './deployment.js';
 import { downloadBusy, reapOrphans } from './downloadManager.js';
@@ -20,6 +23,8 @@ import githubRoutes from './routes/github.js';
 import { BUILD, versionLine } from './version.js';
 import hfRoutes, { publicHfRoutes } from './routes/hf.js';
 import imageRoutes from './routes/images.js';
+import mediaRoutes from './routes/media.js';
+import { recoverMediaJobs, pruneMediaJobs } from './mediaJobs.js';
 import mapRoutes from './routes/maps.js';
 import modelRoutes from './routes/models.js';
 import docRoutes from './routes/docs.js';
@@ -47,6 +52,8 @@ app.log.info(`duckpond server ${versionLine()}`);
 const deployment = createDeploymentGuard({ extraBusy: () => downloadBusy() || activeRunCount() > 0 });
 deployment.install(app);
 await app.register(fastifyCookie);
+await app.register(fastifyWebsocket);
+await app.register(projectRuntimeRoutes, { workspaceExists: s => !!db.prepare('SELECT 1 FROM workspaces WHERE id = ? AND user_id = ?').get(s.workspace, s.owner) });
 // Unauthenticated on purpose: the version footer renders on the login screen
 // too, and "which build is live?" is the first question when a deploy looks
 // like it did not take.
@@ -56,7 +63,9 @@ await app.register(modelRoutes);
 await app.register(chatRoutes);
 await app.register(statsRoutes);
 await app.register(agentRoutes);
+await app.register(workspacePreviewRoutes, { workspaceExists: s => !!db.prepare('SELECT 1 FROM workspaces WHERE id = ? AND user_id = ?').get(s.workspace, s.owner) });
 await app.register(imageRoutes);
+await app.register(mediaRoutes);
 await app.register(mapRoutes);
 await app.register(publicHfRoutes);
 await app.register(hfRoutes);
@@ -118,5 +127,14 @@ try {
 // Kill any download workers orphaned by a previous DuckPond process, and
 // re-adopt their job records so the UI shows them as cancelled, not "running".
 try { reapOrphans(); } catch (err) { app.log.warn({ err }, 'download orphan reap failed'); }
+
+// Media Studio background jobs: requeue queued rows left by a restart and
+// settle running ones as cancelled-with-retry so no card hangs forever.
+try {
+  const n = recoverMediaJobs();
+  if (n) app.log.info({ n }, 'requeued media jobs on boot');
+} catch (err) { app.log.warn({ err }, 'media job recovery failed'); }
+// keep the job history bounded
+setInterval(() => { try { pruneMediaJobs(); } catch { /* next sweep */ } }, 6 * 60 * 60_000).unref();
 
 await app.listen({ port: PORT, host: HOST });

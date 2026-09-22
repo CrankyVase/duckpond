@@ -1,10 +1,9 @@
 <script>
-  // Dumpling — the DuckPond mascot. A hand-drawn 32×32 pixel duck driven by a
-  // single shared brain (mascot.svelte.js): every idle duck on the page is the
-  // same character performing the same beat, leaning toward the same point of
-  // attention. App states (props) override the brain; clicking pets him.
+  // App moods override the shared brain; previews and still poses select directly.
+  import { onMount, untrack } from 'svelte';
   import { DUCK, ANIM } from '../lib/duck.js';
   import { mind, startMascotBrain, petDuck, pokeGaze } from '../lib/mascot.svelte.js';
+  import { theme } from '../lib/theme.svelte.js';
   import Pixel from './Pixel.svelte';
 
   let {
@@ -13,90 +12,126 @@
     mood = 'idle',
     interactive = false,
     still = false,
+    preview = false,
+    paused = false,
+    replayKey = 0,
+    frameIndex = null,
   } = $props();
 
-  startMascotBrain();
+  $effect(() => {
+    if (!preview) untrack(startMascotBrain);
+  });
 
-  const IDLE = ANIM.idle;
   let frame = $state(0);
+  let hidden = $state(true);
+  let reducedMotion = $state(false);
 
-  // which animation plays: app mood wins; otherwise Dumpling's current beat.
-  // `still` pins him to the scene's first frame — for logo/mark spots where a
-  // moving duck would compete with the one animated duck on screen.
-  const anim = $derived.by(() => {
-    if (still) { const a = ANIM[mood] ?? IDLE; return { ...a, frames: [a.frames[0]], css: '' }; }
-    if (mood && mood !== 'idle') return ANIM[mood] ?? IDLE;
-    const b = mind.beat;
-    if (b && ANIM[b.name]) return ANIM[b.name];
-    return IDLE;
+  onMount(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const syncMotion = () => { reducedMotion = media.matches; };
+    const syncVisibility = () => { hidden = document.hidden; };
+    syncMotion();
+    syncVisibility();
+    media.addEventListener('change', syncMotion);
+    document.addEventListener('visibilitychange', syncVisibility);
+    return () => {
+      media.removeEventListener('change', syncMotion);
+      document.removeEventListener('visibilitychange', syncVisibility);
+    };
   });
 
-  // frame ticker at the animation's own tempo
-  $effect(() => {
-    const a = anim;
-    frame = 0;
-    if (!a || a.frames.length <= 1) return;
-    const t = setInterval(() => { frame = frame + 1; }, a.ms);
-    return () => clearInterval(t);
-  });
-
-  const map = $derived.by(() => {
-    const a = anim;
-    if (a.loop === false) {
-      // one-shots hold their final frame instead of wrapping
-      return a.frames[Math.min(frame, a.frames.length - 1)];
+  const scene = $derived.by(() => {
+    if (preview || still || (mood && mood !== 'idle')) {
+      return { name: Object.hasOwn(ANIM, mood) ? mood : 'idle', startedAt: null };
     }
-    return a.frames[frame % a.frames.length];
+    if (mind.activity && Object.hasOwn(ANIM, mind.activity)) {
+      return { name: mind.activity, startedAt: null };
+    }
+    const beat = mind.beat;
+    if (beat && Object.hasOwn(ANIM, beat.name)) {
+      return { name: beat.name, startedAt: beat.startedAt };
+    }
+    return { name: 'idle', startedAt: null };
   });
-  const sprite = $derived({ map, palette: DUCK.palette });
-  const motion = $derived(bob ? 'bob' : (anim.css || ''));
+  const anim = $derived(ANIM[scene.name]);
+  const playbackKey = $derived(`${scene.name}:${scene.startedAt ?? ''}:${preview}:${still}:${replayKey}`);
+  const pinned = $derived(frameIndex !== null && Number.isFinite(frameIndex));
+  const suspended = $derived(still || pinned || paused || hidden || reducedMotion || theme.effects.anim === 'off');
+  const finished = $derived(!preview && anim.loop === false && frame === anim.frames.length - 1);
 
-  // soft hand-off when the scene changes (frames within a scene stay crisp)
-  let swaps = $state(0);
-  let lastAnim = null;
+  // Reset only for a new performance, never for pause/resume or gaze changes.
   $effect(() => {
-    const a = anim;
-    if (lastAnim !== null && a !== lastAnim) swaps += 1;
-    lastAnim = a;
+    playbackKey;
+    frame = 0;
   });
 
-  // attention lean: Dumpling tips toward whatever he's watching (spring-eased
-  // in CSS). Sleeping ducks don't track; busy (app-mood) ducks don't either.
+  // One pending tick at most; completed one-shots leave no running timer.
+  $effect(() => {
+    playbackKey;
+    const a = anim;
+    const index = frame;
+    if (suspended || finished || a.frames.length <= 1) return;
+    const hold = preview && a.loop === false && index === a.frames.length - 1 ? 600 : 0;
+    const timer = setTimeout(() => { frame = (index + 1) % a.frames.length; }, a.ms + hold);
+    return () => clearTimeout(timer);
+  });
+
+  // An explicit frame wins even over still, for deterministic filmstrip shots.
+  const displayedFrame = $derived(pinned
+    ? Math.max(0, Math.min(anim.frames.length - 1, Math.floor(frameIndex)))
+    : still ? 0 : Math.min(frame, anim.frames.length - 1));
+  const sprite = $derived({ map: anim.frames[displayedFrame], palette: DUCK.palette });
+  const motion = $derived(bob ? 'bob' : (anim.css || ''));
+  const label = $derived(`Dumpling the duck (${scene.name})`);
+  const canPet = $derived(interactive && !preview);
+
   const lean = $derived.by(() => {
-    if (still) return 0;
-    if (mood && mood !== 'idle') return 0;
-    if (mind.hidden || mind.beat?.name === 'sleep') return 0;
+    if (preview || suspended || finished || (mood && mood !== 'idle')) return 0;
+    if (mind.activity || scene.name === 'sleep') return 0;
     return mind.gaze.x * (0.4 + mind.curiosity * 0.6);
   });
 
   function onClick(e) {
-    if (!interactive) return;
+    if (!canPet) return;
     e?.stopPropagation?.();
     petDuck();
   }
   function onEnter() {
-    if (!interactive || (mood && mood !== 'idle')) return;
+    if (!canPet || (mood && mood !== 'idle') || mind.activity) return;
     pokeGaze();
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The conditional button role and tabindex always use the same guard. -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_no_noninteractive_tabindex -->
 <span
-  class="duck {motion}"
-  class:interactive
+  class="duck"
+  class:interactive={canPet}
+  class:frozen={suspended || finished}
   style="--lean:{lean};"
-  role={interactive ? 'button' : undefined}
-  tabindex={interactive ? 0 : undefined}
-  title={interactive ? 'pet Dumpling' : undefined}
+  data-animation={scene.name}
+  data-frame={displayedFrame}
+  role={canPet ? 'button' : undefined}
+  tabindex={canPet ? 0 : undefined}
+  aria-label={canPet ? `Pet ${label}` : undefined}
+  title={canPet ? 'pet Dumpling' : undefined}
   onclick={onClick}
-  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); } }}
+  onkeydown={(e) => {
+    if (!canPet || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    if (!e.repeat) onClick(e);
+  }}
   onmouseenter={onEnter}
 >
-  <span class="lean">{#key swaps}<span class="handoff"><Pixel {sprite} {px} label="Dumpling the duck" /></span>{/key}</span>
+  {#key playbackKey}
+    <span class="pose {motion}">
+      <span class="lean"><span class="handoff"><Pixel {sprite} {px} label={canPet ? '' : label} /></span></span>
+    </span>
+  {/key}
 </span>
 
 <style>
-  .duck { display: inline-block; line-height: 0; transform-origin: 50% 85%; }
+  .duck, .pose { display: inline-block; line-height: 0; transform-origin: 50% 85%; }
   .duck.interactive { cursor: pointer; }
   .duck.interactive:hover { filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 45%, transparent)); }
   /* the attention-lean lives on an inner span so it composes with keyframes */
@@ -107,11 +142,13 @@
   }
   .handoff { display: inline-block; line-height: 0; animation: handoff 0.18s ease-out; }
   @keyframes handoff { from { opacity: 0.25; } }
-  .duck.breathe { animation: breathe 4.2s ease-in-out infinite; }
-  .duck.bob { animation: bob 2.6s ease-in-out infinite; }
-  .duck.sway { animation: sway 3.4s ease-in-out infinite; }
-  .duck.shake { animation: shake 0.32s ease-in-out infinite; }
-  .duck.hop { animation: hop 0.5s ease-in-out infinite; }
+  .pose.breathe { animation: breathe 4.2s ease-in-out infinite; }
+  .pose.bob { animation: bob 2.6s ease-in-out infinite; }
+  .pose.sway { animation: sway 3.4s ease-in-out infinite; }
+  .pose.shake { animation: shake 0.32s ease-in-out infinite; }
+  .pose.hop { animation: hop 0.5s ease-in-out infinite; }
+  .duck.frozen .pose, .duck.frozen .handoff { animation: none; }
+  .duck.frozen .lean { transform: none; transition: none; }
   @keyframes breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2%); } }
   @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5%); } }
   @keyframes sway { 0%, 100% { transform: translateX(0) rotate(0); } 50% { transform: translateX(5%) rotate(2deg); } }

@@ -1,12 +1,14 @@
 <script>
+  import { untrack } from 'svelte';
   import { api, sse, sseGet } from '../lib/api.js';
   import { prefs, savePrefs } from '../lib/prefs.svelte.js';
   import {
-    app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, newConversation, openConversation, refreshContext, visiblePath,
+    app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, localWorkspace, newConversation, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
-  import { toast } from '../lib/toast.svelte.js';
-  import ChatFiles from './ChatFiles.svelte';
+import { toast } from '../lib/toast.svelte.js';
+import { smoothScrollTo } from '../lib/motion.js';
+import ChatFiles from './ChatFiles.svelte';
   import Message from './SafeMessage.svelte';
   import RunFeed from './RunFeed.svelte';
   import Welcome from './Welcome.svelte';
@@ -21,6 +23,21 @@
   import Square from '@lucide/svelte/icons/square';
 
   let input = $state('');
+  let draftOwner = null;
+  // Save on every input change and before navigation/unmount. Using a captured
+  // store prevents a departing account's draft from being saved to another account.
+  $effect(() => {
+    const owner = app.conv?.id;
+    const user = app.user?.id;
+    const store = untrack(() => localWorkspace());
+    draftOwner = owner;
+    input = owner ? store.draft(owner) : '';
+    return () => { if (owner) store.saveDraft(owner, untrack(() => input)); };
+  });
+  $effect(() => {
+    const value = input;
+    if (draftOwner) untrack(() => localWorkspace().saveDraft(draftOwner, value));
+  });
   let inputEl = $state(null);
   let scroller = $state(null);
   let atBottom = $state(true);
@@ -104,6 +121,28 @@
     decoding: 'decoding…',
     saving: 'saving…',
   };
+  function fmtImgEta(sec) {
+    if (typeof sec !== 'number' || !Number.isFinite(sec) || sec < 0) return '';
+    const t = Math.round(sec);
+    const m = Math.floor(t / 60);
+    const s = t % 60;
+    return m ? `${m}m ${s}s` : `${s}s`;
+  }
+  function imageEtaSuffix(img) {
+    if (!img) return '';
+    const step = img.step;
+    const steps = img.steps;
+    if (!(typeof step === 'number' && step > 0 && typeof steps === 'number' && steps > 0)) return '';
+    let sec = (typeof img.etaSeconds === 'number' && Number.isFinite(img.etaSeconds) && img.etaSeconds >= 0)
+      ? img.etaSeconds
+      : null;
+    if (sec == null && img._t0) {
+      const elapsed = (Date.now() - img._t0) / 1000;
+      if (elapsed > 0) sec = (elapsed / step) * (steps - step);
+    }
+    const body = fmtImgEta(sec);
+    return body ? ` · ${body} left` : '';
+  }
   const model = $derived(app.models.find((m) => m.id === app.conv?.model_id));
   const thinkingOn = $derived(model && model.settings?.thinking !== 'none');
 
@@ -116,8 +155,14 @@
     return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
   }
   function scrollToBottom(force = false, smooth = false) {
-    if (scroller && (force || nearBottom())) {
-      scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    if (!scroller || !(force || nearBottom())) return;
+    if (smooth) {
+      // rAF glide for the jump-to-latest button — native smooth is uneven
+      // over long distances; the tween cancels itself on user input.
+      const dist = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      smoothScrollTo(scroller, scroller.scrollHeight, Math.min(650, 200 + dist * 0.12));
+    } else {
+      scroller.scrollTo({ top: scroller.scrollHeight });
     }
   }
   function onScroll() { atBottom = nearBottom(); }
@@ -150,7 +195,7 @@
     const here = app.conv?.id === convId;
     switch (ev.type) {
       case 'user_msg':
-        if (here) { app.conv.messages.push(ev.msg); app.conv.active_leaf_id = ev.msg.id; scrollToBottom(true); }
+        if (here) { if (!app.conv.messages.some(m => m.id === ev.msg.id)) app.conv.messages.push(ev.msg); app.conv.active_leaf_id = ev.msg.id; scrollToBottom(true); }
         break;
       case 'queue':
         // another user holds the GPU — ev.position is how many are ahead (0 = ours now)
@@ -170,7 +215,7 @@
         // live "tokens left": prompt baseline + what this reply has generated so far
         if (Number.isFinite(ev.promptN)) {
           ctxPromptBaseline = ev.promptN;
-          if (here) app.context.estimated = false;
+          if (here) app.context.estimated = !!ev.estimated;
         }
         if (here && ctxPromptBaseline != null && app.context.budget > 0) {
           app.context.used = Math.min(app.context.budget, ctxPromptBaseline + (ev.n ?? 0));
@@ -229,6 +274,9 @@
         } else if (e.type === 'diff') {
           if (here) app.filesVersion++;
           s.events?.push(e);
+        } else if (e.type === 'tool_output') {
+          if (here) app.filesVersion++;
+          s.events?.push(e);
         } else if (e.type === 'status') {
           if (e.status !== 'waiting_approval') s.pendingApproval = null;
         } else {
@@ -241,7 +289,7 @@
         if (raf) { cancelAnimationFrame(raf); raf = 0; pendText = ''; pendThink = ''; }
         toolBuf = null;
         if (here) {
-          app.conv.messages.push(ev.msg);
+          if (!app.conv.messages.some(m => m.id === ev.msg.id)) app.conv.messages.push(ev.msg);
           app.conv.active_leaf_id = ev.msg.id;
           if (ev.msg.run_id) app.filesVersion++;
           // chips load after the model finishes a second cheap pass
@@ -271,6 +319,8 @@
           s.image.steps = ev.steps;
           if (ev.image != null) s.image.image = ev.image;
           if (ev.n != null) s.image.n = ev.n;
+          if (typeof ev.etaSeconds === 'number' && Number.isFinite(ev.etaSeconds)) s.image.etaSeconds = ev.etaSeconds;
+          if (s.image._t0 == null && typeof ev.step === 'number' && ev.step > 0) s.image._t0 = Date.now();
         }
         break;
       case 'image_preview':
@@ -340,6 +390,11 @@
         if (here && ev.message) toast(`Generation hit an error — work kept. Say continue to pick up.`, 'error', 4200);
         break;
       case 'resume': {
+        const workspaceId = ev.workspace?.id ?? ev.run?.workspace_id;
+        if (here && workspaceId && !app.conv.workspace_id) {
+          app.conv.workspace_id = workspaceId;
+          app.filesVersion++;
+        }
         if (here && ev.context) {
           app.context = ev.context;
           ctxPromptBaseline = ev.promptN ?? ev.context.used;
@@ -643,6 +698,7 @@
       }
       // Boot / popstate path: if we attached and the job later finished, done
       // already cleared streaming. If the live socket died mid-run, endStream.
+      resuming = false;
       if (gotResume || app.streaming?.convId === convId) {
         if (app.streaming?.convId === convId) await endStream(convId);
       } else {
@@ -1091,7 +1147,7 @@
               {#if streamingHere.image.n > 1}image {streamingHere.image.image ?? 1}/{streamingHere.image.n} · {/if}
               {streamingHere.image.phase === 'denoising' && streamingHere.image.step
                 ? `step ${streamingHere.image.step}/${streamingHere.image.steps}`
-                : (IMG_PHASE[streamingHere.image.phase] ?? `${streamingHere.image.phase}…`)}
+                : (IMG_PHASE[streamingHere.image.phase] ?? `${streamingHere.image.phase}…`)}{imageEtaSuffix(streamingHere.image)}
             </span>
           </div>
         {/if}
@@ -1175,7 +1231,7 @@
       <textarea rows="1"
         placeholder={busy
           ? 'Queue a follow-up…'
-          : dragOver ? 'Drop files to attach…' : 'Message DuckPond'}
+          : dragOver ? 'Drop files to attach…' : (app.mode === 'agent' ? 'Describe a task, ask about your code…' : 'Message DuckPond')}
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
         onpaste={onComposerPaste}
         disabled={!app.conv}></textarea>
@@ -1221,7 +1277,7 @@
 <style>
   .chat { flex: 1; display: flex; min-width: 0; min-height: 0; }
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  .scroll { flex: 1; min-height: 0; overflow-y: auto; scroll-padding-bottom: 40px; -webkit-overflow-scrolling: touch; }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-bottom: 40px; -webkit-overflow-scrolling: touch; }
   .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 20px 24px 0; width: 100%; box-sizing: border-box; }
   .pad { height: 24px; }
   .agentwork {

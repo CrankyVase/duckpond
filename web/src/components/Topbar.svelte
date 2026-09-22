@@ -1,7 +1,9 @@
 <script>
   import { app } from '../lib/state.svelte.js';
   import ContextBar from './ContextBar.svelte';
+  import ModeSwitch from './ModeSwitch.svelte';
   import ModelPicker from './ModelPicker.svelte';
+  import Clapperboard from '@lucide/svelte/icons/clapperboard';
   import AudioWaveform from '@lucide/svelte/icons/audio-waveform';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -13,6 +15,7 @@
   import Settings2 from '@lucide/svelte/icons/settings-2';
 
   const VIEWS = {
+    media: { label: 'Media Studio', icon: Clapperboard },
     stats: { label: 'Stats', icon: BarChart3 },
     files: { label: 'Files', icon: Files },
     providers: { label: 'Providers', icon: Cloud },
@@ -37,6 +40,8 @@
     </button>
   {/if}
   {#if app.view === 'chat'}
+    <!-- sidebar owns the switcher when it's visible; this is the fallback -->
+    {#if app.sidebarCollapsed}<ModeSwitch compact />{/if}
     <div class="mid">
       <ModelPicker />
     </div>
@@ -75,7 +80,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
+    padding: 10px 16px;
+    min-height: 60px;
     border-bottom: 1px solid var(--border-soft);
     background: var(--bg);
     flex-shrink: 0;
@@ -90,7 +96,7 @@
     display: flex;
     align-items: center;
   }
-  .mid :global(.picker) { width: 100%; max-width: 100%; min-width: 0; }
+  .mid :global(.picker) { width: 100%; max-width: 420px; min-width: 0; }
   .spacer { flex: 1; min-width: 4px; }
   .iconb {
     padding: 7px;

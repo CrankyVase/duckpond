@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import { localModelKey, modelReadiness } from '../src/lib/modelReadiness.js';
+const a = { source:'local-dir', repoDir:'/models', variants:[{name:'a',include:'/models/a.gguf'}] };
+const b = { ...a, variants:[{name:'b',include:'/models/b.gguf'}] };
+assert.notEqual(localModelKey(a), localModelKey(b));
+assert.equal(modelReadiness(a).state, 'downloaded');
+assert.equal(modelReadiness({...a,broken:true}).state, 'incomplete');
+const row = {repoId:'owner/model'};
+assert.equal(modelReadiness(row,[{id:'owner/model',ready:false,reason:'Missing encoder'}]).detail,'Missing encoder');
+assert.equal(modelReadiness(row,[{id:'owner/model',ready:true}]).label,'Runtime available');
+assert.equal(modelReadiness(row,[{id:'different/model',ready:true}]).state,'downloaded');
+console.log('Installed model identity and evidence-based readiness passed');

@@ -21,7 +21,7 @@
 
   const TOOL_ICONS = {
     write_file: FilePenLine, edit_file: FilePenLine, read_file: FileText,
-    list_files: Folder, run_command: TerminalIcon, start_project: Rocket,
+    list_files: Folder, search_files: Folder, start_server: TerminalIcon, server_status: TerminalIcon, stop_server: TerminalIcon, run_command: TerminalIcon, start_project: Rocket,
     web_search: Globe, fetch_page: Globe, generate_image: ImageIcon,
   };
   const toolIcon = (name) => TOOL_ICONS[name] ?? Wrench;
@@ -36,12 +36,12 @@
   }
 
   function argSummary(e) {
-    return e.args?.path ?? e.args?.command ?? e.args?.name ?? '';
+    return e.args?.path ?? e.args?.query ?? e.args?.url ?? e.args?.command ?? e.args?.name ?? '';
   }
 
   // friendlier chip label for the project-mode gate call
   function toolLabel(name) {
-    return name === 'start_project' ? 'starting project' : name;
+    return ({ search_files: 'Find files', start_server: 'Start server', server_status: 'Check server', stop_server: 'Stop server', start_project: 'Start project', write_file: 'Write file', edit_file: 'Edit file', read_file: 'Read file', list_files: 'Browse files', run_command: 'Run command', web_search: 'Search the web', fetch_page: 'Read page', generate_image: 'Generate image' })[name] ?? name?.replaceAll('_', ' ');
   }
 
   // keep the live-coding block pinned to its newest line
@@ -50,6 +50,8 @@
     if (liveEl) liveEl.scrollTop = liveEl.scrollHeight;
   });
 
+  const failedResult = e => /^(ERROR:|DENIED:|unknown tool:|exit (?!0(?:\s|$)))/.test(e.result || '');
+  const showResult = e => failedResult(e) || !['run_command', 'write_file', 'edit_file', 'start_project'].includes(e.name);
   const tail = (s, n = 1600) => (s && s.length > n ? s.slice(-n) : s ?? '');
 </script>
 
@@ -64,22 +66,32 @@
         <span class="tname">{toolLabel(e.name)}</span>
         <span class="targ">{argSummary(e)}</span>
       </div>
+    {:else if e.type === 'tool_result' && showResult(e)}
+      <details class="result" class:failed={failedResult(e)} open={failedResult(e)}>
+        <summary><ChevronDown size={12} /><span>{toolLabel(e.name)}</span><span class="result-label">{failedResult(e) ? 'Needs attention' : 'View result'}</span></summary>
+        <pre>{e.result || '(no output)'}</pre>
+      </details>
     {:else if e.type === 'tool_output'}
       <div class="out">
-        <button class="outhead" onclick={() => toggleOutput(e.id)}>
+        <button class="outhead" aria-expanded={openOutputs.has(e.id ?? e)} onclick={() => toggleOutput(e.id ?? e)}>
           <TerminalIcon size={12} />
           <code class="cmd">{e.command}</code>
           <span class="exit" class:bad={e.exitCode !== 0}>{e.timedOut ? 'timeout' : `exit ${e.exitCode}`}</span>
-          <span class="chev" class:open={openOutputs.has(e.id)}><ChevronDown size={12} /></span>
+          <span class="chev" class:open={openOutputs.has(e.id ?? e)}><ChevronDown size={12} /></span>
         </button>
-        {#if openOutputs.has(e.id)}
+        {#if openOutputs.has(e.id ?? e)}
           <pre class="outbody">{e.output || '(no output)'}</pre>
         {/if}
       </div>
     {:else if e.type === 'diff'}
       <div class="diffwrap">
-        <div class="diffpath">{e.created ? 'created' : 'edited'} <code>{e.path}</code></div>
-        <DiffView before={e.before} after={e.after} created={e.created} />
+        <button class="diffhead" aria-expanded={openOutputs.has(e.id ?? e)} onclick={() => toggleOutput(e.id ?? e)}>
+          <FilePenLine size={14} />
+          <code>{e.path}</code>
+          <span class="diffkind">{e.created ? 'Created' : 'Edited'}</span>
+          <span class="chev" class:open={openOutputs.has(e.id ?? e)}><ChevronDown size={14} /></span>
+        </button>
+        {#if openOutputs.has(e.id ?? e)}<DiffView before={e.before} after={e.after} created={e.created} />{/if}
       </div>
     {:else if e.type === 'approval_request'}
       <!-- Any tool can ask now, not just run_command — so the card leads with
@@ -148,6 +160,14 @@
 </div>
 
 <style>
+  .result { border-left: 2px solid var(--border-soft); margin: 0 0 4px 10px; min-width: 0; }
+  .result.failed { border-color: var(--red); }
+  .result summary { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 8px 10px; color: var(--text-dim); font-size: 12px; list-style: none; }
+  .result summary::-webkit-details-marker { display: none; }
+  .result-label { margin-left: auto; color: var(--text-faint); font-size: 11px; }
+  .result.failed .result-label { color: var(--red); }
+  .result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; margin: 0; padding: 10px 14px; font: 11px/1.6 var(--mono); color: var(--text-dim); }
+
   .runfeed { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   /* every event settles in quietly as it arrives */
   .runfeed > * { animation: toolIn 200ms cubic-bezier(0.2, 0.7, 0.2, 1); }
@@ -216,8 +236,6 @@
   }
 
   .diffwrap { display: flex; flex-direction: column; gap: 4px; }
-  .diffpath { font-size: 11.5px; color: var(--text-faint); }
-  .diffpath code { font-family: var(--mono); color: var(--text-dim); }
 
   .appr {
     border: 1px solid color-mix(in srgb, var(--yellow) 35%, transparent);
@@ -305,4 +323,27 @@
     color: var(--text-dim);
   }
   .cmdline { color: var(--text); }
+
+  .runfeed { gap: 10px; }
+  .tool { padding: 7px 0; margin: 0; }
+  .tool.gate .tname { color: var(--text); font-weight: 550; }
+  .ticon { background: none; border: 0; color: var(--text-dim); width: 22px; }
+  .tname { font-family: var(--sans); font-size: 12px; }
+  .targ { margin-left: auto; max-width: 60%; }
+  .diffwrap { gap: 0; border: 1px solid var(--border-soft); border-radius: calc(8px * var(--rf)); overflow: hidden; }
+  .diffhead { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; border-radius: 0; background: var(--bg); padding: 12px; color: var(--text-dim); font-size: 12px; text-align: left; }
+  .diffhead:hover { background: var(--bg-hover); }
+  .diffhead code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; }
+  .diffkind { font-size: 10px; color: var(--text-faint); }
+  .diffhead :global(svg) { flex-shrink: 0; }
+  .outhead { min-height: 40px; padding: 10px 12px; }
+  .exit { border: 0; background: none; padding: 0; }
+  .exit.bad { background: none; }
+  .live { border-color: var(--border); }
+  .livepath { color: var(--text-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .livehead { padding: 10px 12px; }
+  .livecode { max-height: 160px; padding: 12px; }
+  .caret { display: none; }
+  .runnotice { background: var(--bg); border-color: var(--border-soft); padding: 10px 12px; }
+  @media(prefers-reduced-motion: reduce) { .runfeed > *, .livedot { animation: none; } }
 </style>

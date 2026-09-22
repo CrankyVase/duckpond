@@ -321,6 +321,11 @@ try { db.exec('ALTER TABLE messages ADD COLUMN run_id INTEGER'); } catch { /* ex
 try { db.exec("ALTER TABLE users ADD COLUMN allow_image_gen INTEGER NOT NULL DEFAULT 1"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE users ADD COLUMN image_quality TEXT NOT NULL DEFAULT 'medium'"); } catch { /* exists */ }
 try { db.exec('ALTER TABLE conversations ADD COLUMN workspace_id INTEGER'); } catch { /* exists */ }
+try {
+  db.exec("ALTER TABLE conversations ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'");
+  db.exec("UPDATE conversations SET mode = 'agent' WHERE workspace_id IS NOT NULL");
+} catch { /* exists */ }
+try { db.exec('ALTER TABLE workspaces ADD COLUMN host_path TEXT'); } catch { /* exists */ }
 // web-search turns: the Perplexity-style search steps + sources shown above the
 // answer, stored as JSON so the disclosure and citations survive a reload
 try { db.exec('ALTER TABLE messages ADD COLUMN search_json TEXT'); } catch { /* exists */ }
@@ -574,6 +579,49 @@ CREATE TABLE IF NOT EXISTS response_cache (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   last_hit INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_uevents_user ON usage_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uevents_day ON usage_events(created_at);
+
+-- Media Studio background jobs ("predictions"). The runner lives in the
+-- server process, NOT in any request: a job keeps generating after the
+-- browser disconnects, and the UI just polls its row for phase/step/ETA.
+CREATE TABLE IF NOT EXISTS media_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  task TEXT NOT NULL,                       -- image | video | audio | tts
+  prompt TEXT NOT NULL,
+  enhanced_prompt TEXT,                      -- light-LLM rewrite actually sent
+  model TEXT,                                -- requested model id ('auto' ok)
+  model_used TEXT,                           -- model the bridge picked
+  params TEXT NOT NULL DEFAULT '{}',         -- JSON: size/steps/seed/lyrics/…
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','running','done','error','cancelled')),
+  phase TEXT,                                -- starting | queued | generating | denoising | saving | …
+  step REAL, steps REAL,                     -- sampler progress
+  image INTEGER, n INTEGER,                  -- sample i of n for multi-output
+  eta_seconds REAL,
+  error TEXT,
+  result_ids TEXT NOT NULL DEFAULT '[]',     -- JSON array of images-table ids
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  started_at INTEGER,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_media_jobs_user ON media_jobs(user_id, id DESC);
 `);
 
+for (const [column, definition] of [['bridge_tag', 'TEXT'], ['cancel_requested', 'INTEGER NOT NULL DEFAULT 0']]) {
+  if (!db.prepare('PRAGMA table_info(media_jobs)').all().some(c => c.name === column)) {
+    db.exec(`ALTER TABLE media_jobs ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+// per-user default for the light-LLM prompt improver (0 = off)
+try { db.exec('ALTER TABLE users ADD COLUMN enhance_prompts INTEGER NOT NULL DEFAULT 1'); } catch { /* exists */ }
+
 export function nowSec() { return Math.floor(Date.now() / 1000); }
+
+if (!db.prepare('PRAGMA table_info(agent_runs)').all().some(c => c.name === 'project_key')) {
+  db.exec('ALTER TABLE agent_runs ADD COLUMN project_key TEXT');
+}
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_active_project
+  ON agent_runs(project_key) WHERE project_key IS NOT NULL AND status IN ('running','waiting_approval')`);

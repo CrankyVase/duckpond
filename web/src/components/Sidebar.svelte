@@ -29,6 +29,7 @@
   } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
+  import ModeSwitch from './ModeSwitch.svelte';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
@@ -38,6 +39,7 @@
   import PanelLeft from '@lucide/svelte/icons/panel-left';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
+  import Settings from '@lucide/svelte/icons/settings';
 
   // Build stamp — fetched once, never changes while the page is open.
   let build = $state(null);
@@ -68,14 +70,16 @@
 
   async function openChat(id) {
     app.view = 'chat';
-    await openConversation(id);
-    closeSidebarIfMobile();
+    app.modelPickerOpen = false;
+    try { await openConversation(id); closeSidebarIfMobile(); }
+    catch (e) { toast(`Could not open conversation: ${e.message}`, 'error'); }
   }
   async function goNew() {
     app.view = 'chat';
     app.themeStudioOpen = false;
-    await newConversation();
-    closeSidebarIfMobile();
+    app.modelPickerOpen = false;
+    try { await newConversation(); closeSidebarIfMobile(); }
+    catch (e) { toast(`Could not create ${app.mode === 'agent' ? 'task' : 'chat'}: ${e.message}`, 'error'); }
   }
   /** Duck brand → home: empty welcome chat, no matter where you are. */
   async function goHome() {
@@ -86,12 +90,12 @@
       closeSidebarIfMobile();
       return;
     }
-    await newConversation();
-    closeSidebarIfMobile();
+    await goNew();
   }
   function goView(v) {
     app.view = v;
     app.themeStudioOpen = false;
+    app.modelPickerOpen = false;
     closeSidebarIfMobile();
     moreOpen = false;
   }
@@ -113,6 +117,7 @@
     ];
     const out = buckets.map((b) => ({ label: b.label, items: [] }));
     for (const c of app.conversations) {
+      if ((c.mode || 'chat') !== app.mode) continue;
       const idx = buckets.findIndex((b) => b.test(c.updated_at));
       out[idx].items.push(c);
     }
@@ -193,9 +198,10 @@
     </div>
 
     <div class="top">
+      <ModeSwitch onpick={closeSidebarIfMobile} />
       <button class="new" onclick={goNew} title="New chat (Ctrl+Shift+O)">
         <SquarePen size={15} />
-        <span>New chat</span>
+        <span>New {app.mode === 'agent' ? 'task' : 'chat'}</span>
       </button>
     </div>
 
@@ -230,7 +236,7 @@
           </a>
         {/each}
       {:else}
-        <div class="none">No chats yet.</div>
+        <div class="none">No {app.mode === 'agent' ? 'tasks' : 'chats'} yet.</div>
       {/each}
     </nav>
 
@@ -244,6 +250,10 @@
           <item.icon size={14} /> {item.label}
         </a>
       {/each}
+      <a class="page" href={navHref('settings')} class:active={app.view === 'settings'}
+        onclick={(e) => { e.preventDefault(); goView('settings'); }}>
+        <Settings size={14} /> Settings
+      </a>
       {#if overflowItems.length}
         <div class="morewrap">
           <button class="page" onclick={() => (moreOpen = !moreOpen)}>
@@ -315,7 +325,7 @@
     background: transparent;
   }
   aside {
-    width: 268px; flex-shrink: 0; height: 100%; overflow: hidden;
+    width: 232px; flex-shrink: 0; height: 100%; overflow: hidden;
     background: var(--bg-sidebar); border-right: 1px solid var(--border-soft);
     transition: width 220ms ease;
     z-index: 30;
@@ -326,7 +336,7 @@
   }
   :global(html[data-sidebar='right']) aside.collapsed { border-left-color: transparent; }
   .inner {
-    width: 268px; height: 100%;
+    width: 232px; height: 100%;
     display: flex; flex-direction: column;
     min-height: 0;
   }
@@ -365,6 +375,7 @@
     display: flex; flex-direction: column; gap: 8px;
     flex-shrink: 0;
   }
+  .top :global(.modeswitch) { width: 100%; }
   .new {
     width: 100%; display: flex; align-items: center; gap: 9px;
     padding: 9px 13px; font-size: 13.5px; font-weight: 500;
@@ -584,6 +595,7 @@
       padding: 11px 14px;
       font-size: 14.5px;
     }
+    .top :global(.modeswitch) { min-height: 44px; }
 
     nav {
       flex: 1 1 auto;

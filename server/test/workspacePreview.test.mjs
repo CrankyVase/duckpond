@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Fastify from 'fastify';
+import { createPreviewStore, readPreviewAsset, workspacePreviewRoutes } from '../src/workspacePreview.js';
+const root=await mkdtemp(join(tmpdir(),'duckpond-preview-'));
+const app=Fastify();
+let time=0, exists=true;
+try {
+  await mkdir(join(root,'nested'));
+  await writeFile(join(root,'nested/index.html'),'<h1>Version one</h1>');
+  await writeFile(join(root,'nested/app.mjs'),'export const version=1;');
+  await symlink('/etc',join(root,'outside'));
+  const store=createPreviewStore({now:()=>time,ttlMs:1000});
+  const s=store.issue(root,1,3);
+  assert.equal(store.issue(root,1,3).token,s.token);
+  assert.notEqual(store.issue(root,2,3).token,s.token);
+  await app.register(workspacePreviewRoutes,{store,workspaceExists:()=>exists});
+  const base=`/api/workspace-preview/${s.token}/`;
+  let res=await app.inject(base+'nested/index.html');
+  assert.equal(res.statusCode,200);
+  assert.equal(res.headers['cache-control'],'no-store');
+  assert.equal(res.headers['access-control-allow-origin'],'*');
+  assert.match(res.headers['content-security-policy'],/sandbox allow-scripts allow-modals;/);
+  assert(!res.headers['content-security-policy'].includes('allow-same-origin'));
+  assert.match((await app.inject(base+'nested/app.mjs')).headers['content-type'],/javascript/);
+  await writeFile(join(root,'nested/index.html'),'<h1>Version two</h1>');
+  assert.match((await app.inject(base+'nested/index.html')).body,/Version two/);
+  await assert.rejects(readPreviewAsset(root,'../outside'),/Outside workspace/);
+  await assert.rejects(readPreviewAsset(root,'outside/passwd'),/Outside workspace/);
+  assert.equal((await app.inject(base+'missing.html')).statusCode,404);
+  exists=false;
+  assert.equal((await app.inject(base+'nested/index.html')).statusCode,404,'deleted workspace revokes preview');
+  exists=true; time=1001;
+  assert.equal((await app.inject(base+'nested/index.html')).statusCode,404,'expired preview is rejected');
+  console.log('Workspace preview isolation, assets, reload, traversal and expiry checks passed.');
+} finally { await app.close(); await rm(root,{recursive:true,force:true}); }

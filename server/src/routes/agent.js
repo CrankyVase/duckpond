@@ -1,3 +1,15 @@
+import { estimateAgentPrompt, agentInputLimit, calibratedPromptEstimate, trimAgentToolHistory } from '../agentContext.js';
+import { projectBrowser, closeProjectBrowser, closeBrowsers } from '../projectBrowser.js';
+import { atomicProjectWrite } from '../atomicProjectWrite.js';
+import { toolJournal } from '../toolJournal.js';
+import { summarizeRunChanges } from '../runChanges.js';
+import { modelHasVision } from '../uploads.js';
+import { resolveRemote, parseCaps } from '../providers.js';
+import { previews } from '../workspacePreview.js';
+import { projectPath, searchProject, projectBrief } from '../projectFiles.js';
+import { startProjectServer, stopProjectServer, projectServerStatus } from '../projectRuntime.js';
+import { homedir } from 'node:os';
+import { realpathSync } from 'node:fs';
 // Agentic coding workbench: workspaces (podman sandboxes), host-side file APIs,
 // and the agent run loop — an LLM tool-calling loop whose every step is a typed
 // event, stored for replay and tailed live over SSE.
@@ -39,6 +51,7 @@ const STALE_RUN_SEC = Number(process.env.AGENT_STALE_RUN_SEC ?? 45 * 60);
 // ---------- live run plumbing ----------
 
 const runSubs = new Map();      // runId -> Set<send(obj)>
+const journal = toolJournal(db);
 const runAborts = new Map();    // runId -> AbortController
 const runApprovals = new Map(); // runId -> { eventId, resolve }
 
@@ -66,12 +79,7 @@ const MAX_TREE_ENTRIES = 600;
 const MAX_FILE_BYTES = 256 * 1024;
 
 function safePath(ws, rel) {
-  const root = resolve(wsDir(ws.id));
-  // models often pass container-absolute paths like /workspace/foo.py — accept them
-  const cleaned = String(rel ?? '.').replace(/^\/?workspace\/?/, '').replace(/^\/+/, '') || '.';
-  const p = resolve(root, cleaned);
-  if (p !== root && !p.startsWith(root + '/')) throw new Error('path escapes workspace');
-  return p;
+  return projectPath(wsDir(ws.id), rel ?? '.');
 }
 
 export function listTree(ws, rel = '.') {
@@ -110,12 +118,8 @@ function readWsFile(ws, rel) {
   return buf.toString('utf8');
 }
 
-function writeWsFile(ws, rel, content) {
-  const p = safePath(ws, rel);
-  mkdirSync(dirname(p), { recursive: true });
-  const before = existsSync(p) ? (() => { try { return readWsFile(ws, rel); } catch { return null; } })() : null;
-  writeFileSync(p, content);
-  return before; // null = new or unreadable-before
+function writeWsFile(ws, rel, content, expected) {
+  return atomicProjectWrite(wsDir(ws.id), rel, content, { expected });
 }
 
 // ---------- agent loop ----------
@@ -148,6 +152,25 @@ export const GENERATE_IMAGE_TOOL = { type: 'function', function: {
 } };
 
 export const AGENT_TOOLS = [
+  { type: 'function', function: {
+    name: 'start_server', description: 'Start a managed project dev server and return its preview URL. Use Vite with --host 0.0.0.0 --port 3000 --base "$DUCKPOND_PREVIEW_BASE". The environment sets PORT and DUCKPOND_PREVIEW_BASE. Inspect server_status after starting.',
+    parameters: { type: 'object', properties: { command: { type: 'string' }, port: { type: 'integer', minimum: 3000, maximum: 3009 } }, required: ['command'] },
+  } },
+  { type: 'function', function: {
+    name: 'browser', description: 'Operate a real browser for this project: open public or LAN HTTP(S) sites, inspect accessible page structure, click, fill inputs, press keys, scroll, and capture screenshots. Every action returns a fresh page snapshot, console errors, and screenshot. Use roles/names from the snapshot or CSS selectors. Owner access only; clean browser session, no personal browser cookies. Inspect and fix the app iteratively.',
+    parameters: { type: 'object', properties: {
+      action: { type: 'string', enum: ['navigate', 'snapshot', 'click', 'fill', 'press', 'scroll', 'wait', 'screenshot', 'close'] },
+      url: { type: 'string' }, selector: { type: 'string' }, role: { type: 'string' }, name: { type: 'string' },
+      value: { type: 'string' }, key: { type: 'string' }, y: { type: 'number' }, ms: { type: 'number' },
+      width: { type: 'integer' }, height: { type: 'integer' },
+    }, required: ['action'] },
+  } },
+  { type: 'function', function: { name: 'server_status', description: 'Read project server readiness, preview URL and recent logs.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'stop_server', description: 'Stop the managed project dev server.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: {
+    name: 'search_files', description: 'Find project files by filename or search text across source files. Returns paths and line numbers. Skips dependencies, build output and symlinks.',
+    parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' }, filenames: { type: 'boolean' }, limit: { type: 'integer' } }, required: ['query'] },
+  } },
   { type: 'function', function: {
     name: 'list_files',
     description: 'List files in the workspace (recursive). Directories end with /.',
@@ -185,7 +208,7 @@ export const AGENT_TOOLS = [
   } },
   { type: 'function', function: {
     name: 'run_command',
-    description: 'Run a one-shot shell command inside the sandboxed Linux container (cwd /workspace). Node 24, Python 3.13, git available. Package installs require user approval and may be denied. Do NOT start long-running servers or bind ports — write static files for UIs; the user previews in-canvas.',
+    description: 'Run a shell command inside the project container (cwd /workspace): inspect git, install dependencies, build, or test. Use start_server for persistent dev servers. Commands obey the user permission policy.',
     parameters: { type: 'object', properties: {
       command: { type: 'string', description: 'bash command that should exit (not a server left running)' },
       timeout_sec: { type: 'number', description: 'kill after N seconds (default 120, max 900)' },
@@ -219,9 +242,11 @@ function agentSystemPrompt(ws) {
     '- Look before you leap: list or read files before editing them.',
     '- For changes to an existing file, use edit_file with exact search/replace blocks — never rewrite a whole file to change a few lines. Reserve write_file for new files or total rewrites; write complete content, never fragments or placeholders.',
     '- Big files: read a window with start_line/max_lines instead of the whole file.',
-    '- NEVER start long-running web/dev servers or bind ports (no npm run dev, vite, http.server, express listen, etc.).',
-    '- For websites, write static HTML/CSS/JS. The user previews in-canvas in DuckPond and can download files — there is no hosted preview URL.',
-    '- Verify with one-shot commands that exit (tests, node/python scripts, builds), not with servers left running.',
+    '- Search source with search_files. Read AGENTS.md and project manifests; use the existing framework and preserve unrelated changes.',
+    '- Use start_server for persistent development servers, and server_status for readiness and logs. Vite: --host 0.0.0.0 --port 3000 --base "$DUCKPOND_PREVIEW_BASE". Return the actual preview URL.',
+    '- Read project AGENTS.md, .todo/.todos and TODO.md; keep task checkboxes up to date as work is verified. Check nested instructions before editing nested folders.',
+    '- Use browser to visit your running app or the user’s LAN URL, inspect controls and console errors, test interactions, then edit and recheck. Do not claim visual verification without a browser observation.',
+    '- Verify with builds and relevant tests, inspect errors and iterate until the requested work is complete.',
     '- Package installs pause for user approval; if denied, work with what is available.',
     '- When the task is complete, reply with a short plain-text summary of what you did and how you verified it. Do not call tools in that final reply.',
   ].join('\n');
@@ -266,9 +291,20 @@ export async function gateToolCall(run, name, args) {
 }
 
 export async function execTool(run, ws, name, args, abortSignal) {
-  const denied = await gateToolCall(run, name, args);
+  const denied = await gateToolCall(run, name === 'start_server' ? 'run_command' : name, args);
   if (denied) return denied;
   switch (name) {
+    case 'browser': {
+      const owner = db.prepare('SELECT role FROM users WHERE id = ?').get(run.user_id)?.role === 'owner';
+      const result = await projectBrowser({ id: ws.id, root: wsDir(ws.id), owner }, args, abortSignal);
+      if (result.screenshot) emit(run.id, 'browser', { url: result.url, title: result.title, path: result.screenshot, errors: result.errors,
+        screenshotUrl: `/api/workspaces/${ws.id}/static/${result.screenshot}` });
+      return JSON.stringify(result);
+    }
+    case 'start_server': return JSON.stringify(await startProjectServer(ws, args.command, args.port));
+    case 'server_status': return JSON.stringify(await projectServerStatus(ws));
+    case 'stop_server': return JSON.stringify(await stopProjectServer(ws));
+    case 'search_files': return JSON.stringify(searchProject(wsDir(ws.id), args));
     case 'start_project':
       // chat-gate tool; if the model repeats it mid-run, steer it back
       return 'Project mode is already active — use list_files/read_file/write_file/run_command directly.';
@@ -292,6 +328,7 @@ export async function execTool(run, ws, name, args, abortSignal) {
       return truncateOutput(text, 24_000, 8_000).text;
     }
     case 'write_file': {
+      if (typeof args.content !== 'string') return 'ERROR: content must be a string. No file was changed. Retry with the complete file content, or use edit_file for an existing file.';
       if (!args.path) return 'ERROR: path is required (your arguments may have been truncated — retry the call with complete JSON)';
       const before = writeWsFile(ws, args.path, args.content ?? '');
       emit(run.id, 'diff', {
@@ -313,8 +350,11 @@ export async function execTool(run, ws, name, args, abortSignal) {
       // the file never ends up half-edited
       let next = text;
       for (const [i, e] of edits.entries()) {
-        const search = String(e?.search ?? '');
-        const replace = String(e?.replace ?? '');
+        if (typeof e?.search !== 'string' || typeof e?.replace !== 'string') {
+          return `ERROR: edit ${i + 1}: search and replace must both be strings. To delete text, explicitly set replace to an empty string. No changes were applied.`;
+        }
+        const search = e.search;
+        const replace = e.replace;
         if (!search) return `ERROR: edit ${i + 1}: search must be a non-empty string. No changes were applied.`;
         const first = next.indexOf(search);
         if (first < 0) {
@@ -327,7 +367,7 @@ export async function execTool(run, ws, name, args, abortSignal) {
         }
         next = next.slice(0, first) + replace + next.slice(first + search.length);
       }
-      writeWsFile(ws, args.path, next);
+      writeWsFile(ws, args.path, next, text);
       emit(run.id, 'diff', {
         path: args.path,
         before: truncateOutput(text, 40_000, 20_000).text,
@@ -503,15 +543,6 @@ function requestApproval(run, req) {
 
 // keep the transcript lean: only the newest tool outputs stay verbatim, and
 // trimmed ones keep enough head to still show WHAT failed (exit line + error)
-function trimHistory(messages, keep = 8) {
-  const toolIdx = messages.map((m, i) => (m.role === 'tool' ? i : -1)).filter((i) => i >= 0);
-  for (const i of toolIdx.slice(0, Math.max(0, toolIdx.length - keep))) {
-    if (messages[i].content.length > 900) {
-      messages[i] = { ...messages[i], content: messages[i].content.slice(0, 800) + '\n[older output trimmed]' };
-    }
-  }
-}
-
 // ---------- mid-run compaction (context wall during coding) ----------
 // A long build can outgrow the context window while the model is mid-task.
 // Compacting must NOT reset it to "hello, what shall I build?" — the brief
@@ -633,6 +664,8 @@ export function reclaimOrphanRuns({ olderThanSec = 0, workspaceId = null, log } 
   for (const row of rows) {
     if (isRunLive(row.id)) continue;
     if (olderThanSec > 0 && (now - (row.created_at ?? 0)) < olderThanSec) continue;
+    const unknownTools = journal.interrupt(row.id);
+    if (unknownTools) emit(row.id, 'error', { message: 'Interrupted tool outcome is unknown. Inspect project changes and running processes before retrying.', needs_reconciliation: true });
     db.prepare(`UPDATE agent_runs SET status = 'error', finished_at = unixepoch() WHERE id = ?`)
       .run(row.id);
     runApprovals.get(row.id)?.finish(false, 'orphaned run reclaimed');
@@ -643,6 +676,9 @@ export function reclaimOrphanRuns({ olderThanSec = 0, workspaceId = null, log } 
 }
 
 export function createRun(workspaceId, userId, modelId, task) {
+  const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(workspaceId, userId);
+  if (!workspace) throw Object.assign(new Error('Project not found'), { code: 404 });
+  const projectKey = realpathSync(wsDir(workspaceId));
   // Free the slot if a previous crash left a "running" row with no live loop.
   reclaimOrphanRuns({ workspaceId });
   const active = db.prepare(`SELECT id FROM agent_runs WHERE workspace_id = ?
@@ -655,9 +691,19 @@ export function createRun(workspaceId, userId, modelId, task) {
       throw Object.assign(new Error('a run is already active in this workspace'), { code: 409 });
     }
   }
-  const r = db.prepare('INSERT INTO agent_runs (workspace_id, user_id, model_id, task) VALUES (?, ?, ?, ?)')
-    .run(workspaceId, userId, modelId, task.slice(0, 2000));
-  return db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(r.lastInsertRowid);
+  let r;
+  try {
+    r = db.prepare('INSERT INTO agent_runs (workspace_id, user_id, model_id, task, project_key) VALUES (?, ?, ?, ?, ?)')
+      .run(workspaceId, userId, modelId, task.slice(0, 2000), projectKey);
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') throw Object.assign(new Error('Another task is already working in this source folder. Wait for it to finish or stop it first.'), { code: 409 });
+    throw err;
+  }
+  const run = db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(r.lastInsertRowid);
+  // Reserve immediately, before the caller reaches its first asynchronous step.
+  // Otherwise a second admission can misclassify this newborn run as orphaned.
+  runAborts.set(Number(run.id), new AbortController());
+  return run;
 }
 
 export function finishRun(runId, status) {
@@ -704,6 +750,14 @@ export async function agentLoop({
   run, ws, messages, model, genParams = {}, abortSignal, firstResult = null, tools = AGENT_TOOLS,
   ctxBudget = null,
 }) {
+  const brief = projectBrief(wsDir(ws.id));
+  if (brief) {
+    const context = `\n\nProject instructions and task files at the start of this run (read updated files as needed):\n${brief}`;
+    if (messages[0]?.role === 'system') messages[0] = { ...messages[0], content: messages[0].content + context };
+    else messages.unshift({ role: 'system', content: context });
+  }
+  const remote = resolveRemote(model);
+  const canSee = remote ? !!parseCaps(remote.model?.caps_json).vision : modelHasVision(model);
   const callStream = () => streamChat({
     model, messages,
     params: { tools, tool_choice: 'auto', ...genParams },
@@ -712,6 +766,10 @@ export async function agentLoop({
       if (text) emit(run.id, 'delta', { text }, { store: false });
       else if (meta?.reasoning) emit(run.id, 'delta', { reasoning: meta.reasoning }, { store: false });
       else if (meta?.toolFrag) emit(run.id, 'tool_delta', meta.toolFrag, { store: false });
+      if (meta?.timings) emit(run.id, 'tok_s', {
+        value: meta.timings.predicted_per_second ?? null, n: meta.timings.predicted_n ?? 0,
+        promptN: meta.timings.prompt_n, estimated: !!meta.timings.estimated,
+      }, { store: false });
     },
   });
   const emitContext = (res) => {
@@ -730,24 +788,33 @@ export async function agentLoop({
     return ok;
   };
   let lastUsed = 0;
+  let lastEstimate = 0;
+  const inputLimit = agentInputLimit(ctxBudget, genParams.max_tokens ?? genParams.max_completion_tokens);
   for (let step = 0; step < MAX_STEPS; step++) {
     if (abortSignal?.aborted) return { status: 'aborted' };
-    trimHistory(messages);
-    if (ctxBudget > 0 && lastUsed > ctxBudget * 0.92) {
-      await maybeCompact('nearly full');
-      lastUsed = 0; // re-measured from the next response
+    trimAgentToolHistory(messages);
+    let estimate = estimateAgentPrompt(messages, tools);
+    const projected = calibratedPromptEstimate(estimate, lastEstimate, lastUsed);
+    if (ctxBudget > 0 && projected > inputLimit && !(step === 0 && firstResult)) {
+      if (await maybeCompact('nearly full')) {
+        lastUsed = 0;
+        lastEstimate = 0;
+        estimate = estimateAgentPrompt(messages, tools);
+      }
     }
     let res;
     try {
       res = (step === 0 && firstResult) ? firstResult : await callStream();
     } catch (err) {
       if (!abortSignal?.aborted && isContextOverflow(err) && await maybeCompact('overflowed')) {
+        estimate = estimateAgentPrompt(messages, tools);
         res = await callStream();
       } else {
         throw err;
       }
     }
-    lastUsed = emitContext(res) ?? lastUsed;
+    lastUsed = emitContext(res) ?? 0;
+    lastEstimate = estimate;
 
     if (!res.toolCalls?.length) {
       return { status: 'final', content: res.content, reasoning: res.reasoning,
@@ -760,6 +827,7 @@ export async function agentLoop({
       step,
     });
     messages.push({ role: 'assistant', content: res.content ?? '', tool_calls: res.toolCalls });
+    const screenshots = [];
     for (const tc of res.toolCalls) {
       if (abortSignal?.aborted) return { status: 'aborted' };
       let args = null;
@@ -769,14 +837,32 @@ export async function agentLoop({
       if (args === null) {
         result = 'ERROR: your tool call arguments were not valid JSON (possibly truncated). Retry the call with complete, well-formed arguments.';
       } else {
-        try { result = await execTool(run, ws, tc.function.name, args, abortSignal); }
-        catch (err) { result = `ERROR: ${err.message}`; }
+        // Durable receipt precedes the side effect. If dispatch or settlement
+        // crashes, recovery records an unknown outcome rather than replaying it.
+        const receipt = journal.begin(run.id, tc.id, tc.function.name, args);
+        if (receipt.replay) result = receipt.result;
+        else {
+          try { result = await execTool(run, ws, tc.function.name, args, abortSignal); }
+          catch (err) { result = `ERROR: ${err.message}`; }
+          journal.complete(run.id, tc.id, result);
+        }
       }
       emit(run.id, 'tool_result', {
         call_id: tc.id, name: tc.function.name, step,
         result: truncateOutput(result, 4000, 2000).text,
       });
       messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+      if (canSee && tc.function.name === 'browser') {
+        try {
+          const observation = JSON.parse(result);
+          if (observation.screenshot) screenshots.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${readFileSync(projectPath(wsDir(ws.id), observation.screenshot)).toString('base64')}` } });
+        } catch { /* an unsuccessful browser action has no screenshot */ }
+      }
+    }
+    if (screenshots.length) {
+      // Keep the latest browser pixels; older observations remain as text to conserve context.
+      for (const msg of messages) if (msg.browserObservation) msg.content = '[Earlier browser screenshot omitted; see its tool snapshot.]';
+      messages.push({ role: 'user', browserObservation: true, content: [{ type: 'text', text: 'Browser screenshots from the preceding actions. Inspect the rendered result, fix any problems, and continue the task.' }, ...screenshots.slice(-2)] });
     }
   }
   emit(run.id, 'error', { message: `hit the ${MAX_STEPS}-step limit without finishing` });
@@ -838,7 +924,20 @@ function wsForUser(id, userId) {
 }
 
 export default async function agentRoutes(app) {
+  app.addHook('onClose', async () => closeBrowsers());
   app.addHook('preHandler', requireAuth);
+  app.get('/api/workspaces/:id/server', async (req, reply) => {
+    const ws = wsForUser(req.params.id, req.user.id);
+    if (!ws) return reply.code(404).send({ error: 'Project not found' });
+    return projectServerStatus(ws);
+  });
+
+  app.post('/api/workspaces/:id/preview-session', async (req, reply) => {
+    const ws = wsForUser(req.params.id, req.user.id);
+    if (!ws) return reply.code(404).send({ error: 'not found' });
+    const session = previews.issue(wsDir(ws.id), req.user.id, ws.id);
+    return { base: `/api/workspace-preview/${session.token}/`, expiresAt: session.expiresAt };
+  });
 
   app.get('/api/workspaces', async (req) =>
     db.prepare(`SELECT w.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.workspace_id = w.id) AS runs
@@ -848,6 +947,19 @@ export default async function agentRoutes(app) {
     const name = String(req.body?.name ?? '').trim().slice(0, 60) || 'untitled';
     const count = db.prepare('SELECT COUNT(*) c FROM workspaces WHERE user_id = ?').get(req.user.id).c;
     if (count >= MAX_WORKSPACES) return reply.code(400).send({ error: `limit of ${MAX_WORKSPACES} workspaces` });
+    if (req.body?.host_path) {
+      if (req.user.role !== 'owner') return reply.code(403).send({ error: 'Only the owner can connect host folders' });
+      try {
+        const root = realpathSync(String(req.body.host_path));
+        const home = realpathSync(homedir());
+        if (root === home || root === '/' || !statSync(root).isDirectory()) throw new Error('Choose a project directory, not the home or filesystem root');
+        const existing = db.prepare('SELECT * FROM workspaces WHERE user_id = ? AND host_path = ?').get(req.user.id, root);
+        if (existing) return existing;
+        const ws = createWorkspaceRow(req.user.id, name);
+        db.prepare('UPDATE workspaces SET host_path = ? WHERE id = ?').run(root, ws.id);
+        return { ...ws, host_path: root };
+      } catch (e) { return reply.code(400).send({ error: e.message }); }
+    }
     return createWorkspaceRow(req.user.id, name);
   });
 
@@ -857,6 +969,7 @@ export default async function agentRoutes(app) {
     const running = db.prepare(`SELECT 1 FROM agent_runs WHERE workspace_id = ?
                                 AND status IN ('running','waiting_approval')`).get(ws.id);
     if (running) return reply.code(409).send({ error: 'a run is active in this workspace' });
+    await closeProjectBrowser(ws.id);
     await destroyWorkspace(ws.id);
     db.prepare('DELETE FROM workspaces WHERE id = ?').run(ws.id);
     return { ok: true };
@@ -942,7 +1055,8 @@ export default async function agentRoutes(app) {
     reply.hijack();
     reply.raw.writeHead(200, {
       'content-type': type,
-      'cache-control': 'no-cache',
+      'cache-control': 'no-store',
+      'content-security-policy': 'sandbox allow-scripts allow-modals',
       'x-content-type-options': 'nosniff',
     });
     createReadStream(p).pipe(reply.raw);
@@ -971,6 +1085,15 @@ export default async function agentRoutes(app) {
   function runForUser(id, userId) {
     return db.prepare('SELECT * FROM agent_runs WHERE id = ? AND user_id = ?').get(id, userId);
   }
+
+  app.get('/api/runs/:id/changes', async (req, reply) => {
+    const run = runForUser(req.params.id, req.user.id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    const rows = db.prepare("SELECT id, json FROM agent_events WHERE run_id = ? AND type = 'diff' ORDER BY id LIMIT 501").all(run.id);
+    return { run: { id:run.id, workspace_id:run.workspace_id, status:run.status },
+      files:summarizeRunChanges(rows.slice(0,500)), truncated:rows.length > 500,
+      scope:'Recorded file-tool edits for this run. Large contents may be shortened; shell and external edits are not included.' };
+  });
 
   // SSE: replay stored events (optionally after ?after=<eventId>), then tail live
   app.get('/api/runs/:id/events', async (req, reply) => {
@@ -1038,7 +1161,8 @@ export default async function agentRoutes(app) {
     reply.raw.writeHead(200, {
       'content-type': 'application/octet-stream',
       'content-disposition': `attachment; filename="${safeName}"`,
-      'cache-control': 'no-cache',
+      'cache-control': 'no-store',
+      'content-security-policy': 'sandbox allow-scripts allow-modals',
       'x-content-type-options': 'nosniff',
     });
     createReadStream(p).pipe(reply.raw);

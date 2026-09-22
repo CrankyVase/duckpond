@@ -95,7 +95,7 @@ export function applyLiveEvent(job, ev) {
     case 'tok_s':
       if (Number.isFinite(ev.promptN)) {
         s.promptN = ev.promptN;
-        if (s.context) s.context.estimated = false;
+        if (s.context) s.context.estimated = !!ev.estimated;
       }
       if (s.context && Number.isFinite(s.promptN)) {
         s.context.used = Math.min(s.context.budget, s.promptN + (ev.n ?? 0));
@@ -115,6 +115,7 @@ export function applyLiveEvent(job, ev) {
     }
     case 'agent_start':
       s.run = ev.run;
+      s.workspace = ev.workspace ?? null;
       s.events = [];
       break;
     case 'agent': {

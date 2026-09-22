@@ -1,11 +1,12 @@
 <script>
   // Always-visible current model, grouped switcher with VRAM eject and
-  // (owner-only) disk delete. No search box — password managers kept
-  // autofilling into it. Grouped list + Ctrl+K gets you there just as fast.
+  // (owner-only) disk delete. Search and source filters keep large catalogs usable.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
+  import Search from '@lucide/svelte/icons/search';
+  import { tick } from 'svelte';
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Info from '@lucide/svelte/icons/info';
@@ -15,6 +16,9 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
 
   let hoverIdx = $state(0);
+  let query = $state('');
+  let source = $state('all');
+  let searchEl = $state(null);
   let unloading = $state(null);   // model id mid-unload
   let deleting = $state(null);    // model id mid-delete
 
@@ -45,9 +49,11 @@
     return s;
   }
 
-  // Whole list, in the grouped order below. No text filter.
+  // Search within the selected source; retain provider groups below.
   // Array guard: a bad /api/models payload must never break the derived.
-  const filtered = $derived(Array.isArray(app.models) ? app.models : []);
+  const filtered = $derived((Array.isArray(app.models) ? app.models : []).filter(m =>
+    (source === 'all' || (source === 'local' ? !m.remote : m.remote)) &&
+    `${dispName(m)} ${m.provider?.name ?? ''}`.toLowerCase().includes(query.toLowerCase().trim())));
 
   // Favorites first (stars from Providers curation + your default), then Local,
   // then one group per provider — providers + their models alphabetically.
@@ -76,25 +82,31 @@
     return [...out, ...provs];
   });
 
+  const ordered = $derived(groups.flatMap(g => g.items));
   $effect(() => {
     if (app.modelPickerOpen) {
-      hoverIdx = filtered.findIndex((m) => m.id === app.conv?.model_id);
-      if (hoverIdx < 0) hoverIdx = 0;
+      query = ''; source = 'all';
+      tick().then(() => searchEl?.focus());
     }
   });
-
-  // Keyboard nav lives on the window while open — there's no input to
-  // capture focus anymore, and window-level means Ctrl+K/Escape/arrows all
-  // work regardless of what has focus.
+  $effect(() => {
+    void query; void source;
+    hoverIdx = ordered.find(x => x.m.id === app.conv?.model_id)?.i ?? ordered[0]?.i ?? 0;
+  });
   let listEl = $state(null);
   $effect(() => {
     if (!app.modelPickerOpen) return;
-    const onKey = (e) => {
-      if (e.key === 'Escape') { app.modelPickerOpen = false; e.preventDefault(); }
-      else if (e.key === 'ArrowDown') { hoverIdx = Math.min(hoverIdx + 1, filtered.length - 1); e.preventDefault(); }
-      else if (e.key === 'ArrowUp') { hoverIdx = Math.max(hoverIdx - 1, 0); e.preventDefault(); }
-      else if (e.key === 'Enter' && filtered[hoverIdx]) { pick(filtered[hoverIdx]); e.preventDefault(); }
+    const onKey = async (e) => {
+      if (e.key === 'Escape') { app.modelPickerOpen = false; e.preventDefault(); return; }
+      // Let individual action buttons and filter controls use their own Enter key.
+      if (e.target !== searchEl && e.target?.closest('button, a, select')) return;
+      const pos = ordered.findIndex(x => x.i === hoverIdx);
+      if (e.key === 'ArrowDown') hoverIdx = ordered[Math.min(pos + 1, ordered.length - 1)]?.i ?? 0;
+      else if (e.key === 'ArrowUp') hoverIdx = ordered[Math.max(pos - 1, 0)]?.i ?? 0;
+      else if (e.key === 'Enter' && filtered[hoverIdx]) { pick(filtered[hoverIdx]); e.preventDefault(); return; }
       else return;
+      e.preventDefault();
+      await tick();
       listEl?.querySelector('.opt.hover')?.scrollIntoView({ block: 'nearest' });
     };
     window.addEventListener('keydown', onKey);
@@ -128,7 +140,7 @@
         setTimeout(loadModels, 2500);
       } else if (prevLocal) {
         // leaving a local model for a remote one — free the VRAM right away
-        api(`/api/models/${prevLocal.id}/unload`, { method: 'POST', body: {} })
+        api(`/api/models/${encodeURIComponent(prevLocal.id)}/unload`, { method: 'POST', body: {} })
           .catch(() => { /* idle reaper gets it in 10 min */ });
         setTimeout(loadModels, 2500);
       }
@@ -165,7 +177,7 @@
     e.stopPropagation();          // don't select the model, just unload it
     unloading = m.id;
     try {
-      await api(`/api/models/${m.id}/unload`, { method: 'POST', body: {} });
+      await api(`/api/models/${encodeURIComponent(m.id)}/unload`, { method: 'POST', body: {} });
       toast(`${m.id} unloaded from VRAM`, 'ok');
     } catch (err) {
       toast(String(err.message ?? err), 'error');
@@ -184,7 +196,7 @@
     e.stopPropagation();          // don't select the model, just load it
     loading = m.id;
     try {
-      await api(`/api/models/${m.id}/load`, { method: 'POST', body: {} });
+      await api(`/api/models/${encodeURIComponent(m.id)}/load`, { method: 'POST', body: {} });
       toast(`${m.id} loading into VRAM`, 'ok');
     } catch (err) {
       toast(String(err.message ?? err), 'error');
@@ -255,9 +267,9 @@
 
 <div class="picker">
   <button class="current" onclick={() => (app.modelPickerOpen = !app.modelPickerOpen)}
-    title="Switch model (Ctrl+K)">
+    title="Switch model (Ctrl+K)" aria-expanded={app.modelPickerOpen}>
     <span class="dot" style="background:{dot(current?.status)}"></span>
-    <span class="name">{dispName(current) ?? stripRemote(app.conv?.model_id) ?? 'Pick a model'}</span>
+    <span class="name">{dispName(current) || stripRemote(app.conv?.model_id) || 'Pick a model'}</span>
     <span class="chev" class:flip={app.modelPickerOpen}><ChevronDown size={14} /></span>
   </button>
 
@@ -265,7 +277,14 @@
     <div class="backdrop" onclick={() => (app.modelPickerOpen = false)} role="presentation"></div>
     <svelte:boundary onerror={menuCrashed}>
       <div class="menu slide-up">
-        <div class="list" bind:this={listEl} role="listbox">
+        <div class="picker-heading"><strong>Choose a model</strong><span>{filtered.length} available</span></div>
+        <label class="model-search"><Search size={15} /><input type="search" placeholder="Search models…" aria-label="Find a model" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" bind:value={query} bind:this={searchEl} /></label>
+        <div class="source-tabs" aria-label="Model source">
+          {#each [['all', 'All models'], ['local', 'Local'], ['remote', 'Remote']] as [value, label]}
+            <button class:active={source === value} aria-pressed={source === value} onclick={() => source = value}>{label}</button>
+          {/each}
+        </div>
+        <div class="list" bind:this={listEl} role="listbox" aria-label="Available models">
           {#each groups as g (g.key)}
             {#if groups.length > 1}
               <div class="gh">{g.label}</div>
@@ -274,7 +293,7 @@
             <div class="opt" class:hover={i === hoverIdx} class:sel={m.id === app.conv?.model_id}
               onclick={() => pick(m)} onmouseenter={() => (hoverIdx = i)}
               role="option" aria-selected={m.id === app.conv?.model_id} tabindex="-1"
-              onkeydown={(e) => e.key === 'Enter' && pick(m)}>
+              onkeydown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) { e.stopPropagation(); pick(m); } }}>
               <span class="dot" style="background:{dot(m.status)}"></span>
               <span class="col">
                 <span class="oname">{dispName(m)}</span>
@@ -298,9 +317,6 @@
                   {#if m.caps.tools}<span class="cap" title="Can call tools — search, files, GitHub">tools</span>{/if}
                   {#if m.caps.free}<span class="cap free" title="Free to use">free</span>{/if}
                 </span>
-              {/if}
-              {#if m.remote}
-                <span class="ptag">{m.provider?.name ?? 'remote'}</span>
               {/if}
               {#if m.card?.url}
                 <a class="info" href={m.card.url} target="_blank" rel="noreferrer"
@@ -429,14 +445,6 @@
     white-space: nowrap;
   }
   .cap.free { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
-  .ptag {
-    flex-shrink: 0;
-    font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
-    color: var(--accent); background: var(--accent-glow);
-    border: 1px solid var(--accent-dim);
-    border-radius: 999px; padding: 2px 8px;
-    max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
   .check { color: var(--accent); display: grid; place-items: center; }
   .info {
     all: unset; cursor: help;
@@ -479,5 +487,35 @@
   }
   @media (max-width: 768px) {
     .foot { display: none; } /* keyboard hints mean nothing on touch */
+  }
+
+  .menu { width: 580px; max-width: min(580px, calc(100vw - 32px)); max-height: min(640px, 80dvh); padding: 0; border-radius: calc(12px * var(--rf)); background: var(--bg); }
+  .picker-heading { display: flex; align-items: center; justify-content: space-between; padding: 18px 18px 12px; }
+  .picker-heading strong { font-size: 14px; font-weight: 550; }
+  .picker-heading > span { font-size: 11px; color: var(--text-faint); }
+  .model-search { display: flex; align-items: center; gap: 10px; margin: 0 16px; border: 1px solid var(--border); border-radius: calc(7px * var(--rf)); padding: 0 12px; color: var(--text-dim); background: var(--bg-input); }
+  .model-search input { border: 0; border-radius: 0; background: none; outline: none; box-shadow: none; min-width: 0; width: 100%; padding: 10px 0; font-size: 13px; }
+  .model-search:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .source-tabs { display: flex; gap: 16px; margin: 10px 16px 0; border-bottom: 1px solid var(--border-soft); }
+  .source-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px 0; font-size: 12px; color: var(--text-dim); }
+  .source-tabs button.active { color: var(--text); border-bottom-color: var(--text); }
+  .list { padding: 6px; min-height: 0; }
+  .gh { padding: 14px 12px 6px; }
+  .opt { position: relative; min-height: 66px; padding: 12px; gap: 9px; }
+  .meta { font-family: var(--sans); margin-top: 5px; font-size: 11px; }
+  .opt.sel .oname { color: var(--text); font-weight: 550; }
+  .info, .star, .eject { flex-shrink: 0; width: 28px; height: 28px; }
+  .opt:focus-within .info, .opt:focus-within .star { opacity: 1; }
+  .caps { position: absolute; bottom: 8px; left: 28px; }
+  .opt:has(.caps) { padding-bottom: 32px; }
+  .cap { border: 0; padding: 0 6px 0 0; font-size: 10px; }
+  .foot { margin: 0; padding: 12px 18px; }
+  @media(max-width: 768px) {
+    .menu { width: auto; max-width: none; left: 8px; right: 8px; max-height: 75dvh; }
+    .picker-heading { padding: 16px; }
+    .opt { padding-left: 8px; padding-right: 8px; gap: 5px; }
+    .info, .star, .eject { width: 30px; height: 36px; opacity: 1; }
+    .meta { overflow-wrap: anywhere; }
+    .oname { font-size: 12px; }
   }
 </style>

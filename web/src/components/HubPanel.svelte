@@ -13,12 +13,15 @@
   // through /api/hf/* — the browser only renders it.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
-  import { downloads, getJob, jobKey, optimisticallyAdd, cancelJob, clearFinished, startPolling, stopPolling } from '../lib/downloads.svelte.js';
+  import { downloads, failDownload, getJob, jobKey, optimisticallyAdd, cancelJob, clearFinished, startPolling, stopPolling } from '../lib/downloads.svelte.js';
   import { prefs } from '../lib/prefs.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import { resolveHubLogo, cardGlow } from '../lib/hubLogos.js';
   import { renderHubReadme } from '../lib/hubReadme.js';
+  import { localModelKey, modelReadiness } from '../lib/modelReadiness.js';
+  import { imgFade, reveal, scrollFade, smoothScrollTo } from '../lib/motion.js';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -53,7 +56,12 @@
 
   let hw = $state(null);
   let mediaModels = $state([]);
-  api('/api/images/models').then((m) => (mediaModels = m.models ?? [])).catch(() => {});
+  let mediaAvailable = $state(false);
+  async function refreshRuntime() {
+    try { const m = await api('/api/images/models'); mediaModels = m.models ?? []; mediaAvailable = !!m.available; }
+    catch { mediaAvailable = false; }
+  }
+  void refreshRuntime();
   function openStudio(id) { sessionStorage.setItem('dp:media-selection', id); app.view = 'media'; }
   let recModels = $state([]);
   let recLoading = $state(false);
@@ -258,20 +266,43 @@
   let localTotalBytes = $state(0);
   let localLoading = $state(false);
   let localDeleting = $state(null); // `${repoDir}::${include}` mid-delete
+  let localQuery = $state('');
+  let localFilter = $state('all');
+  let localError = $state('');
+  const installedRows = $derived(localModels.filter(row => {
+    const info = modelReadiness(row, mediaModels, mediaAvailable);
+    const text = [row.repoId, ...(row.variants || []).map(v => v.name)].join(' ').toLowerCase();
+    return text.includes(localQuery.toLowerCase().trim()) && (localFilter === 'all'
+      || (localFilter === 'attention' && ['setup','incomplete'].includes(info.state))
+      || (localFilter === 'ready' && info.state === 'ready'));
+  }));
+
+  async function inspectInstalled(row) {
+    if (!row.repoId) return;
+    const runtime = mediaModels.find(m => m.id === row.repoId);
+    activeTab = runtime?.task === 'video' ? 'video' : runtime?.task === 'image' ? 'image'
+      : ['audio','tts'].includes(runtime?.task) ? 'audio' : 'llm';
+    taskFilter = ''; sizeFilter = ''; formatFilter = ''; typeFilter = 'all';
+    mode = 'discover'; q = row.repoId;
+    results = [{ id: row.repoId, kind: activeTab === 'llm' ? 'chat' : activeTab }];
+    searched = true; hasMore = false;
+    await select(row.repoId);
+  }
 
   async function loadLocal() {
     localLoading = true;
+    localError = '';
     try {
       const r = await api('/api/hf/local');
       localModels = r.models;
       localTotalBytes = r.totalBytes;
-    } catch (e) { toast(e.message ?? 'failed to load local models', 'error'); }
+    } catch (e) { localError = e.message ?? 'Failed to load local models'; }
     localLoading = false;
   }
 
   function setMode(m) {
     mode = m;
-    if (m === 'my-models' && !localModels.length) void loadLocal();
+    if (m === 'my-models') { void loadLocal(); void refreshRuntime(); }
   }
 
   // Downloads tab — every job the server knows about (running, queued,
@@ -524,6 +555,17 @@
     await fetchMore();
   }
 
+  // After a new query the list restarts from the top — scroll it back there
+  // smoothly once the first page paints, instead of leaving the pane parked
+  // deep in the previous search's rows.
+  let lastQueryStamp = 0;
+  $effect(() => {
+    const stamp = querySequence;
+    if (stamp === lastQueryStamp) return;
+    lastQueryStamp = stamp;
+    if (listEl && !searching) smoothScrollTo(listEl, 0, 260);
+  });
+
   $effect(() => {
     if (!sentinelEl) return;
     const io = new IntersectionObserver((ents) => {
@@ -591,9 +633,12 @@
     if (!force && variants.has(repoId)) return;
     variants.set(repoId, { loading: true });
     variants = new Map(variants);
+    // Capture the tab at request time — the user may switch Image → Voice
+    // while the fetch is in flight, and the pick must not follow the tab.
+    const tabAtStart = activeTab;
     try {
       const v = await api(`/api/hf/variants/${repoId}`);
-      const media = ['image', 'audio', 'video'].includes(activeTab);
+      const media = ['image', 'audio', 'video'].includes(tabAtStart);
       variants.set(repoId, {
         loading: false,
         ...v,
@@ -615,16 +660,17 @@
 
   // Re-read variants whenever any download for the current repo finishes so
   // the row flips to "On device". The store's polling drives this.
-  let lastDlState = '';
+  const completedDownloads = new Map();
+  const downloadAttention = $derived(allDownloads.filter(j => !['done', 'cancelled'].includes(j.state)));
   $effect(() => {
-    if (!activeRepo) return;
     for (const [key, j] of downloads) {
-      if (j.repoId !== activeRepo) continue;
-      if (lastDlState === 'running' && j.state === 'done') {
+      const previous = completedDownloads.get(key);
+      completedDownloads.set(key, j.state);
+      if ((previous === 'running' || previous === 'cancelling') && j.state === 'done') {
         toast(`${j.variant ?? j.repoId} downloaded`, 'ok');
-        void loadVariants(activeRepo, true);
+        void loadLocal();
+        if (j.repoId === activeRepo) void loadVariants(activeRepo, true);
       }
-      lastDlState = j.state;
     }
   });
 
@@ -637,12 +683,14 @@
       await api('/api/hf/download', { method: 'POST', body: { repoId, include, variant: label, totalBytes } });
       toast(`downloading ${label}…`, 'ok');
     } catch (e) {
+      failDownload(repoId, include, e.error ?? e.message ?? 'Download failed to start');
       toast(e.error ?? e.message ?? 'download failed to start', 'error');
     }
   }
 
   async function cancel(repoId, include) {
-    await cancelJob(repoId, include);
+    try { await cancelJob(repoId, include); }
+    catch (err) { toast(err.message ?? 'Could not cancel download', 'error'); }
   }
 
   const DL_STATE_LABEL = {
@@ -652,6 +700,12 @@
   async function clearDownloadHistory() {
     await clearFinished();
     toast('cleared finished downloads', 'ok');
+  }
+
+  /** Retry a failed download straight from the Downloads tab. */
+  async function retryJob(j) {
+    downloads.delete(j.key);
+    await download(j.repoId, j.include, j.variant);
   }
 
   /** Paste any `owner/repo` into the hub — validates and opens it directly. */
@@ -690,6 +744,14 @@
 
   async function loadIntoVram(repoId, include, name) {
     await registerVariant(repoId, include, { load: true });
+  }
+
+  async function unloadMedia(model) {
+    try {
+      await api('/api/images/unload', { method: 'POST', body: { model } });
+      await refreshRuntime();
+      toast('Model unloaded from memory', 'ok');
+    } catch (e) { toast(e.error ?? e.message, 'error'); }
   }
 
   async function ejectAlias(alias) {
@@ -832,8 +894,8 @@
   </div>
 
   <div class="modebar" aria-label="Model library views">
-      <button class="modebtn" class:on={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
-      <button class="modebtn" class:on={mode === 'my-models'} onclick={() => setMode('my-models')}>My Models</button>
+      <button class="modebtn" class:on={mode === 'my-models'} aria-pressed={mode === 'my-models'} onclick={() => setMode('my-models')}>Installed</button>
+      <button class="modebtn" class:on={mode === 'discover'} aria-pressed={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
       <button class="modebtn" class:on={mode === 'downloads'} onclick={() => setMode('downloads')}>
         Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
       </button>
@@ -898,40 +960,20 @@
     </details>
   {/if}
 
-  {#if mode !== 'downloads' && [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled').length > 0}
-    <div class="jobbar-stack">
-      {#each [...downloads.values()].filter((j) => j.state !== 'done' && j.state !== 'cancelled') as j (j.key)}
-        <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'}>
-          <div class="jtop">
-            <span class="jrepo mono">{j.repoId}</span>
-            {#if j.variant && j.state === 'running'}<span class="jvariant mono">{j.variant}</span>{/if}
-            <span class="jline mono">
-              {#if j.state === 'error'}
-                {j.error}
-              {:else if j.state === 'running' && j.downloadedBytes > 0}
-                {j.totalBytes ? `${fmtPct(j)}% · ` : ''}{fmtBytes(j.downloadedBytes)}{j.totalBytes ? ` / ${fmtBytes(j.totalBytes)}` : ''}{j.speedBytesPerSec ? ` · ${fmtSpeed(j.speedBytesPerSec)}` : ''}{j.etaSec != null ? ` · ${fmtEta(j.etaSec)} left` : ''}
-              {:else}
-                {j.state === 'cancelling' ? 'cancelling…' : 'starting…'}
-              {/if}
-            </span>
-            {#if j.state === 'running' || j.state === 'cancelling'}
-              <button class="ghost" onclick={() => cancel(j.repoId, j.include)} title="Cancel"><Square size={13} /></button>
-            {/if}
-          </div>
-          {#if j.state === 'running' && j.totalBytes}
-            <div class="jbar"><div class="jfill" style="width:{fmtPct(j)}%"></div></div>
-          {:else if j.state === 'running'}
-            <div class="jbar indeterminate"></div>
-          {/if}
-        </div>
-      {/each}
-    </div>
+  {#if mode !== 'downloads' && downloadAttention.length}
+    {@const currentJob = downloadAttention[0]}
+    <button class="download-summary" onclick={() => setMode('downloads')} aria-label="View downloads">
+      <Download size={16} />
+      <span class="download-copy"><b>{activeDownloadCount ? `${activeDownloadCount} downloading` : 'Download needs attention'}</b><span>{currentJob.variant || currentJob.repoId}</span></span>
+      <span class="download-progress">{#if currentJob.state === 'error'}Failed{:else if currentJob.downloadedBytes > 0}{currentJob.totalBytes ? `${fmtPct(currentJob)}% · ` : ''}{fmtBytes(currentJob.downloadedBytes)}{#if currentJob.etaSec != null} · {fmtEta(currentJob.etaSec)} left{/if}{:else}Starting…{/if}</span>
+      <ChevronRight size={16} />
+    </button>
   {/if}
 
   {#if mode === 'discover'}
   {#if activeTab === 'llm' && !q.trim() && recModels.length}
-    <section class="recstrip">
-      <h2>Recommended for this machine</h2>
+    <details class="recstrip">
+      <summary>Recommended for this machine</summary>
       <div class="carousel">
         {#each recModels as m (m.id)}
           {@const logo = logoFor(m.id)}
@@ -952,7 +994,7 @@
           </button>
         {/each}
       </div>
-    </section>
+    </details>
   {/if}
 
   {#if searching}
@@ -970,12 +1012,12 @@
 
   {#if displayedResults.length || (!searching && searched)}
     <div class="split">
-      <div class="list" bind:this={listEl}>
+      <div class="list" bind:this={listEl} use:scrollFade>
         <div class="lhead">{q.trim() ? 'Search results' : (LIST_HEADING[activeTab] ?? 'Models')}</div>
-        {#each displayedResults as m (m.id)}
+        {#each displayedResults as m, i (m.id)}
           {@const badge = taskBadge(m.pipelineTag, m.kind)}
           {@const logo = logoFor(m.id)}
-          <button class="rrow" class:active={selected === m.id} onclick={() => select(m.id)}>
+          <button class="rrow" class:active={selected === m.id} use:reveal={{ delay: Math.min(i, 8) * 26 }} onclick={() => select(m.id)}>
             <span class="avatar" class:logo={!!logo}
               style={!logo && avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
               {#if logo}
@@ -1022,7 +1064,7 @@
         <div bind:this={sentinelEl} class="sentinel"></div>
       </div>
 
-      <div class="detail">
+      <div class="detail" use:scrollFade>
         {#if selectedModel}
           {@const v = selectedVariants}
           {@const dlogo = logoFor(selectedModel.id)}
@@ -1092,7 +1134,8 @@
             {@const runtime = mediaModels.find((m) => m.id === activeRepo)}
             {#if runtime}
               <div class="runtime-note" class:ready={runtime.ready}>
-                <div><strong>{runtime.ready ? 'Ready to create' : 'Setup needed'}</strong><p>{runtime.ready ? 'Available in your local Media Studio.' : runtime.reason}</p></div>
+                <div><strong>{runtime.ready ? 'Runtime available' : 'Setup needed'}</strong><p>{runtime.ready ? 'Components detected. A successful generation is a separate check.' : runtime.reason}</p></div>
+                {#if isOwner && runtime.loaded}<button class="dlbtn eject" onclick={() => unloadMedia(runtime.id)}>Unload model</button>{/if}
                 {#if runtime.ready}<button class="dlbtn" onclick={() => openStudio(runtime.id)}><Play size={13} /> Open Studio</button>{/if}
               </div>
             {:else}<p class="media-hint">Compatibility depends on the model architecture and installed runtime. Media Studio checks downloaded models before use.</p>{/if}
@@ -1282,7 +1325,15 @@
     </div>
   {/if}
   {:else if mode === 'my-models'}
-    <div class="mymodels">
+    <div class="mymodels" use:scrollFade>
+      <div class="installed-toolbar">
+        <input type="search" aria-label="Search installed models" placeholder="Find an installed model…" bind:value={localQuery} />
+        <select aria-label="Filter installed models" bind:value={localFilter}>
+          <option value="all">All models</option><option value="attention">Needs attention</option><option value="ready">Runtime available</option>
+        </select>
+        <button class="ghost" disabled={localLoading} onclick={() => { loadLocal(); refreshRuntime(); }}>Refresh</button>
+      </div>
+      {#if localError}<p class="installed-error" role="alert">{localError} <button onclick={loadLocal}>Retry</button></p>{/if}
       {#if localLoading}
         <div class="skeleton-list">
           {#each Array(4) as _, i (i)}
@@ -1297,7 +1348,8 @@
           <span class="mono">{fmtBytes(localTotalBytes)} total</span>
         </div>
         <div class="mmlist">
-          {#each localModels as row (row.repoDir)}
+          {#each installedRows as row (localModelKey(row))}
+            {@const readiness = modelReadiness(row, mediaModels, mediaAvailable)}
             <div class="mmrow" class:broken={row.broken}>
               <span class="avatar" style={!row.repoId || avatarFail.has(ownerOf(row.repoId)) ? avatarStyle(row.repoId ? ownerOf(row.repoId) : 'local') : ''}>
                 {#if row.repoId && !avatarFail.has(ownerOf(row.repoId))}
@@ -1312,12 +1364,17 @@
                   <span class="mmwhen">{fmtAgo(row.updatedAt)}</span>
                   <span class="mmsize mono">{fmtBytes(row.totalBytes)}</span>
                 </div>
+                <div class="installed-status"><span class:available={readiness.state === 'ready'}>{readiness.label}</span><p>{readiness.detail}</p></div>
+                <div class="installed-actions">
+                  {#if readiness.runtime?.ready}<button class="ghost" onclick={() => openStudio(readiness.runtime.id)}><Play size={12} /> Open Studio</button>{/if}
+                  {#if row.repoId}<button class="ghost" onclick={() => inspectInstalled(row)}>Files & setup <ChevronRight size={12} /></button>{/if}
+                </div>
                 {#if row.broken}
                   <div class="qlist">
                     <div class="qrow mmvariant">
                       <span class="qleft">
                         <span class="mono qname err">Incomplete — not usable</span>
-                        <span class="vhint">a download was interrupted after writing data but before finishing; safe to delete and re-download</span>
+                        <span class="vhint">Review Files & setup to resume the download, or remove it to reclaim space.</span>
                       </span>
                       <span class="qright">
                         {#if isOwner}
@@ -1352,12 +1409,12 @@
                 {/if}
               </div>
             </div>
-          {/each}
+          {:else}<p class="empty">No installed models match these filters.</p>{/each}
         </div>
       {/if}
     </div>
   {:else}
-    <div class="downloadstab">
+    <div class="downloadstab" use:scrollFade>
       {#if !allDownloads.length}
         <div class="empty nodetail">No downloads yet — grab a model from Discover.</div>
       {:else}
@@ -1367,16 +1424,18 @@
         </div>
         <div class="mmlist">
           {#each allDownloads as j (j.key)}
-            <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'}>
+            <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'} use:reveal>
               <div class="jtop">
                 <span class="jrepo mono">{j.repoId}</span>
                 {#if j.variant}<span class="jvariant mono">{j.variant}</span>{/if}
                 <span class="dltag {j.state}">{DL_STATE_LABEL[j.state] ?? j.state}</span>
                 {#if j.state === 'running' || j.state === 'cancelling'}
                   <button class="ghost" onclick={() => cancel(j.repoId, j.include)} title="Cancel"><Square size={13} /></button>
+                {:else if j.state === 'error'}
+                  <button class="ghost" onclick={() => retryJob(j)} title="Try this download again">Retry</button>
                 {/if}
               </div>
-              <span class="jline mono">
+              <span class="jline mono" class:pending={!['error', 'done', 'cancelled'].includes(j.state) && !(j.state === 'running' && j.downloadedBytes > 0)}>
                 {#if j.state === 'error'}
                   {j.error}
                 {:else if j.state === 'running' && j.downloadedBytes > 0}
@@ -1386,7 +1445,7 @@
                 {:else if j.state === 'cancelled'}
                   cancelled{j.finishedAt ? ` ${fmtAgo(new Date(j.finishedAt).toISOString())}` : ''}
                 {:else}
-                  {j.state === 'cancelling' ? 'cancelling…' : 'starting…'}
+                  {j.state === 'cancelling' ? 'cancelling…' : `starting… ${Math.max(1, Math.round((Date.now() - (j.startedAt ?? Date.now())) / 1000))}s`}
                 {/if}
               </span>
               {#if j.state === 'running' && j.totalBytes}
@@ -1403,6 +1462,24 @@
 </div>
 
 <style>
+  .installed-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:16px; }
+  .installed-toolbar input { flex:1; min-width:180px; }
+  .installed-toolbar select { max-width:190px; }
+  .installed-status { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; margin:10px 0; font-size:11px; }
+  .installed-status > span { padding:3px 7px; border:1px solid var(--border); border-radius:5px; white-space:nowrap; color:var(--text-dim); }
+  .installed-status > span.available { color:var(--green); }
+  .installed-status p { flex:1; min-width:180px; margin:0; color:var(--text-dim); line-height:1.6; }
+  .installed-actions { display:flex; gap:8px; margin-bottom:10px; }
+  .installed-actions button { display:inline-flex; align-items:center; gap:6px; font-size:11px; }
+  .installed-error { color:var(--red); }
+  .download-summary { flex-shrink: 0; display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 12px 14px; margin: 0 0 12px; border: 1px solid var(--border-soft); background: var(--bg-card); border-radius: calc(10px * var(--rf)); text-align: left; color: var(--text-dim); }
+  .download-summary:hover { background: var(--bg-hover); }
+  .download-copy { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: baseline; }
+  .download-copy b { flex-shrink: 0; font-size: 12px; font-weight: 550; color: var(--text); }
+  .download-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .download-progress { font-size: 12px; font-variant-numeric: tabular-nums; }
+  @media(max-width: 768px) { .download-copy { flex-direction: column; gap: 3px; } .download-copy span { max-width: 140px; } .download-progress { font-size: 11px; } }
+
   /* Unsloth Hub layout: the panel is a fixed frame — header + toolbar stay
      pinned, only the two columns scroll. No page-level scrolling at all. */
   .hub {
@@ -1456,9 +1533,9 @@
   .addbtn:hover { background: var(--bg-hover); color: var(--text); }
 
   .recstrip { flex-shrink: 0; margin: 0 0 16px; }
-  .recstrip h2 {
+  .recstrip summary { cursor: pointer;
     margin: 0 0 10px; font-size: 15px; font-weight: 650; letter-spacing: -0.02em;
-    display: inline-flex; align-items: center; gap: 4px; line-height: 1;
+    display: list-item; line-height: 1.4; color: var(--text-dim); font-size: 12px; font-weight: 500;
   }
   .carousel {
     display: flex; gap: 12px; overflow-x: auto; padding: 0 0 4px;
@@ -1556,15 +1633,21 @@
   .jobbar.err { border-color: var(--red); color: var(--red); }
   .jobbar.done { border-color: color-mix(in srgb, var(--green) 50%, transparent); }
   .jobbar-stack { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-  .jtop { display: flex; align-items: center; gap: 10px; }
-  .jrepo { font-weight: 600; }
+  .jtop { min-width: 0; flex-wrap: wrap; display: flex; align-items: center; gap: 10px; }
+  .jrepo { font-weight: 550; min-width: 0; overflow-wrap: anywhere; flex: 1; }
   .jvariant {
     font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
     background: var(--accent-glow); color: var(--accent); white-space: nowrap;
   }
   .jline { flex: 1; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .jline.pending::after {
+    content: ''; display: inline-block; vertical-align: -1px;
+    width: 7px; height: 11px; margin-left: 3px;
+    background: var(--text-faint); animation: jblink 1s steps(1) infinite;
+  }
+  @keyframes jblink { 50% { opacity: 0; } }
   .jbar { height: 4px; border-radius: 999px; background: var(--bg-hover); overflow: hidden; }
-  .jfill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 1s linear; }
+  .jfill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 700ms cubic-bezier(0.25, 1, 0.35, 1); }
   .jbar.indeterminate { position: relative; }
   .jbar.indeterminate::after {
     content: ''; position: absolute; top: 0; height: 100%;

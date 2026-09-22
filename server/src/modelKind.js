@@ -23,7 +23,7 @@ const SPEECH_TAG = new Set(['text-to-speech', 'automatic-speech-recognition']);
 // (fill-mask, token-classification, object-detection, robotics, …)
 const CHAT_TAG_RE = /^(text-generation|text2text-generation|conversational|image-text-to-text|visual-document-question-answering|question-answering|any-to-any)/;
 const IMAGE_RE = /flux|sdxl|sd3|sd-?xl|stable-?diffusion|pixart|playground-?v|auraflow|lumina|kolors|cogview|hunyuan-?dit|hunyuanimage|dreamshaper|dreambooth|hidream|chroma|z-?image|krea|ideogram|qwen-?image/i;
-const VIDEO_RE = /wan[-_.]?\d|hunyuan-?video|cogvideox|ltx(?:[-_]?v(?:ideo)?)?(?:[-_]|$)|ltx[-_]?2|mochi|allegro|pyramid-?flow|open-?sora|genmo/i;
+const VIDEO_RE = /minimax[-_]?h3(?:[-_.\/]|$)|wan[-_.]?\d|hunyuan-?video|cogvideox|ltx(?:[-_]?v(?:ideo)?)?(?:[-_]|$)|ltx[-_]?2|mochi|allegro|pyramid-?flow|open-?sora|genmo/i;
 const EMBED_RE = /embed|bge|gte-|e5-|minilm|nomic|snowflake|jina|sentence-?transform|rerank|arctic-?embed/i;
 const SPEECH_RE = /omnivoice|openvoice|cosyvoice|higgs[-_]?tts|higgs[-_]?audio|moss[-_]?tts|(^|[-_.\/])tts($|[-_.\/])|text-to-speech|speecht5|(^|[-_.])bark|(^|[-_.])vits|piper|parler[-_]?tts|kokoro|xtts|chatterbox|styletts|fish[-_]?speech|f5[-_]?tts|index[-_]?tts|melo[-_]?tts|qwen3[-_]?tts|voice[-_]?clone|voicecraft/i;
 const AUDIO_RE = /whisper|wav2vec|silero|vosk|clap|musicgen|stable-?audio|audioldm|minimax[-_]?music|riffusion|(^|[-_.\/])audio($|[-_.\/])/i;

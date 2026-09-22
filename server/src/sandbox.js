@@ -18,8 +18,8 @@ const IDLE_STOP_MS = Number(process.env.SANDBOX_IDLE_MS ?? 15 * 60 * 1000);
 const PORT_BLOCK_START = 42000;
 export const PORTS_PER_WS = 10;
 
-export const wsDir = (id) => join(WS_ROOT, String(id));
-export const containerName = (id) => `duckpond-ws-${id}`;
+export const wsDir = (id) => db.prepare('SELECT host_path FROM workspaces WHERE id = ?').get(id)?.host_path || join(WS_ROOT, String(id));
+export const containerName = (id) => `${process.env.DUCKPOND_SANDBOX_PREFIX || 'duckpond-ws'}-${id}`;
 export const portBase = (id) => PORT_BLOCK_START + id * PORTS_PER_WS;
 
 function podman(args, { timeout = 30_000, ownScope = false } = {}) {
@@ -49,7 +49,8 @@ export async function ensureRunning(ws) {
     // workspace ids are SQLite rowids and get reused after deletes — never adopt
     // a container that belongs to a previous workspace with the same id
     const cid = (await podman(['inspect', '--format', '{{.Id}}', name])).stdout.trim();
-    if (ws.container_id !== cid) {
+    const current = db.prepare('SELECT container_id FROM workspaces WHERE id = ?').get(ws.id);
+    if (current?.container_id !== cid) {
       await podman(['rm', '-f', '-t', '2', name], { timeout: 30_000 });
       await podman(['volume', 'rm', '-f', `${name}-home`]);
       state = null;
@@ -69,7 +70,7 @@ export async function ensureRunning(ws) {
     '--userns=keep-id:uid=1000,gid=1000',
     '--read-only', '--read-only-tmpfs=false',
     '--tmpfs', '/tmp:size=256m',
-    '-v', `${wsDir(ws.id)}:/workspace:Z,rw`,
+    '-v', `${wsDir(ws.id)}:/workspace:${ws.host_path ? 'rw' : 'Z,rw'}`,
     '-v', `${name}-home:/home/pn`,
     '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges',
@@ -77,6 +78,7 @@ export async function ensureRunning(ws) {
     '--pids-limit', '512',
     '-w', '/workspace',
   ];
+  if (ws.host_path) args.push('--security-opt', 'label=disable');
   for (let i = 0; i < PORTS_PER_WS; i++) args.push('-p', `127.0.0.1:${base + i}:${3000 + i}`);
   args.push(IMAGE, 'sleep', 'infinity');
 
@@ -136,7 +138,10 @@ export async function destroyWorkspace(id) {
   const name = containerName(id);
   await podman(['rm', '-f', '-t', '5', name], { timeout: 30_000 });
   await podman(['volume', 'rm', '-f', `${name}-home`]);
-  rmSync(wsDir(id), { recursive: true, force: true });
+  // Unlinking an existing project must never delete its source directory.
+  if (!db.prepare('SELECT host_path FROM workspaces WHERE id = ?').get(id)?.host_path) {
+    rmSync(wsDir(id), { recursive: true, force: true });
+  }
 }
 
 // Stop containers whose workspace has been idle — VRAM's cheaper cousin.

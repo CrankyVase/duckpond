@@ -1,3 +1,4 @@
+import { trackStreamProgress } from './streamProgress.js';
 // Client for llama-server ROUTER mode (b9625) on 127.0.0.1:8081.
 // Endpoints verified against the running build: /v1/models (per-model status),
 // /models/load, /models/unload, /v1/chat/completions (+/input_tokens), /slots.
@@ -78,6 +79,13 @@ export function markUse(model) {
   a.lastUsed = Date.now();
   activity.set(model, a);
   return a;
+}
+
+// Called only when media needs VRAM. An active response keeps its model.
+export async function reclaimIdleModel(model) {
+  if ((activity.get(model)?.active ?? 0) > 0) return false;
+  await unloadModel(model);
+  return true;
 }
 
 export async function reapIdleModels(log) {
@@ -231,6 +239,7 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
 }
 
 async function streamChatInner({ model, messages, params = {}, onDelta, abortSignal }) {
+  onDelta = trackStreamProgress(onDelta, { messages, tools: params.tools });
   const res = await fetch(BASE + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -313,6 +322,7 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
   const tail = splitter.flush();
   if (tail.reasoning) { reasoning += tail.reasoning; onDelta?.('', { reasoning: tail.reasoning, timings }); }
   if (tail.text) { content += tail.text; onDelta?.(tail.text, { timings }); }
+  onDelta.finish(usage);
   return { content, reasoning, timings, usage, toolCalls: toolCalls.filter(Boolean), finishReason };
 }
 

@@ -1,5 +1,9 @@
 import { api } from './api.js';
 import { adoptServerTheme } from './theme.svelte.js';
+import { workspaceState } from './workspaceState.js';
+
+let navigationRequest = 0;
+export function localWorkspace() { return workspaceState(localStorage, app.user?.id ?? 'guest'); }
 
 export const app = $state({
   user: null,
@@ -8,6 +12,7 @@ export const app = $state({
   models: [],
   conversations: [],
   conv: null,            // active conversation incl. messages[] (tree) + settings
+  mode: 'chat',
   streaming: null,       // { convId, text, thinking, tokS, n, loading, error }
   context: { used: 0, budget: 32768 },
   gpu: null,             // { totalBytes, usedBytes }
@@ -47,8 +52,12 @@ export async function loadConversations() {
   app.conversations = await api('/api/conversations');
 }
 
-export async function openConversation(id) {
-  app.conv = await api(`/api/conversations/${id}`);
+export async function openConversation(id, request = ++navigationRequest) {
+  const conv = await api(`/api/conversations/${id}`);
+  if (request !== navigationRequest) return;
+  app.conv = conv;
+  app.mode = app.conv.mode || (app.conv.workspace_id ? 'agent' : 'chat');
+  localWorkspace().select(app.mode, app.conv.id);
   app.context = { used: 0, budget: app.conv.settings?.ctx_size ?? 32768 };
   refreshContext();
 }
@@ -64,13 +73,25 @@ export async function refreshContext() {
   } catch { /* non-fatal */ }
 }
 
-export async function newConversation() {
-  const lastModel = app.user?.default_model_id
-    ?? app.conv?.model_id ?? app.conversations[0]?.model_id
+export async function switchMode(mode) {
+  if (!['chat', 'agent'].includes(mode)) return;
+  app.view = 'chat';
+  const selected = localWorkspace().selected(mode);
+  const previous = app.conversations.find(c => c.id === selected && (c.mode || 'chat') === mode)
+    ?? app.conversations.find(c => (c.mode || 'chat') === mode);
+  if (previous) await openConversation(previous.id);
+  else await newConversation(mode);
+}
+
+export async function newConversation(mode = app.mode) {
+  const request = ++navigationRequest;
+  const previous = app.conversations.find(c => (c.mode || 'chat') === mode);
+  const lastModel = (app.conv?.mode === mode ? app.conv?.model_id : null)
+    ?? previous?.model_id ?? app.user?.default_model_id
     ?? app.models.find((m) => m.status === 'loaded')?.id ?? app.models[0]?.id ?? null;
-  const conv = await api('/api/conversations', { method: 'POST', body: { model_id: lastModel } });
+  const conv = await api('/api/conversations', { method: 'POST', body: { model_id: lastModel, mode } });
   await loadConversations();
-  await openConversation(conv.id);
+  if (request === navigationRequest) await openConversation(conv.id, request);
 }
 
 // Summarize older turns into a compaction node (server does the heavy lifting).

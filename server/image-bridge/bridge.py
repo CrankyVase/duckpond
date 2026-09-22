@@ -23,6 +23,10 @@ import inspect
 import gc
 import json
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -54,8 +58,45 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # ROCm surfaces as "cud
 GEN_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 STATE = {"tag": None, "active": False, "phase": None, "step": None, "steps": None,
-         "image": None, "n": None, "enhanced_prompt": None}
+         "image": None, "n": None, "enhanced_prompt": None,
+         "started_at": None, "eta_seconds": None, "elapsed": None}
 CANCEL_TAGS = set()  # tags a client has asked to stop — checked between denoise steps
+STALL_LIMIT_SECONDS = 300.0
+STALL_EXIT_SECONDS = float(os.environ.get("IMAGE_STALL_EXIT_SECONDS", "600"))
+CPU_MODELS = set(filter(None, os.environ.get("IMAGE_CPU_MODELS", "").split(",")))
+_STALL_LOGGED = set()
+
+
+def touch_progress(**kwargs):
+    with STATE_LOCK:
+        STATE.update(kwargs)
+        if kwargs:
+            STATE["last_progress_at"] = time.monotonic()
+            STATE["stalled"] = False
+        now = time.time()
+        tick = time.monotonic()
+        if kwargs.get("active") is True or kwargs.get("phase") == "generating":
+            STATE.update(_last_step=None, _step_at=None, _step_durations=[])
+        if kwargs.get("phase") == "denoising" and kwargs.get("step") is not None:
+            step = kwargs["step"]
+            previous, at = STATE.get("_last_step"), STATE.get("_step_at")
+            if previous is not None and step > previous and at is not None:
+                durations = STATE.get("_step_durations", [])
+                STATE["_step_durations"] = (durations + [(tick - at) / (step - previous)])[-6:]
+            if previous != step:
+                STATE.update(_last_step=step, _step_at=tick)
+        started = STATE.get("started_at")
+        STATE["elapsed"] = max(0, now - started) if started else None
+        STATE["eta_seconds"] = None
+        durations = STATE.get("_step_durations", [])
+        step, steps = STATE.get("step"), STATE.get("steps")
+        if STATE.get("phase") == "denoising" and len(durations) >= 2 and step and steps:
+            # Exclude loading, text encoding and the first (warm-up) step.
+            # Only show an estimate after two measured sampling intervals.
+            rate = sum(durations) / len(durations)
+            remaining = max(0, steps - step)
+            STATE["eta_seconds"] = max(0, rate * remaining - (tick - STATE["_step_at"]))
+
 
 _loaded = {"id": None, "pipe": None, "kind": None}
 
@@ -86,11 +127,11 @@ def discover_models():
             info.update(ready=False, reason=f"Install a Diffusers version with {info.get('class')}")
         if info['ready'] and info['kind'] == 'native_audio':
             try:
-                cfg = _tts_config(model_id, info)
-                if cfg.audio_type == 'minimax_music3' and (DEVICE != 'cuda' or getattr(torch.version, 'hip', None)):
-                    info.update(ready=False, reason='MiniMax Music 3 requires an NVIDIA CUDA GPU')
+                _tts_config(model_id, info)
             except RuntimeError as e:
                 info.update(ready=False, reason=str(e))
+    from comfy_media import catalog
+    models.update(catalog())
     return models
 
 
@@ -142,9 +183,86 @@ def release_models(except_id=None):
         torch.cuda.empty_cache()
 
 
+def _dir_bytes(path):
+    """Rough on-disk weight size of a model directory (0 if missing)."""
+    root = Path(path)
+    if not root.is_dir():
+        return 0
+    total = 0
+    for pattern in ("*.safetensors", "*.bin", "*.gguf", "*.pt", "*.pth"):
+        for f in root.rglob(pattern):
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _mem_available_bytes():
+    """MemAvailable from /proc/meminfo in bytes, or None if unparseable."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _find_q21_base():
+    root = HUB_DIR / 'models--Qwen--Qwen-Image-2.1' / 'snapshots'
+    if not root.is_dir():
+        return None
+    cands = sorted([p for p in root.iterdir() if (p / 'model_index.json').is_file()],
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(cands[0]) if cands else None
+
+
+def load_qwen21_quant(model_id, info):
+    release_models(model_id)
+    import torch
+    from diffusers import QwenImage21Pipeline, QwenImage21Transformer2DModel
+    base = _find_q21_base()
+    if not base:
+        raise RuntimeError('Qwen/Qwen-Image-2.1 must stay downloaded — this quant borrows its text encoder and VAE')
+    device = 'cpu' if model_id in CPU_MODELS else DEVICE
+    dtype = torch.float32
+    if device == 'cpu' and os.environ.get('IMAGE_CPU_DTYPE') == 'bfloat16':
+        dtype = torch.bfloat16
+    elif device == 'cuda':
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    touch_progress(device=device, phase='loading')
+    try:
+        from diffusers import GGUFQuantizationConfig
+        transformer = QwenImage21Transformer2DModel.from_single_file(
+            info['path'], quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
+            config=base, subfolder='transformer', torch_dtype=torch.bfloat16)
+    except Exception as e:
+        raise RuntimeError(f'Qwen-Image-2.1 GGUF would not load ({e}); use the full Qwen/Qwen-Image-2.1 instead')
+    pipe = QwenImage21Pipeline.from_pretrained(base, transformer=transformer, torch_dtype=dtype,
+                                               local_files_only=True, low_cpu_mem_usage=True)
+    if device == 'cuda':
+        pipe.transformer.to('cuda')
+        pipe.vae.to('cuda')
+        if hasattr(pipe.vae, 'enable_tiling'):
+            pipe.vae.enable_tiling()
+        from diffusers.hooks import apply_group_offloading
+        apply_group_offloading(pipe.text_encoder, onload_device=torch.device('cuda'),
+                               offload_device=torch.device('cpu'),
+                               offload_type='leaf_level', num_blocks_per_group=1, use_stream=True)
+    else:
+        pipe.to('cpu')
+        if hasattr(pipe, 'enable_vae_tiling'):
+            pipe.enable_vae_tiling()
+    _loaded.update(id=model_id, pipe=pipe, kind='image', device=device)
+    return pipe
+
+
 def load_pipeline(model_id, info):
     if _loaded["id"] == model_id and _loaded["pipe"] is not None:
         return _loaded["pipe"]
+    if info.get('kind') == 'qwen21_gguf':
+        return load_qwen21_quant(model_id, info)
     release_models(model_id)
     import diffusers
     # No AutoPipelineForText2Audio exists in several supported diffusers
@@ -152,19 +270,49 @@ def load_pipeline(model_id, info):
     pipe_cls = getattr(diffusers, info.get("class", ""), None)
     if pipe_cls is None:
         raise RuntimeError(f"Pipeline {info.get('class')} is unavailable; update the media runtime")
+    need = _dir_bytes(info["path"])
+    available = _mem_available_bytes()
+    if need > 0 and available is not None and need > available * 0.9:
+        print(f"[bridge] memory estimate: {model_id} weights={need/1024**3:.1f} GiB available={available/1024**3:.1f} GiB; proceeding with memory-mapped loading", flush=True)
+    device = "cpu" if model_id in CPU_MODELS else DEVICE
     dtype = torch.float32
-    if DEVICE == "cuda":
+    if device == "cpu" and os.environ.get("IMAGE_CPU_DTYPE") == "bfloat16":
+        dtype = torch.bfloat16
+    elif device == "cuda":
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    touch_progress(device=device, phase="loading")
     if info["kind"] != "diffusers":
         raise RuntimeError("This checkpoint needs a dedicated loader; choose a complete Diffusers repository")
-    pipe = pipe_cls.from_pretrained(info["path"], torch_dtype=dtype, local_files_only=True)
+    pipe = pipe_cls.from_pretrained(info["path"], torch_dtype=dtype, local_files_only=True, low_cpu_mem_usage=True)
     # Preserve image size, steps, and LLM context. Offload only on a GPU;
     # CPU hosts never enter Accelerate's GPU offload path.
-    if DEVICE == "cuda":
-        pipe.enable_model_cpu_offload()
+    if device == "cuda":
+        if info.get('class') == 'QwenImage21Pipeline':
+            # Its encoder alone exceeds a 16 GB card in BF16. Offload layers,
+            # not whole components, so the default local setup can load it.
+            from diffusers.hooks import apply_group_offloading
+            options = dict(onload_device=torch.device("cuda"), offload_device=torch.device("cpu"),
+                           offload_type="block_level", num_blocks_per_group=2, use_stream=False)
+            # Qwen3-VL nests its layer lists under model.language_model and
+            # model.visual. Treating the entire encoder as one group exceeds
+            # 16 GiB before the first denoising step.
+            apply_group_offloading(pipe.text_encoder,
+                                   onload_device=torch.device("cuda"), offload_device=torch.device("cpu"),
+                                   offload_type="leaf_level", use_stream=False)
+            pipe.transformer.enable_group_offload(
+                **{**options, "num_blocks_per_group": 1, "use_stream": True},
+                low_cpu_mem_usage=True, record_stream=True,
+            )
+            pipe.vae.enable_group_offload(**options)
+            if hasattr(pipe.vae, 'enable_tiling'):
+                pipe.vae.enable_tiling()
+        else:
+            pipe.enable_model_cpu_offload()
     else:
-        pipe.to(DEVICE)
-    _loaded.update(id=model_id, pipe=pipe, kind=info["task"])
+        pipe.to(device)
+        if hasattr(pipe, "enable_vae_tiling"):
+            pipe.enable_vae_tiling()
+    _loaded.update(id=model_id, pipe=pipe, kind=info["task"], device=device)
     return pipe
 
 
@@ -172,6 +320,37 @@ def call_pipeline(pipe, kwargs):
     from media_catalog import pipeline_kwargs
     with torch.inference_mode():
         return pipe(**pipeline_kwargs(pipe, kwargs))
+
+
+def decode_reference_images(body):
+    """Turn optional images_b64 into PIL images. None means text-only."""
+    raw = body.get("images_b64")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    from PIL import Image
+    images = []
+    for item in raw:
+        data = base64.b64decode(item, validate=True)
+        if len(data) > 12 * 1024 * 1024:
+            raise ValueError("Each reference photo must be under 12 MB")
+        image = Image.open(io.BytesIO(data))
+        image.load()
+        widest = max(image.size)
+        if widest > 2048:
+            scale = 2048 / widest
+            image = image.resize((max(8, int(image.width * scale) // 8 * 8),
+                                  max(8, int(image.height * scale) // 8 * 8)), Image.Resampling.LANCZOS)
+        images.append(image)
+    return images
+
+
+def seed_generator(seed):
+    # Sequential / model CPU offload builds latents on the host. A CUDA
+    # generator then fails or silently places noise on the wrong device.
+    device = "cpu" if DEVICE == "cuda" else DEVICE
+    return torch.Generator(device=device).manual_seed(int(seed))
 
 
 def encode_audio(audio, sample_rate):
@@ -198,6 +377,83 @@ def audio_sample_rate(pipe):
     raise RuntimeError("Audio model does not declare a sample rate; refusing to save at the wrong pitch")
 
 
+def audiocpp_backend():
+    requested = (os.environ.get("AUDIOCPP_BACKEND") or "").strip().lower()
+    if requested in ("hip", "vulkan", "cpu", "cuda"):
+        return requested
+    return "hip" if shutil.which("hipcc") or Path("/opt/rocm").exists() or Path("/usr/lib64/rocm").exists() else "cpu"
+
+
+def run_minimax_music3_job(body, tag, model_id, info):
+    from media_catalog import audiocpp_cli
+    cli = audiocpp_cli()
+    if not cli:
+        raise ValueError("MiniMax Music 3 GGUF needs audiocpp_cli")
+    duration = float(body.get("audio_duration") or 30)
+    if duration < 10 or duration > 300:
+        raise ValueError("MiniMax Music 3 max length must be between 10 and 300 seconds")
+    steps = int(body.get("steps") or 30)
+    lyrics = (body.get("lyrics") or "").strip()
+    prompt = body["prompt"].strip()
+    if not prompt:
+        raise ValueError("Describe the song (style, instruments, vocal) in the prompt")
+    backend = audiocpp_backend()
+    data = []
+    with tempfile.TemporaryDirectory(prefix="duckpond-music3-") as tmp:
+        for i in range(int(body.get("n") or 1)):
+            if tag in CANCEL_TAGS:
+                raise JobCancelled(tag)
+            touch_progress(phase="generating", image=i + 1, n=int(body.get("n") or 1), step=0, steps=steps)
+            out = str(Path(tmp) / f"song-{i}.wav")
+            cmd = [
+                cli, "--task", "gen", "--family", "minimax_music3",
+                "--model", info["path"], "--backend", backend,
+                "--text", prompt,
+                "--duration-seconds", str(int(duration)),
+                "--num-inference-steps", str(steps),
+                "--threads", "8",
+                "--out", out,
+            ]
+            if lyrics:
+                cmd += ["--lyrics", lyrics]
+            if body.get("seed") is not None:
+                cmd += ["--seed", str(int(body["seed"]) + i)]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            log = []
+            try:
+                while True:
+                    if tag in CANCEL_TAGS:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=8)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        raise JobCancelled(tag)
+                    line = proc.stdout.readline() if proc.stdout else ""
+                    if line:
+                        log.append(line)
+                        # Best-effort step scrape; elapsed/ETA still work without it.
+                        for token in line.replace(",", " ").split():
+                            if token.isdigit() and 0 < int(token) <= steps:
+                                touch_progress(phase="generating", step=int(token), steps=steps)
+                    if proc.poll() is not None:
+                        rest = proc.stdout.read() if proc.stdout else ""
+                        if rest:
+                            log.append(rest)
+                        break
+                    time.sleep(0.2)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+            if proc.returncode != 0 or not Path(out).is_file():
+                detail = "".join(log)[-1500:] or f"exit {proc.returncode}"
+                raise RuntimeError(f"MiniMax Music 3 failed: {detail}")
+            wav = Path(out).read_bytes()
+            data.append({"b64_json": base64.b64encode(wav).decode("ascii")})
+            touch_progress(phase="image_done", step=steps, steps=steps)
+    return {"data": data, "model_used": model_id, "task": "audio", "sample_rate": 44100}
+
+
 def run_musicgen_job(body, tag, model_id, info):
     duration = float(body.get("audio_duration") or 10)
     if duration > 30:
@@ -215,8 +471,6 @@ def run_musicgen_job(body, tag, model_id, info):
         def __call__(self, input_ids, scores, **kwargs):
             if tag in CANCEL_TAGS:
                 raise JobCancelled(tag)
-            with STATE_LOCK:
-                STATE.update(phase="generating", step=input_ids.shape[-1], steps=int(duration * frame_rate))
             return False
     inputs = processor(text=[body["prompt"]], padding=True, return_tensors="pt").to(DEVICE)
     data = []
@@ -225,13 +479,74 @@ def run_musicgen_job(body, tag, model_id, info):
         if body.get("seed") is not None:
             torch.manual_seed(int(body["seed"]))
         for i in range(int(body.get("n", 1))):
-            with STATE_LOCK:
-                STATE.update(image=i + 1, n=int(body.get("n", 1)))
+            touch_progress(phase="generating", image=i + 1, n=int(body.get("n", 1)), step=0, steps=1)
             with torch.inference_mode():
                 audio = model.generate(**inputs, do_sample=True, max_new_tokens=int(duration * frame_rate),
                                        stopping_criteria=StoppingCriteriaList([Cancel()]))
+            touch_progress(phase="image_done", step=1, steps=1)
             data.append({"b64_json": encode_audio(audio[0], rate)})
     return {"data": data, "model_used": model_id, "task": "audio", "sample_rate": rate}
+
+
+def _patch_qwen_tts_transformers():
+    """qwen-tts 0.1 still uses @check_model_inputs() from Transformers 4."""
+    import transformers.utils.generic as generic
+    if getattr(generic.check_model_inputs, "_duckpond_compat", False):
+        return
+    original = generic.check_model_inputs
+    def check_model_inputs(func=None, **_kwargs):
+        if func is None:
+            return lambda wrapped: original(wrapped)
+        return original(func)
+    check_model_inputs._duckpond_compat = True
+    generic.check_model_inputs = check_model_inputs
+
+
+def run_qwen3_tts_job(body, tag, model_id, info):
+    _patch_qwen_tts_transformers()
+    from qwen_tts import Qwen3TTSModel
+    from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSTalkerConfig
+    if not getattr(Qwen3TTSTalkerConfig.__init__, "_duckpond_pad", False):
+        _talker_init = Qwen3TTSTalkerConfig.__init__
+        def _init(self, *args, **kwargs):
+            _talker_init(self, *args, **kwargs)
+            if getattr(self, "pad_token_id", None) is None:
+                self.pad_token_id = getattr(self, "tts_pad_token_id", None) or 151671
+            if getattr(self, "bos_token_id", None) is None:
+                self.bos_token_id = getattr(self, "tts_bos_token_id", None)
+            if getattr(self, "eos_token_id", None) is None:
+                self.eos_token_id = getattr(self, "tts_eos_token_id", None)
+        _init._duckpond_pad = True
+        Qwen3TTSTalkerConfig.__init__ = _init
+    if _loaded["id"] != model_id:
+        release_models(model_id)
+        kwargs = dict(local_files_only=True, device_map=DEVICE,
+                      dtype=torch.bfloat16 if DEVICE == "cuda" else torch.float32)
+        try:
+            model = Qwen3TTSModel.from_pretrained(info["path"], attn_implementation="sdpa", **kwargs)
+        except Exception:
+            model = Qwen3TTSModel.from_pretrained(info["path"], **kwargs)
+        _loaded.update(id=model_id, pipe=model, kind="tts")
+    model = _loaded["pipe"]
+    speaker = (body.get("speaker") or info.get("default_speaker") or "Ryan").strip()
+    language = (body.get("language") or "Auto").strip() or "Auto"
+    instruct = (body.get("instruct") or "").strip() or None
+    data = []
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()] if DEVICE == "cuda" else []):
+        if body.get("seed") is not None:
+            torch.manual_seed(int(body["seed"]))
+        for i in range(int(body.get("n") or 1)):
+            if tag in CANCEL_TAGS:
+                raise JobCancelled(tag)
+            touch_progress(phase="generating", image=i + 1, n=int(body.get("n") or 1), step=0, steps=1)
+            gen = {}
+            if instruct:
+                gen["instruct"] = instruct
+            wavs, rate = model.generate_custom_voice(
+                text=body["prompt"], language=language, speaker=speaker, **gen)
+            touch_progress(phase="image_done", step=1, steps=1)
+            data.append({"b64_json": encode_audio(wavs[0], int(rate))})
+    return {"data": data, "model_used": model_id, "task": "tts", "sample_rate": int(rate)}
 
 
 def run_omnivoice_job(body, tag, model_id, info):
@@ -268,12 +583,12 @@ def run_omnivoice_job(body, tag, model_id, info):
             for i in range(int(body.get("n", 1))):
                 if tag in CANCEL_TAGS:
                     raise JobCancelled(tag)
-                with STATE_LOCK:
-                    STATE.update(phase="generating", image=i + 1, n=int(body.get("n", 1)))
+                touch_progress(phase="generating", image=i + 1, n=int(body.get("n", 1)), step=0, steps=1)
                 with torch.inference_mode():
                     audio = model.generate(**kwargs)
                 if tag in CANCEL_TAGS:
                     raise JobCancelled(tag)
+                touch_progress(phase="image_done", step=1, steps=1)
                 data.append({"b64_json": encode_audio(audio[0], 24000)})
     return {"data": data, "model_used": model_id, "task": "tts", "sample_rate": 24000}
 
@@ -328,8 +643,6 @@ def run_job(body, tag):
     size = body.get("size", "1024x1024")
     w, h = (int(x) for x in size.lower().split("x")) if "x" in size.lower() else (1024, 1024)
     n = max(1, min(4, int(body.get("n", 1))))
-    steps = int(body.get("steps") or 25)
-    negative = body.get("negative_prompt") or None
     seed = body.get("seed")
     # video-specific
     num_frames = int(body.get("num_frames") or 25)
@@ -338,13 +651,38 @@ def run_job(body, tag):
     audio_duration = float(body.get("audio_duration") or 10.0)
 
     model_id, info = resolve_model(model_req, task=task)
+    steps = int(body.get("steps") or info.get("default_steps") or 25)
+    try:
+        true_cfg = float(body.get("true_cfg_scale") or 1.0)
+    except (TypeError, ValueError):
+        raise ValueError("Invalid true_cfg_scale")
+    if not 1.0 <= true_cfg <= 6.0:
+        raise ValueError("true_cfg_scale must be between 1.0 and 6.0")
+    negative = body.get("negative_prompt") or None
+    use_cfg = true_cfg > 1.0
+    images = decode_reference_images(body)
+    if info.get("needs_image") and not images:
+        raise ValueError("Add a reference photo for this model")
+    if info.get("kind") == "comfy":
+        from comfy_media import generate
+        release_models()
+        def progress(phase, step=None, steps=None):
+            touch_progress(phase=phase, step=step, steps=steps)
+        try:
+            return generate(body, tag, lambda: tag in CANCEL_TAGS, progress, images)
+        except InterruptedError as exc:
+            raise JobCancelled(tag) from exc
 
     # Native TTS (Higgs/MOSS via Unsloth's NativeAudioBackend) doesn't go
     # through diffusers at all — text in, wav bytes out, one blocking call.
     if info.get("kind") == "musicgen":
         return run_musicgen_job(body, tag, model_id, info)
+    if info.get("kind") == "minimax_music3":
+        return run_minimax_music3_job(body, tag, model_id, info)
     if info.get("kind") == "omnivoice":
         return run_omnivoice_job(body, tag, model_id, info)
+    if info.get("kind") == "qwen3_tts":
+        return run_qwen3_tts_job(body, tag, model_id, info)
     if body.get("ref_audio_b64"):
         raise ValueError("This runtime does not support reference-audio cloning for the selected model")
     if info.get("kind") == "native_audio":
@@ -354,7 +692,7 @@ def run_job(body, tag):
 
     generator = None
     if seed is not None:
-        generator = torch.Generator(device=DEVICE).manual_seed(int(seed))
+        generator = seed_generator(seed)
 
     def on_step(*args):
         # callback_on_step_end(pipe, i, t, kwargs) — 4 args;
@@ -362,19 +700,28 @@ def run_job(body, tag):
         if tag in CANCEL_TAGS:
             raise JobCancelled(tag)
         step = args[1] if len(args) == 4 else args[0]
-        with STATE_LOCK:
-            STATE.update(phase="denoising", step=step + 1, steps=steps)
+        touch_progress(phase="denoising", step=step + 1, steps=steps)
         return args[-1] if len(args) == 4 else None
 
     results_b64 = []
     for i in range(n):
         if tag in CANCEL_TAGS:
             raise JobCancelled(tag)
-        with STATE_LOCK:
-            STATE.update(phase="generating", image=i + 1, n=n, step=0, steps=steps)
+        touch_progress(phase="generating", image=i + 1, n=n, step=0, steps=steps)
 
-        kwargs = dict(prompt=prompt, negative_prompt=negative, num_inference_steps=steps,
+        kwargs = dict(prompt=prompt, num_inference_steps=steps,
                       generator=generator, **_callback_kwargs(pipe, on_step))
+        if use_cfg and negative:
+            kwargs["negative_prompt"] = negative
+        if task == "image":
+            try:
+                _params = inspect.signature(pipe.__call__).parameters
+            except (TypeError, ValueError):
+                _params = {}
+            if "true_cfg_scale" in _params:
+                kwargs["true_cfg_scale"] = true_cfg
+        if images:
+            kwargs["image"] = images if len(images) > 1 else images[0]
         if task == "audio":
             params = inspect.signature(pipe.__call__).parameters
             duration_key = "audio_end_in_s" if "audio_end_in_s" in params else "audio_length_in_s"
@@ -395,8 +742,7 @@ def run_job(body, tag):
         if tag in CANCEL_TAGS:
             raise JobCancelled(tag)
 
-        with STATE_LOCK:
-            STATE.update(phase="image_done")
+        touch_progress(phase="image_done")
 
     return {
         "data": [{"b64_json": b} for b in results_b64],
@@ -423,12 +769,10 @@ def run_tts_job(body, tag, model_id, info):
 
     release_models(model_id)
     backend = _tts_backend()
-    with STATE_LOCK:
-        STATE.update(phase="starting", step=None, steps=None, image=None, n=None)
+    touch_progress(phase="starting", step=None, steps=None, image=None, n=None)
     if tag in CANCEL_TAGS:
         raise JobCancelled(tag)
-    with STATE_LOCK:
-        STATE.update(phase="generating")
+    touch_progress(phase="generating", step=0, steps=1)
 
     cancel_event = _th.Event()
     finished = _th.Event()
@@ -457,8 +801,7 @@ def run_tts_job(body, tag, model_id, info):
             raise JobCancelled(tag)
     finally:
         finished.set()
-    with STATE_LOCK:
-        STATE.update(phase="image_done")
+    touch_progress(phase="image_done", step=1, steps=1)
     return {
         "data": [{"b64_json": base64.b64encode(wav_bytes).decode("ascii")}],
         "prompt_enhanced": None,
@@ -485,22 +828,40 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             models = discover_models()
+            for model_id, info in models.items():
+                info["loaded"] = model_id == _loaded["id"] or model_id == getattr(_tts.get("backend"), "active_model_name", None)
+                info["device"] = "cpu" if model_id in CPU_MODELS else DEVICE
             return self._json(200, {"ok": True, "models": models, "default_model": DEFAULT_MODEL or "auto"})
         if parsed.path == "/v1/progress":
+            if STATE.get("active"):
+                touch_progress()
             with STATE_LOCK:
                 snap = dict(STATE)
-            progress = {k: snap.get(k) for k in ("phase", "step", "steps", "image", "n")}
+                last_at = snap.get("last_progress_at")
+                stall_seconds = (time.monotonic() - last_at) if last_at is not None else None
+                if snap.get("active") and stall_seconds is not None and stall_seconds > STALL_LIMIT_SECONDS:
+                    STATE["stalled"] = True
+                    snap["stalled"] = True
+                    tag = snap.get("tag")
+                    if tag and tag not in _STALL_LOGGED:
+                        _STALL_LOGGED.add(tag)
+                        print(f"[bridge] JOB STALLED tag={tag} no progress for {int(stall_seconds)}s phase={snap.get('phase')} step={snap.get('step')}/{snap.get('steps')} — cancel cannot reach a wedged native call; restart image-gen-bridge-8765.service to clear the queue", flush=True)
+            progress = {k: snap.get(k) for k in ("phase", "step", "steps", "image", "n", "eta_seconds", "elapsed")}
             return self._json(200, {
                 "tag": snap.get("tag"), "active": snap.get("active", False),
                 "phase": snap.get("phase"), "progress": progress,
                 "enhanced_prompt": snap.get("enhanced_prompt"),
+                "eta_seconds": snap.get("eta_seconds"),
+                "elapsed": snap.get("elapsed"),
+                "stalled": snap.get("stalled", False),
+                "stall_seconds": stall_seconds,
             })
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
         parsed = urlparse(self.path)
         length = int(self.headers.get("content-length", 0))
-        if length < 0 or length > 16 * 1024 * 1024:
+        if length < 0 or length > 48 * 1024 * 1024:
             return self._json(413, {"error": "Request too large"})
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -508,6 +869,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "bad json"})
         if not isinstance(body, dict):
             return self._json(400, {"error": "JSON object required"})
+
+        if parsed.path == "/v1/models/unload":
+            if not GEN_LOCK.acquire(blocking=False):
+                return self._json(409, {"error": "Generation is active. Stop it and wait for it to finish before unloading."})
+            try:
+                requested = body.get("model")
+                if not isinstance(requested, str) or not requested:
+                    return self._json(400, {"error": "model required"})
+                from comfy_media import MODEL as comfy_model
+                if requested == comfy_model:
+                    return self._json(400, {"error": "This model is managed by the separate video runtime"})
+                if _loaded["id"] == requested:
+                    _loaded.update(id=None, pipe=None, kind=None, device=None)
+                backend = _tts.get("backend")
+                if getattr(backend, "active_model_name", None) == requested:
+                    backend.unload_model(requested)
+                gc.collect()
+                if DEVICE == "cuda":
+                    torch.cuda.empty_cache()
+                return self._json(200, {"ok": True, "model": requested, "loaded": False})
+            finally:
+                GEN_LOCK.release()
 
         if parsed.path in {f"{path}/cancel" for path in ("/v1/images/generations", "/v1/videos/generations", "/v1/audio/generations", "/v1/audio/speech")}:
             tag = body.get("tag")
@@ -527,10 +910,29 @@ class Handler(BaseHTTPRequestHandler):
         body["task"] = task_map.get(parsed.path, "image")
 
         tag = body.get("tag") or str(time.time())
+
+        def _stall_watchdog(stop_event):
+            # Per-job self-exit guard: if the job holds GEN_LOCK but progress
+            # freezes (uninterruptible disk sleep during a huge model load),
+            # hard-exit so systemd's Restart=always reclaims RAM and the queue.
+            while not stop_event.wait(15):
+                with STATE_LOCK:
+                    active = STATE.get("active")
+                    last_at = STATE.get("last_progress_at")
+                    wedged_tag = STATE.get("tag")
+                if active and last_at is not None:
+                    silent = time.monotonic() - last_at
+                    if silent > STALL_EXIT_SECONDS:
+                        print(f"[bridge] JOB WEDGED tag={wedged_tag} no progress for {int(silent)}s — exiting so systemd restarts the bridge (reclaims RAM, clears the queue); the client sees a connection error and can retry", flush=True)
+                        sys.stdout.flush()
+                        os._exit(75)
+
         with GEN_LOCK:
-            with STATE_LOCK:
-                STATE.update(tag=tag, active=True, phase="starting", step=None, steps=None, image=None, n=None)
+            stall_stop = threading.Event()
+            threading.Thread(target=_stall_watchdog, args=(stall_stop,), name="stall-watchdog", daemon=True).start()
             try:
+                touch_progress(tag=tag, active=True, phase="starting", step=None, steps=None,
+                               image=None, n=None, started_at=time.time())
                 result = run_job(body, tag)
                 return self._json(200, result)
             except ValueError as e:
@@ -541,9 +943,10 @@ class Handler(BaseHTTPRequestHandler):
                 traceback.print_exc()
                 return self._json(500, {"error": str(e)})
             finally:
+                stall_stop.set()
                 CANCEL_TAGS.discard(tag)
-                with STATE_LOCK:
-                    STATE.update(active=False)
+                _STALL_LOGGED.discard(tag)
+                touch_progress(active=False)
 
     def log_message(self, fmt, *args):
         print(f"[bridge] {self.address_string()} {fmt % args}")

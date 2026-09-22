@@ -8,7 +8,6 @@
   import { noAutofill } from '../lib/noAutofill.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
-  import Duck from './Duck.svelte';
   import ProviderFallback from './ProviderFallback.svelte';
   import ProviderPresets from './ProviderPresets.svelte';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -24,6 +23,17 @@
 
   const isOwner = $derived(app.user?.role === 'owner');
 
+  let providerView = $state('connections');
+  let routingModels = $state({});
+  async function openRouting() {
+    providerView = 'routing';
+    await Promise.all((providers ?? []).map(async p => {
+      try {
+        const r = await api(`/api/providers/${p.id}/models?show=all`);
+        routingModels = { ...routingModels, [p.id]: r.models ?? [] };
+      } catch { routingModels = { ...routingModels, [p.id]: 'error' }; }
+    }));
+  }
   let providers = $state(null);
   let error = $state(null);
   let loading = $state(false);
@@ -77,6 +87,7 @@
         r.sync?.ok ? 'ok' : 'error', 4200);
       fName = ''; fUrl = ''; fKey = ''; testRes = null;
       await load();
+      providerView = 'connections';
       loadModels(); // remote catalog changed → model picker refresh
     } catch (e) {
       toast(String(e.error ?? e.message ?? e), 'error');
@@ -308,10 +319,9 @@
 <div class="prov">
   <header class="head">
     <div class="title">
-      <Duck px={1.1} mood="idle" interactive />
       <div>
-        <h1>Providers</h1>
-        <p>Remote OpenAI-compatible endpoints — their models appear in the picker alongside local ones.</p>
+        <h1>Models &amp; connections</h1>
+        <p>Manage your providers, model catalogs, and fallback order.</p>
       </div>
     </div>
     <button class="ghost refresh" onclick={load} title="Refresh" disabled={loading}>
@@ -319,22 +329,29 @@
     </button>
   </header>
 
+  <nav class="view-tabs" aria-label="Provider views">
+    <button class:active={providerView === 'connections'} aria-current={providerView === 'connections' ? 'page' : undefined} onclick={() => providerView = 'connections'}>Connections <span>{providers?.length ?? 0}</span></button>
+    <button class:active={providerView === 'routing'} aria-current={providerView === 'routing' ? 'page' : undefined} onclick={openRouting}>Model routing</button>
+    {#if isOwner}<button class:active={providerView === 'add'} aria-current={providerView === 'add' ? 'page' : undefined} onclick={() => providerView = 'add'}><Plus size={14} />Add provider</button>{/if}
+  </nav>
   {#if error}
     <div class="empty">Couldn't load providers: {error}</div>
   {:else if !providers}
     <div class="empty shimmer">loading…</div>
   {:else}
-    <ProviderPresets {isOwner} onadded={() => load()} />
+    {#if providerView === 'add'}
+    <div class="view-intro"><h2>Add a connection</h2><p>Choose a provider below or connect your own compatible endpoint.</p></div>
+    <ProviderPresets {isOwner} onadded={() => { load(); providerView = 'connections'; }} />
     {#if isOwner}
       <section class="surface">
         <h2 class="subhead"><Plus size={13} /> Add a provider</h2>
         <div class="form">
-          <input type="text" bind:value={fName} placeholder="Name (optional — auto from URL)"
-            use:noAutofill spellcheck="false" />
-          <input type="url" bind:value={fUrl} placeholder="https://nano-gpt.com/api/v1"
-            use:noAutofill spellcheck="false" />
-          <input type="password" bind:value={fKey} placeholder="API key"
-            autocomplete="off" />
+          <label>Connection name<input type="text" bind:value={fName} placeholder="Name (optional — auto from URL)"
+            use:noAutofill spellcheck="false" /></label>
+          <label>Endpoint URL<input type="url" bind:value={fUrl} placeholder="https://nano-gpt.com/api/v1"
+            use:noAutofill spellcheck="false" /></label>
+          <label>API key<input type="password" bind:value={fKey} placeholder="API key"
+            autocomplete="off" /></label>
           <div class="formbtns">
             <button class="ghost testb" onclick={testConnection}
               disabled={testing || !fUrl.trim() || !fKey}>
@@ -358,8 +375,24 @@
       <div class="hintbar">Only the pond owner can add or change providers — you can browse what's connected.</div>
     {/if}
 
+    {/if}
+    {#if providerView === 'routing'}
+      <div class="view-intro"><h2>Model routing</h2><p>Set a fallback order for each provider. If a request fails before a reply starts, DuckPond tries the next available model.</p></div>
+      {#each providers as p (p.id)}
+        <section class="surface">
+          <div class="routing-provider"><Cloud size={18} /><h2>{p.name}</h2><span>{p.enabled ? 'Connected' : 'Disabled'}</span></div>
+          {#if routingModels[p.id] === 'error'}
+            <p class="hintbar">Couldn't load this model catalog. <button onclick={openRouting}>Retry</button></p>
+          {:else if !routingModels[p.id]}<p class="empty">Loading models…</p>
+          {:else}<ProviderFallback {p} models={routingModels[p.id]} {isOwner} onsave={(body, msg) => patchProvider(p, body, msg)} />{/if}
+        </section>
+      {/each}
+      {#if !providers.length}<div class="empty">Connect a provider to set up model routing.</div>{/if}
+    {/if}
+    {#if providerView === 'connections'}
+    <div class="view-intro"><h2>Your connections</h2><p>Choose a connection to manage its models, usage, and import preferences.</p></div>
     {#if !providers.length}
-      <div class="empty">No providers yet — add one above to unlock paid models and start saving with cache hits.</div>
+      <div class="empty">No providers connected yet. Use Add provider to get started.</div>
     {:else}
       {#each providers as p (p.id)}
         <section class="surface pcard" class:off={!p.enabled}>
@@ -532,8 +565,6 @@
                     : 'No models in the catalog — try Sync now.'}
                 </div>
               {:else}
-                <ProviderFallback {p} models={modelsByProv[p.id]} {isOwner}
-                  onsave={(body, msg) => patchProvider(p, body, msg)} />
                 <div class="tablewrap">
                   <table>
                     <thead>
@@ -621,6 +652,7 @@
         </section>
       {/each}
     {/if}
+    {/if}
   {/if}
 </div>
 
@@ -645,13 +677,6 @@
   .empty {
     padding: 48px 20px; text-align: center; color: var(--text-faint); font-size: 13px;
   }
-  .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 1.6s linear infinite;
-  }
-  @keyframes shimmer { to { background-position: -200% 0; } }
-
   .surface {
     background: var(--bg-card); border: 1px solid var(--border-soft);
     border-radius: calc(14px * var(--rf));
@@ -686,8 +711,8 @@
   .picon {
     display: grid; place-items: center; flex-shrink: 0;
     width: 32px; height: 32px; border-radius: calc(9px * var(--rf));
-    background: var(--accent-glow); border: 1px solid var(--accent-dim);
-    color: var(--accent);
+    background: var(--bg-raised); border: 1px solid var(--border-soft);
+    color: var(--text-dim);
   }
   .pwho { flex: 1 1 auto; min-width: 0; }
   .pname { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
@@ -747,7 +772,7 @@
     transition: transform 180ms cubic-bezier(0.25, 1, 0.35, 1), background 180ms ease;
   }
   .tog.on { background: var(--accent-deep); border-color: transparent; }
-  .tog.on .knob { transform: translateX(16px); background: #16110a; }
+  .tog.on .knob { transform: translateX(16px); background: var(--on-accent); }
 
   /* models table */
   .mtable { margin-top: 12px; }
@@ -838,10 +863,51 @@
     .phead { flex-wrap: wrap; }
     .tablewrap {
       width: 100%; max-width: 100%;
-      mask-image: linear-gradient(90deg, #000 92%, transparent);
+
     }
     table { width: max-content; min-width: 100%; font-size: 11px; }
     th, td { padding: 8px; }
     .mid { max-width: 140px; white-space: normal; word-break: break-all; font-size: 10.5px; }
+  }
+
+  .prov { max-width: 1180px; }
+  .head { margin-bottom: 28px; }
+  .view-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--border-soft); margin-bottom: 30px; overflow-x: auto; }
+  .view-tabs button { display: flex; align-items: center; gap: 8px; white-space: nowrap; background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--text-dim); padding: 12px 0; font-size: 13px; }
+  .view-tabs button.active { color: var(--text); border-bottom-color: var(--text); }
+  .view-tabs span { font-size: 11px; background: var(--bg-raised); padding: 0 6px; border-radius: 4px; }
+  .view-intro { margin-bottom: 24px; }
+  .view-intro h2 { font-size: 17px; margin: 0 0 6px; font-weight: 550; letter-spacing: -.02em; }
+  .view-intro p { font-size: 13px; color: var(--text-dim); margin: 0; max-width: 660px; }
+  .surface { padding: 24px; border-radius: calc(10px * var(--rf)); background: var(--bg); }
+  .phead { gap: 14px; }
+  .picon { width: 40px; height: 40px; }
+  .pname { font-size: 17px; letter-spacing: -.02em; }
+  .pmeta { margin-left: 54px; margin-bottom: 20px; }
+  .prow { padding-top: 16px; margin-top: 16px; }
+  .ct { min-width: 134px; }
+  .cachetog { flex-wrap: wrap; }
+  .form { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .form label { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-dim); min-width: 0; }
+  .form label:nth-child(2), .formbtns, .testok, .testerr { grid-column: 1 / -1; }
+  .form label:nth-child(2) { grid-row: 1; }
+  .formbtns { justify-content: flex-end; padding-top: 8px; }
+  .subhead { text-transform: none; letter-spacing: 0; color: var(--text); font-size: 15px; margin-bottom: 22px; }
+  .routing-provider { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .routing-provider h2 { font-size: 16px; font-weight: 550; margin: 0; }
+  .routing-provider > span { margin-left: auto; font-size: 12px; color: var(--text-dim); }
+  .chip.on { background: var(--bg-raised); border-color: var(--border); color: var(--text); }
+  @media(max-width: 768px) {
+    .prov { padding: 24px 16px; }
+    .title h1 { font-size: 24px; }
+    .view-tabs { gap: 20px; margin-bottom: 24px; }
+    .surface { padding: 18px; }
+    .pmeta { margin-left: 0; }
+    .form { grid-template-columns: 1fr; }
+    .form label:nth-child(2) { grid-row: auto; }
+    .pbtns { width: 100%; }
+    .cachetog { width: 100%; gap: 12px; }
+    .capspend, .pmeta.inline { width: 100%; margin: 0; }
+    .pcard { min-width: 0; }
   }
 </style>

@@ -117,10 +117,7 @@ workspace. If you catch yourself about to write "file 1 of 4" in chat, you do.
 When it is genuinely ambiguous, ask in one short sentence rather than guessing —
 starting a project the user did not want is the more annoying mistake.
 
-CRITICAL — no hosting / no ports:
-- NEVER start a long-running web server, dev server, or anything that listens on a port (no npm run dev, vite, webpack-dev-server, python -m http.server, flask/django/express listen, etc.).
-- There is no live preview host. The user previews HTML/CSS/JS in-canvas in the DuckPond Files rail (static files only) and can download any file.
-- For websites/apps, write complete static files (index.html + css/js) or a self-contained HTML document. For scripts, write the file and verify with a one-shot command (node x.js, python x.py, tests) that exits.
+Use the project's existing stack. Managed development servers and a live preview are available through start_server and server_status once the workspace is active.
 
 If you do call start_project, briefly tell the user what you're about to build first, then call the tool with a short kebab-case name and a concise plan.`;
 
@@ -133,7 +130,11 @@ Rules:
 - Keep PLAN.md current: check items off as you finish them; update it when the plan changes.
 - Look before you leap: list or read files before editing them.
 - write_file replaces the whole file — always write complete content, never fragments or placeholders.
-- NEVER start long-running servers or bind ports. No dev servers. Write static HTML/CSS/JS for UIs; the user previews them in-canvas and can download files. Verify with one-shot commands that exit (node, python, test runners, build tools that finish).
+- Search filenames and source text with search_files before guessing where code lives. Read AGENTS.md and the project manifest before changing an existing project. Follow its conventions and preserve unrelated changes.
+- Create and edit real project files. Keep the existing framework; use package installs, builds and tests as needed. Use start_server for a managed development server, then server_status to check readiness and logs. Vite needs --host 0.0.0.0 --port 3000 --base "$DUCKPOND_PREVIEW_BASE". Other frameworks must serve assets under that preview base path.
+- Read AGENTS.md and .todo/.todos/TODO.md, honor nested instructions, and check off work only after verifying it.
+- Use browser to inspect a public site, LAN IP, or project dev server. Navigate, click and fill controls, inspect the returned page structure, screenshots and console errors. Fix problems and repeat the checks. Browser sessions are isolated from the user’s personal browser.
+- Verify the requested behavior before reporting completion. Inspect errors and iterate. Report what was actually tested and any remaining limits.
 - Package installs pause for the user's approval and may be denied; if denied, adapt.
 - After tool work, finish with a short plain-text summary: what you built, how you verified it, what could come next. No tool calls in that final message.`;
 
@@ -197,6 +198,7 @@ export function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, user
     const files = listTree(wsRow).slice(0, 60)
       .map((f) => (f.dir ? `${f.path}/` : f.path)).join('\n');
     parts.push(`Current workspace files:\n${files || '(empty)'}`);
+    if (wsRow.host_path) parts.push(`This workspace is linked to an existing host project at ${wsRow.host_path}. Edits in /workspace change its real source files. A deployment may watch these files; follow the user's requested scope.`);
   }
   const policy = parts.join('\n\n');
   if (promptMessages[0]?.role === 'system') {

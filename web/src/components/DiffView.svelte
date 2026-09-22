@@ -57,7 +57,7 @@
   <div class="stats"><span class="a">+{adds}</span><span class="d">−{dels}</span></div>
   <div class="lines">
     {#each rows as r}
-      <div class="line {r.t}">{r.text || ' '}</div>
+      <div class="line {r.t}"><span class="marker" aria-hidden="true">{r.t === 'add' ? '+' : r.t === 'del' ? '−' : ' '}</span><span>{r.text || ' '}</span></div>
     {/each}
   </div>
 </div>
@@ -75,8 +75,9 @@
   .a { color: var(--green); } .d { color: var(--red); }
   .lines { max-height: 320px; overflow: auto; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
   .line { padding: 0 10px; white-space: pre-wrap; word-break: break-all; }
-  .line.add { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--text); }
-  .line.del { background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--text-dim); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--red) 45%, transparent); }
+  .line.add { background: none; color: var(--text); }
+  .line.del { background: color-mix(in srgb, var(--red) 5%, var(--bg)); color: var(--text-dim); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--red) 45%, transparent); }
   .line.same { color: var(--text-dim); }
   .line.fold { color: var(--text-faint); text-align: center; padding: 2px 0; user-select: none; }
+  .line { display: flex; gap: 10px; padding: 1px 12px; } .marker { width: 12px; flex-shrink: 0; user-select: none; color: var(--text-faint); } .add .marker { color: var(--green); } .del .marker { color: var(--red); } .line > span:last-child { min-width: 0; }
 </style>

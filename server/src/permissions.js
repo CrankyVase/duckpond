@@ -31,10 +31,15 @@ export const RISK = { READ: 'read', WRITE: 'write', EXEC: 'exec', EXTERNAL: 'ext
 export const TOOL_RISK = {
   // read-only
   list_files: RISK.READ,
+  search_files: RISK.READ,
+  server_status: RISK.READ,
+  start_server: RISK.EXEC,
+  stop_server: RISK.EXEC,
   read_file: RISK.READ,
   web_search: RISK.READ,
   fetch_page: RISK.READ,
   screenshot: RISK.READ,
+  browser: RISK.READ,
   github_read_file: RISK.READ,
   github_list_files: RISK.READ,
   github_repo_info: RISK.READ,
@@ -115,7 +120,7 @@ export function setUserPolicy(userId, patch) {
  */
 export function decideTool(userId, name, args = {}) {
   const policy = userPolicy(userId);
-  const risk = riskOf(name);
+  const risk = name === 'browser' && ['click', 'fill', 'press'].includes(args.action) ? RISK.EXEC : riskOf(name);
 
   // Per-tool override beats the mode in both directions.
   const override = policy.overrides[name];

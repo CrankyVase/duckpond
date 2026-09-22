@@ -437,7 +437,7 @@
 
   /* ---------- widget grouping: compact cards flow side-by-side ---------- */
   .wgroup { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
-  .wgroup > :global(*) { margin-top: 0; margin-bottom: 0; }
+  .wgroup > :global(*) { flex: 1 1 300px; min-width: 0; margin-top: 0; margin-bottom: 0; }
 
   /* ---------- citation pills (built by mdEnhance) ---------- */
   .abody :global(.citepill) {

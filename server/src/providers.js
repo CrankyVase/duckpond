@@ -1,3 +1,4 @@
+import { trackStreamProgress } from './streamProgress.js';
 // Remote OpenAI-compatible providers (nano-gpt, OpenRouter, …): catalog sync,
 // pricing normalization, and a streaming chat client that mirrors llama.js
 // streamChat's shape so the whole chat pipeline works unchanged on remote ids.
@@ -491,6 +492,7 @@ export function estimateTokens(messages) {
 // resolves { content, reasoning, timings:null, usage, toolCalls, finishReason }.
 
 export async function streamRemote({ provider, model, messages, params = {}, onDelta, abortSignal }) {
+  onDelta = trackStreamProgress(onDelta, { messages, tools: params.tools });
   const res = await fetch(stripSlash(provider.base_url) + '/chat/completions', {
     method: 'POST',
     signal: abortSignal,
@@ -597,6 +599,7 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
   const tail = splitter.flush();
   if (tail.reasoning) { reasoning += tail.reasoning; onDelta?.('', { reasoning: tail.reasoning }); }
   if (tail.text) { content += tail.text; onDelta?.(tail.text, {}); }
+  onDelta.finish(usage);
   return { content, reasoning, timings: null, usage, toolCalls: toolCalls.filter(Boolean), finishReason };
 }
 

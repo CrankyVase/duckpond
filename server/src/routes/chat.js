@@ -6,7 +6,7 @@ import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { countInputTokens, isModelLoaded, streamChat } from '../llama.js';
 import { estimateTokens } from '../providers.js';
-import { stopRunsForWorkspace } from './agent.js';
+import { createWorkspaceRow, stopRunsForWorkspace } from './agent.js';
 import {
   attachListener, getLiveJob, stopLiveJob,
 } from '../liveJobs.js';
@@ -56,13 +56,16 @@ export default async function chatRoutes(app) {
   }
 
   app.get('/api/conversations', async (req) =>
-    db.prepare(`SELECT id, title, model_id, updated_at FROM conversations
+    db.prepare(`SELECT id, title, model_id, updated_at, mode, workspace_id FROM conversations
                 WHERE user_id = ? ORDER BY updated_at DESC`).all(req.user.id));
 
-  app.post('/api/conversations', async (req) => {
-    const { model_id } = req.body ?? {};
-    const r = db.prepare('INSERT INTO conversations (user_id, model_id) VALUES (?, ?)')
-      .run(req.user.id, model_id ?? null);
+  app.post('/api/conversations', async (req, reply) => {
+    const { model_id, mode = 'chat', workspace_id = null } = req.body ?? {};
+    if (!['chat', 'agent'].includes(mode)) return reply.code(400).send({ error: 'Invalid mode' });
+    if (workspace_id && !db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(workspace_id, req.user.id)) return reply.code(404).send({ error: 'Project not found' });
+    const ws = mode === 'agent' ? (workspace_id || createWorkspaceRow(req.user.id, 'New project').id) : null;
+    const r = db.prepare('INSERT INTO conversations (user_id, model_id, mode, workspace_id) VALUES (?, ?, ?, ?)')
+      .run(req.user.id, model_id ?? null, mode, ws);
     return db.prepare('SELECT * FROM conversations WHERE id = ?').get(r.lastInsertRowid);
   });
 
@@ -76,7 +79,12 @@ export default async function chatRoutes(app) {
   app.patch('/api/conversations/:id', async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
-    const { title, model_id, active_leaf_id, settings } = req.body ?? {};
+    const { title, model_id, active_leaf_id, settings, workspace_id } = req.body ?? {};
+    if (workspace_id !== undefined) {
+      if (getLiveJob(conv.id)?.status === 'running') return reply.code(409).send({ error: 'Stop the active task before changing projects' });
+      if (conv.mode !== 'agent' || !db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(workspace_id, req.user.id)) return reply.code(400).send({ error: 'Select a project you own in Agent mode' });
+      db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(workspace_id, conv.id);
+    }
     if (title !== undefined)
       db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(String(title).slice(0, 200), conv.id);
     if (model_id !== undefined)

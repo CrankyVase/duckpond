@@ -67,10 +67,10 @@ export function makeTurnDelta({ send, abort, log, thinkTimeoutMs, spec }) {
     if (meta?.toolFrag) { disarmThink(); spec.onFrag(meta.toolFrag); send({ type: 'tool_delta', ...meta.toolFrag }); }
     if (chunk) { disarmThink(); reasoningTail = ''; send({ type: 'delta', text: chunk }); }
     const now = Date.now();
-    if (now - lastTick > 500 && meta?.timings) {
+    if (meta?.timings && (meta.final || now - lastTick >= 500)) {
       lastTick = now;
       send({ type: 'tok_s', value: meta.timings.predicted_per_second ?? null,
-        n: meta.timings.predicted_n ?? 0, promptN: meta.timings.prompt_n });
+        n: meta.timings.predicted_n ?? 0, promptN: meta.timings.prompt_n, estimated: !!meta.timings.estimated });
     }
   };
   return { onDelta, disarmThink, clearTimer: disarmThink };
@@ -465,6 +465,8 @@ send({ type: 'agent_start', run, workspace: wsRow });
       else if (e.reasoning) send({ type: 'thinking', text: e.reasoning });
     } else if (e.type === 'tool_delta') {
       send({ type: 'tool_delta', index: e.index, name: e.name, args: e.args });
+    } else if (e.type === 'tok_s') {
+      send({ type: 'tok_s', value: e.value, n: e.n, promptN: e.promptN, estimated: e.estimated });
     } else if (e.type === 'context') {
       // live context accounting straight from the agent loop (per step)
       send({ type: 'context', used: e.used, budget: e.budget });

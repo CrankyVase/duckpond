@@ -109,10 +109,10 @@
     position: absolute; top: -10px; right: -10px; z-index: 4;
     display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
     color: var(--text-dim); background: var(--bg-card);
-    border: 1px solid var(--border-soft); box-shadow: var(--shadow-lg); cursor: pointer;
+    border: 1px solid var(--border-soft); cursor: pointer;
     opacity: 0; transition: opacity 140ms ease, background 140ms ease;
   }
-  .wcard:hover .dl { opacity: 1; }
+  .wcard:hover .dl, .wcard:focus-within .dl { opacity: 1; }
   .dl:hover { background: var(--bg-hover); color: var(--text); }
   .dl:disabled { opacity: 0.4; }
   @media (max-width: 768px) {
@@ -125,4 +125,5 @@
     margin: 10px 0; padding: 8px 12px; font-size: 12px; color: var(--text-faint);
     border: 1px dashed var(--border); border-radius: calc(10px * var(--rf));
   }
+  .dl { right: 6px; top: -12px; border-radius: calc(6px * var(--rf)); }
 </style>

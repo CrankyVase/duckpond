@@ -118,11 +118,4 @@
   .sdom { color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; }
   .more { font-size: 11px; color: var(--text-faint); padding: 2px 8px; }
 
-  .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 1.6s linear infinite;
-  }
-  @keyframes shimmer { to { background-position: -200% 0; } }
 </style>

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:workspace": "node test/workspaceState.test.mjs && node test/modelReadiness.test.mjs",
     "test": "node test/hubReadme.test.mjs"
   },
   "devDependencies": {

@@ -1,4 +1,5 @@
 <script>
+  import AgentProject from './components/AgentProject.svelte';
   import Chat from './components/Chat.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import CostsPanel from './components/CostsPanel.svelte';
@@ -274,27 +275,34 @@
       <Sidebar />
       <main>
         <Topbar />
-        {#key app.view}
-          {#if app.view === 'stats'}
-            <div class="panel-enter view-panel"><StatsPanel /></div>
-          {:else if app.view === 'speech'}
-            <div class="panel-enter view-panel"><SpeechPanel /></div>
-          {:else if app.view === 'files'}
-            <div class="panel-enter view-panel"><FilesPanel /></div>
-          {:else if app.view === 'media'}
-            <div class="panel-enter view-panel"><MediaPanel /></div>
-          {:else if app.view === 'providers'}
-            <div class="panel-enter view-panel"><ProvidersPanel /></div>
-          {:else if app.view === 'costs'}
-            <div class="panel-enter view-panel"><CostsPanel /></div>
-          {:else if app.view === 'hub'}
-            <div class="panel-enter view-panel"><HubPanel /></div>
-          {:else if app.view === 'settings'}
-            <div class="panel-enter view-panel"><SettingsPanel /></div>
-          {:else}
-            <div class="view-panel"><Chat /></div>
-          {/if}
-        {/key}
+        <!-- Chat ↔ Agent swaps the whole workspace: the project bar and thread
+             settle into place together instead of snapping. -->
+        <div class="viewport">
+          {#key app.view === 'chat' ? `mode-${app.mode}|${app.conv?.id ?? 'none'}` : app.view}
+            <div class="modewrap" class:from-agent={app.view === 'chat' && app.mode === 'agent'}>
+              {#if app.view === 'chat' && app.mode === 'agent'}<AgentProject />{/if}
+              {#if app.view === 'stats'}
+                <div class="panel-enter view-panel"><StatsPanel /></div>
+              {:else if app.view === 'speech'}
+                <div class="panel-enter view-panel"><SpeechPanel /></div>
+              {:else if app.view === 'files'}
+                <div class="panel-enter view-panel"><FilesPanel /></div>
+              {:else if app.view === 'media'}
+                <div class="panel-enter view-panel"><MediaPanel /></div>
+              {:else if app.view === 'providers'}
+                <div class="panel-enter view-panel"><ProvidersPanel /></div>
+              {:else if app.view === 'costs'}
+                <div class="panel-enter view-panel"><CostsPanel /></div>
+              {:else if app.view === 'hub'}
+                <div class="panel-enter view-panel"><HubPanel /></div>
+              {:else if app.view === 'settings'}
+                <div class="panel-enter view-panel"><SettingsPanel /></div>
+              {:else}
+                <div class="view-panel"><Chat /></div>
+              {/if}
+            </div>
+          {/key}
+        </div>
       </main>
       <ThemeStudio />
     </div>
@@ -345,6 +353,34 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+  /* workspace swap shell — keyed so mode/panel changes settle in */
+  .viewport {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .modewrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: workspaceIn 300ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  /* agent brings its own header, so it settles a touch deeper */
+  .modewrap.from-agent { animation-name: workspaceInAgent; }
+  @keyframes workspaceIn {
+    from { opacity: 0; transform: translateY(7px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes workspaceInAgent {
+    from { opacity: 0; transform: translateY(11px); }
+    to { opacity: 1; transform: none; }
   }
   /* boundary failure screen — the last thing standing when rendering dies */
   .crashed {

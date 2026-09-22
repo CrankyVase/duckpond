@@ -1,3 +1,4 @@
+import { createDownloadRate } from './downloadRate.js';
 // Download manager — Unsloth Studio's architecture mapped onto Node.
 // (Studied from their AGPL source: studio/backend/hub/services/download_lifecycle.py
 //  + hub/utils/download_registry.py. Ideas copied, code is ours.)
@@ -68,21 +69,8 @@ function scanProgress(repoId, include) {
   return { downloadedBytes: downloaded + incomplete, totalBytes: null };
 }
 
-// Speed/ETA from a rolling window of disk-scan samples (increase-to-increase,
-// Unsloth's transfer-stats estimator). Silent until 3 samples over ≥3s.
-const samples = new Map(); // key -> [{t, bytes}]
-function sampleSpeed(key, bytes) {
-  const now = Date.now();
-  const arr = samples.get(key) ?? [];
-  arr.push({ t: now, bytes });
-  while (arr.length > 12) arr.shift();
-  samples.set(key, arr);
-  if (arr.length < 3 || now - arr[0].t < 3000) return { speed: null, eta: null };
-  const span = (now - arr[0].t) / 1000;
-  const gained = bytes - arr[0].bytes;
-  if (gained <= 0) return { speed: null, eta: null };
-  return { speed: Math.round(gained / span), eta: null };
-}
+// Speed/ETA from a time window of disk scans; extra polling tabs share it.
+const sampleSpeed = createDownloadRate();
 
 // ---------------------------------------------------------------------------
 // Worker lifecycle. One subprocess per job, `hf download` with --include for
@@ -153,10 +141,9 @@ function refreshProgress(job) {
   const { downloadedBytes } = scanProgress(job.repoId, job.include);
   job.downloadedBytes = downloadedBytes;
   const { speed } = sampleSpeed(job.key, downloadedBytes);
-  if (speed) job.speedBytesPerSec = speed;
-  if (job.totalBytes && speed) {
-    job.etaSec = Math.max(0, Math.round((job.totalBytes - downloadedBytes) / speed));
-  }
+  job.speedBytesPerSec = speed;
+  job.etaSec = job.totalBytes && speed
+    ? Math.max(0, Math.round((job.totalBytes - downloadedBytes) / speed)) : null;
   return job;
 }
 

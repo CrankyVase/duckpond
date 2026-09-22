@@ -3,11 +3,12 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "DuckPond \u2014 self-hosted local-LLM chat + agentic coding workbench (server)",
+  "description": "DuckPond — self-hosted local-LLM chat + agentic coding workbench (server)",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs && node test/hfassets.test.mjs && node test/livejobs.test.mjs && node test/deployment.test.mjs && node test/deploy-script.test.mjs && node test/modelKind.test.mjs",
+    "test:workspace": "node test/agentContext.test.mjs && node test/workspaceReliability.test.mjs && node test/projectFiles.test.mjs && node test/mediaPause.test.mjs",
+    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs && node test/hfassets.test.mjs && node test/livejobs.test.mjs && node test/deployment.test.mjs && node test/deploy-script.test.mjs && node test/modelKind.test.mjs && node test/streamProgress.test.mjs && node test/workspacePreview.test.mjs && node test/downloadRate.test.mjs && node test/mediaJobs.test.mjs && node test/mediaEta.test.mjs",
     "test:media": "python3 -m unittest discover -s image-bridge/test -p \"*_test.py\""
   },
   "dependencies": {
@@ -17,7 +18,9 @@
     "argon2": "^0.44.0",
     "better-sqlite3": "^12.2.0",
     "fastify": "^5.4.0",
+    "playwright": "^1.63.0",
     "pptxgenjs": "^4.0.1",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.3"
   }
 }

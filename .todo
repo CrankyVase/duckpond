@@ -1,8 +1,8 @@
 # Duckpond — hardest to easiest
 
-Started 2026-09-06; updated 2026-09-07. Preserve the broad main chat layout.
-User constraint: do not load or run models yet. No inference, cloning-quality tests,
-weight downloads, or performance benchmarks until the user resumes that work.
+Started 2026-09-06; updated 2026-09-08. Preserve the broad main chat layout.
+Historical September 8 constraint (superseded): model execution was paused.
+The user resumed model installation and real image/video inference September 20–21.
 
 1. Media backend compatibility and model lifecycle
    - [x] Classify architecture/task/runtime and detect incomplete local weights.
@@ -24,7 +24,13 @@ weight downloads, or performance benchmarks until the user resumes that work.
          restart; legacy health responses defer automatically until then.
    - [x] Preserve context accounting in reconnect snapshots; initialize counts
          before decoding and consume prompt timings; ignore stale count fetches.
-   - [ ] Complete live counts for all remote/agent routes and test long turns.
+   - [x] Stream local/remote/agent context telemetry during text, reasoning and
+         tool arguments; mark estimates and replace them with measured usage.
+   - [x] Release reconnect lock before retrying; deduplicate replayed completions;
+         restore newly-created workspace metadata on reattach.
+   - [ ] Test long turns with real models later; no inference in this checkpoint.
+   - Found for next limits pass: remote output defaults differ between llama.js
+     (4096) and chatBackend.js (up to 16384); settings do not expose max_tokens.
    - [ ] Reproduce the reported history disappearance after errors; verify saved
          tree/branch/partial-work recovery through disconnects and process exit.
    - [x] Isolate individual message render failures with a raw-text fallback.
@@ -48,7 +54,12 @@ weight downloads, or performance benchmarks until the user resumes that work.
    - [ ] Reproduce intermittent HTML/project preview failures, including relative
          assets, nested projects, module scripts, runtime errors and reloads.
    - [x] Isolate inline code-block preview scripts from the app origin.
-   - [ ] Give multi-file project previews an isolated origin with reliable assets.
+   - [x] Give static workspace previews an opaque sandbox origin and expiring,
+         read-only asset links; verify nested CSS and module imports in Chromium.
+   - [x] Show preview beside coding chat, refresh after file/tool changes, preserve
+         the file tree on fetch errors, report preview errors without losing chat.
+   - [ ] Extend previews for root-relative assets, bundler/dev-server projects,
+         workers, external dependencies and route-based applications.
    - [ ] Preserve code, tool output, and errors throughout retries and reconnects.
 6. Equal-context performance work
    - [x] Avoid needless media reloads/cleanup; enable inference mode.
@@ -61,21 +72,53 @@ weight downloads, or performance benchmarks until the user resumes that work.
    - [x] Discover / My Models / Downloads hierarchy; quieter filters and cards.
    - [x] Fix Hub startup initialization and stale search response races.
    - [x] Simplify sidebar without changing the main chat layout.
+   - [x] Reactive download Map; compact queue summary preserves catalog height;
+         live progress/ETA, visible failed starts, cancellation failure recovery.
+   - [x] Sample ETA by elapsed time across polling tabs; clear stale stalled rates.
    - [ ] Browser review with real catalog metadata and larger saved galleries.
 8. Coding/tool-call presentation and remaining visual polish
-   - [ ] Redesign agent run feed: clear current action, compact completed tools,
-         readable file/diff previews, progress, useful error and resume states.
-         User screenshot: Snake project run, oversized stacked green diff blocks.
-         Do this with the agent backend work, after higher-priority reliability.
+   - [x] Compact completed file/command rows, on-demand diffs, clear action labels
+         and neutral widget layouts; preserve main chat's broad layout.
+   - [ ] Continue agent error/resume controls with durable backend checkpoints.
    - [x] First spacing/typography consistency pass across auxiliary panels.
-   - [ ] Full interaction/accessibility/responsive pass for Speech, Settings,
-         Providers, Files, Stats and Costs; preserve chat's broad layout.
+   - [x] Focused Settings navigation/search; connection/routing/add-provider views;
+         searchable model picker; Files, Stats and Costs layouts. Browser checks
+         at desktop/tablet/phone widths with synthetic API data.
+   - [ ] Complete Speech Lab interaction/accessibility review.
 9. Verification and archival
    - [x] Add no-model regression tests and reusable mocked browser smoke script.
    - [x] Final server/media/web checks and production build for this checkpoint.
    - [x] First source checkpoint pushed to GitHub: 2094bf4.
    - [x] Deployment follow-up verified with simulated requests and service commands.
 
+2026-09-08 checkpoint: frontend layouts plus download/preview/live-status repairs.
+Validation is synthetic only; no weights downloaded, models loaded, inference run,
+production server restarted or performance benchmark claimed. Full process-restart
+job durability and the broader timeout/output-limit audit remain open above.
+
 Scope: arbitrary downloaded weights need matching runtime adapters. Unsupported
 and incomplete models must remain visibly distinct from usable ones. Metadata
 readiness is not a guarantee of GPU fit or generation quality.
+
+
+## Active work — September 21: MiniMax-informed coding workbench
+
+Source: MiniMax-AI/minimax-code, 4357fe493125fc6bd90839594e77e7038ec0ac7a.
+User wants spacious UI, real project editing, .todo tracking, browser/LAN inspection,
+and repeated test/fix cycles. Preserve model choice; no model-size gate.
+
+- [x] Read previous session and preserve existing worktree changes.
+- [x] Stable resizable preview/files pane, inline source, project setup dialog.
+- [x] Test desktop/tablet/phone layout and real linked-project execution.
+- [x] Inspect MiniMax TodoWrite, browser artifacts, turn runner and retry design.
+- [x] Implement and test browser navigation, click/fill, screenshots, console errors.
+- [x] Load project AGENTS.md and .todo/.todos files at run start.
+- [ ] Wire browser observations and screenshots into live UI and model context; verify integration.
+- [ ] Implement persistent task plan and status updates inspired by MiniMax TodoWrite.
+- [ ] Implement cancellation for commands and reliable long-run continuation.
+- [ ] Make the coding workspace spacious, readable and visually reviewed.
+- [x] Fix active media service Python environment; Qwen image generated on AMD.
+- [ ] Fix H3 text encoder GGUF metadata/loader compatibility and empty-response handling.
+- [ ] Generate a real H3 video on the installed hardware; verify playable output.
+- [ ] Persist runtime service configuration and verify deployment.
+- [ ] Run final regression checks; document verified behavior and remaining gaps.

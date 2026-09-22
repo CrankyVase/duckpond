@@ -25,7 +25,7 @@ Web UI auto-rebuilds and restarts on file changes (every 2 min via `duckpond-dep
   activity log of what ran unattended
 - **GitHub** — read repos, pull one into the workspace, commit, push and open pull requests
   (each with your approval)
-- **Image generation** — in-chat image gen via diffusion bridge (FLUX, SDXL)
+- **Image generation** — in-chat image gen via diffusion bridge (Qwen-Image 2.1, with Fast/Balanced/Quality/Custom presets and ETA projections)
 - **Markdown rendering** — block-memoized, rAF-batched, with mermaid diagrams, LaTeX, code blocks
 - **Speech** — TTS via Piper, STT via whisper.cpp
 - **Duck mascot** — 32×32 pixel duck with 44+ animations, moods, pet interactions

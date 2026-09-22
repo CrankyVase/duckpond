@@ -41,7 +41,7 @@
 
 <div class="replay">
   <div class="head">
-    <button class="toggle" onclick={() => (open = !open)}>
+    <button class="toggle" aria-expanded={open} onclick={() => (open = !open)}>
       <span class="hicon"><Hammer size={13} /></span>
       <span class="label">Agent run</span>
       <span class="sum">{summary}</span>
@@ -79,4 +79,5 @@
   .chev { display: grid; place-items: center; transition: transform 140ms ease; color: var(--text-faint); }
   .chev.open { transform: rotate(180deg); }
   .body { padding: 10px 12px; border-top: 1px solid var(--border-soft); }
+.replay { background: var(--bg); } .toggle { padding: 14px 16px; gap: 10px; } .hicon { color: var(--text-dim); } .st { margin-left: auto; background: none; } .body { padding: 16px; }
 </style>

@@ -11,7 +11,7 @@
 
   // last three real chats (the empty one we're sitting in doesn't count)
   const recents = $derived(
-    app.conversations.filter((c) => c.id !== app.conv?.id).slice(0, 3)
+    app.conversations.filter((c) => c.id !== app.conv?.id && (c.mode || 'chat') === app.mode).slice(0, 3)
   );
   function ago(t) {
     const s = Math.max(1, Math.floor(Date.now() / 1000 - t));
@@ -24,7 +24,12 @@
     return d === 1 ? 'yesterday' : `${d} days ago`;
   }
 
-  const chips = [
+  const chips = $derived(app.mode === 'agent' ? [
+    { icon: Code, label: 'Explore this project', prompt: 'Inspect this project: read its instructions and manifest, find the entry points, and explain how to run and test it.' },
+    { icon: FileText, label: 'Find a file', prompt: 'Search this project for the file that handles ' },
+    { icon: Boxes, label: 'Build something', prompt: 'Create a working web app in this project. ' },
+    { icon: Brain, label: 'Run the tests', prompt: 'Find and run the project tests. Diagnose failures and fix the relevant code, then rerun the affected tests.' },
+  ] : [
     { icon: Brain, label: 'Explain transformers',
       prompt: 'Explain how transformer architectures work in simple terms.' },
     { icon: Code, label: 'Write a script',
@@ -33,7 +38,7 @@
       prompt: 'Help me design a browser voxel game engine with Three.js — chunks, meshing, and picking.' },
     { icon: FileText, label: 'Summarize text',
       prompt: 'Summarize the following text into a few bullet points:\n\n' },
-  ];
+  ]);
 
   const hour = new Date().getHours();
   const greeting =
@@ -45,11 +50,10 @@
   const name = $derived(app.user?.username || 'there');
 </script>
 
-<div class="welcome">
-  <div class="pond">
-    <Duck px={2.5} mood="swim" interactive />
-  </div>
-  <h2>{greeting}, {name}</h2>
+<div class="welcome" class:agent={app.mode === 'agent'}>
+  <div class="workspace-label">{app.mode === 'agent' ? 'PROJECT WORKSPACE' : 'A SPACE TO THINK'}</div>
+  <h2>{app.mode === 'agent' ? 'What do you want to build?' : `${greeting}, ${name}`}</h2>
+  <p>{app.mode === 'agent' ? 'Make a change, investigate a problem, or build something new. Your project stays at the center.' : 'Talk through an idea, find an answer, or work something out.'}</p>
   <div class="chips">
     {#each chips as c (c.label)}
       <button
@@ -79,6 +83,8 @@
 </div>
 
 <style>
+  .workspace-label { font-size: 10px; letter-spacing: .14em; color: var(--accent-dim); margin-bottom: 18px; }
+  .welcome > p { color: var(--text-dim); font-size: 14px; line-height: 1.75; max-width: 450px; margin: 0 0 26px; }
   .welcome {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     min-height: min(52vh, 460px);
@@ -89,13 +95,12 @@
   .pond {
     display: grid; place-items: center;
     width: 80px; height: 80px; border-radius: 22px;
-    background: var(--bg-raised);
-    border: 1px solid var(--border-soft);
+    background: transparent;
     margin-bottom: 18px;
   }
   h2 {
     margin: 0 0 24px;
-    font-size: clamp(20px, 3.6vw, 24px);
+    font-size: clamp(24px, 3.6vw, 32px);
     font-weight: 500;
     letter-spacing: -0.02em;
     color: var(--text);
@@ -112,7 +117,7 @@
     font-size: 13px; font-weight: 450; color: var(--text-dim);
     background: var(--bg-raised);
     border: 1px solid var(--border-soft);
-    border-radius: 999px;
+    border-radius: 8px;
     transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
   }
   .chip :global(svg) {
@@ -172,4 +177,11 @@
     .recents { margin-top: 20px; }
     .recent { min-height: 44px; }
   }
+  .agent { align-items: flex-start; text-align: left; min-height: min(46vh, 420px); padding: 32px 8px; }
+  .agent .pond { width: 48px; height: 48px; margin-bottom: 20px; }
+  .agent h2 { margin-bottom: 10px; }
+  .agent p { font-size: 13px; line-height: 1.7; color: var(--text-dim); margin: 0 0 28px; max-width: 360px; }
+  .agent .chips { display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 440px; }
+  .agent .chip { border: 0; border-bottom: 1px solid var(--border-soft); border-radius: 0; padding: 12px 0; background: transparent; text-align: left; }
+  .agent .recents { width: 100%; }
 </style>

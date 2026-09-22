@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import { createDownloadRate } from '../src/downloadRate.js';
+let time=0;
+const sample=createDownloadRate({now:()=>time});
+for(time=0;time<=5000;time+=100) sample('job',time*1000);
+assert.equal(sample('job',time*1000).speed,1000000,'frequent concurrent polling still measures one MB/s');
+time=20000;
+assert.equal(sample('job',5000000).speed,null,'a stalled transfer clears its stale ETA');
+time=21000;
+assert.equal(sample('job',0).speed,null,'retry resets the rate window');
+assert.equal(sample('different-job',100).speed,null,'jobs have independent windows');
+console.log('Download rate checks passed: multiple pollers, stalls and retries.');

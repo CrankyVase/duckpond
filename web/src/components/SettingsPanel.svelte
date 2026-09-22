@@ -5,7 +5,6 @@
   import { app, loadModels } from '../lib/state.svelte.js';
   import { applyTheme, persistTheme, sanitizeEffects, theme } from '../lib/theme.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
-  import Duck from './Duck.svelte';
   import { NAV_ITEMS } from './Sidebar.svelte';
   import Brain from '@lucide/svelte/icons/brain';
   import Gauge from '@lucide/svelte/icons/gauge';
@@ -187,7 +186,7 @@
 
   // mirror the current model's settings into the editable form
   $effect(() => {
-    form = model ? { ...model.settings, disabledTools: [...(model.settings.disabledTools ?? [])] } : null;
+    form = model ? { ...model.settings, disabledTools: [...(model.settings?.disabledTools ?? [])] } : null;
   });
 
   // one-time page loads
@@ -224,7 +223,12 @@
   async function loadImageModels() {
     try {
       const m = await api('/api/images/models');
-      imageModels = m.models?.length ? m.models : [{ id: 'auto' }];
+      const list = m.models?.length ? m.models : [{ id: 'auto' }];
+      if (list.some((x) => x && 'task' in x)) {
+        imageModels = [{ id: 'auto' }, ...list.filter((x) => x.task === 'image')];
+      } else {
+        imageModels = list;
+      }
     } catch { imageModels = [{ id: 'auto' }]; }
   }
 
@@ -342,7 +346,7 @@
 
   function resetAll() {
     resetPrefs(); applyPrefs();
-    if (model) form = { ...model.settings, disabledTools: [...(model.settings.disabledTools ?? [])] };
+    if (model) form = { ...model.settings, disabledTools: [...(model.settings?.disabledTools ?? [])] };
     toast('Reset to saved values');
   }
 
@@ -398,48 +402,38 @@
     return `${Math.floor(d / 86400)}d ago`;
   }
 
-  // ---- section nav + scrollspy ----
-  const SECTIONS = $derived.by(() => {
-    const s = [
-      { id: 'connection', label: 'Connection', icon: Plug },
-      { id: 'generation', label: 'Generation', icon: SlidersHorizontal },
-      { id: 'saving', label: 'Prompt & tokens', icon: Gauge },
-      { id: 'tools', label: 'Tools', icon: Wrench },
-      { id: 'appearance', label: 'Appearance', icon: Palette },
-      { id: 'navigation', label: 'Sidebar navigation', icon: PanelLeft },
-      { id: 'behavior', label: 'Behavior', icon: ToggleLeft },
-      { id: 'images', label: 'Images', icon: ImageIcon },
-      { id: 'memory', label: 'Memory', icon: Brain },
-      { id: 'permissions', label: 'Permissions', icon: ShieldCheck },
-      { id: 'github', label: 'GitHub', icon: GitBranch },
-      { id: 'filter', label: 'Content filter', icon: Shield },
-      { id: 'account', label: 'Account', icon: KeyRound },
-    ];
-    if (app.user?.role === 'owner') {
-      s.push({ id: 'users', label: 'Users & invites', icon: UserPlus });
-      s.push({ id: 'core', label: 'Core prompt', icon: ScrollText });
-    }
-    return s;
-  });
-  let activeSec = $state('connection');
+  // Keep each settings task focused while preserving unsaved fields between sections.
+  const SECTION_GROUPS = [
+    { label: 'Workspace', ids: ['appearance', 'navigation', 'behavior'] },
+    { label: 'Models & tools', ids: ['connection', 'generation', 'saving', 'tools', 'images', 'memory'] },
+    { label: 'Access & integrations', ids: ['permissions', 'github', 'filter', 'account', 'users', 'core'] },
+  ];
+  const sections = [
+    ['appearance', 'Appearance', Palette, 'Make the workspace feel like yours.'],
+    ['navigation', 'Navigation', PanelLeft, 'Choose what stays within reach.'],
+    ['behavior', 'Chat behavior', ToggleLeft, 'Set the defaults for your conversations.'],
+    ['connection', 'Connection', Plug, 'Check the connection to your local model router.'],
+    ['generation', 'Generation', SlidersHorizontal, 'Adjust how your selected model responds.'],
+    ['saving', 'Context & prompts', Gauge, 'Manage context, reasoning, and model instructions.'],
+    ['tools', 'Tools', Wrench, 'Choose the capabilities available to your selected model.'],
+    ['images', 'Image generation', ImageIcon, 'Choose the defaults for image creation.'],
+    ['memory', 'Memory', Brain, 'Manage what DuckPond remembers between chats.'],
+    ['permissions', 'Permissions', ShieldCheck, 'Decide how tools can act on your behalf.'],
+    ['github', 'GitHub', GitBranch, 'Connect your repositories and coding workflow.'],
+    ['filter', 'Content filter', Shield, 'Set your image content preferences.'],
+    ['account', 'Account', KeyRound, 'Manage your account and sign-in details.'],
+    ['users', 'Users & invites', UserPlus, 'Manage access to your DuckPond.'],
+    ['core', 'Core prompt', ScrollText, 'Set the instructions shared by all models.'],
+  ].map(([id, label, icon, description]) => ({ id, label, icon, description }));
+  const SECTIONS = $derived(sections.filter(s => app.user?.role === 'owner' || !['users', 'core'].includes(s.id)));
+  let activeSec = $state('appearance');
+  let sectionQuery = $state('');
   let contentEl = $state(null);
-  let spyMuted = false;   // don't fight the smooth scroll after a nav click
-
+  const activeSection = $derived(SECTIONS.find(s => s.id === activeSec) ?? SECTIONS[0]);
+  const matches = (s) => `${s.label} ${s.description}`.toLowerCase().includes(sectionQuery.toLowerCase().trim());
   function jump(id) {
     activeSec = id;
-    spyMuted = true;
-    document.getElementById(`sec-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setTimeout(() => { spyMuted = false; }, 600);
-  }
-  function onSpy() {
-    if (!contentEl || spyMuted) return;
-    const top = contentEl.scrollTop + 100;
-    let cur = SECTIONS[0]?.id;
-    for (const s of SECTIONS) {
-      const el = document.getElementById(`sec-${s.id}`);
-      if (el && el.offsetTop <= top) cur = s.id;
-    }
-    activeSec = cur;
+    if (contentEl) contentEl.scrollTop = 0;
   }
 </script>
 
@@ -447,17 +441,26 @@
   <div class="wrap">
     <nav class="secnav" aria-label="Settings sections">
       <div class="navhead">Settings</div>
-      {#each SECTIONS as s (s.id)}
-        <button type="button" class="navitem" class:on={activeSec === s.id} onclick={() => jump(s.id)}>
-          <s.icon size={14} />
-          <span>{s.label}</span>
-        </button>
+      <input class="section-search" type="search" aria-label="Find a settings section" placeholder="Find a section…" bind:value={sectionQuery} />
+      {#each SECTION_GROUPS as group}
+        {@const items = SECTIONS.filter(s => group.ids.includes(s.id) && matches(s))}
+        {#if items.length}
+          <div class="navgroup">{group.label}</div>
+          {#each items as s (s.id)}
+            <button type="button" class="navitem" class:on={activeSec === s.id} aria-current={activeSec === s.id ? 'page' : undefined} onclick={() => jump(s.id)}>
+              <s.icon size={16} /><span>{s.label}</span>
+            </button>
+          {/each}
+        {/if}
       {/each}
+      {#if !SECTIONS.some(matches)}<p class="hint">No matching sections.</p>{/if}
     </nav>
 
-    <div class="content" bind:this={contentEl} onscroll={onSpy}>
+    <div class="settings-main">
+    <div class="content" bind:this={contentEl}>
+      <header class="section-heading"><div class="section-kicker">Settings</div><h1>{activeSection.label}</h1><p>{activeSection.description}</p></header>
       <!-- connection -->
-      <section id="sec-connection">
+      <section id="sec-connection" hidden={activeSec !== 'connection'}>
         <div class="stitle"><Plug size={13} />Connection</div>
         <div class="conn">
           <span class="cdot" class:ok={health?.ok} class:bad={health && !health.ok} class:wait={testing}></span>
@@ -473,7 +476,7 @@
       </section>
 
       <!-- generation (per current model) -->
-      <section id="sec-generation">
+      <section id="sec-generation" hidden={activeSec !== 'generation'}>
         <div class="stitle"><SlidersHorizontal size={13} />Generation{#if model}<span class="formodel mono">{model.id}</span>{/if}</div>
         <div class="row">
           <div class="rlabel">
@@ -489,11 +492,11 @@
         </div>
         {#if form}
           <div class="srow">
-            <div class="shead"><span>Temperature</span><span class="sval mono">{form.temperature.toFixed(2)}</span></div>
+            <div class="shead"><span>Temperature</span><span class="sval mono">{Number(form.temperature ?? 0.7).toFixed(2)}</span></div>
             <input type="range" min="0" max="2" step="0.05" bind:value={form.temperature} />
           </div>
           <div class="srow">
-            <div class="shead"><span>Top P</span><span class="sval mono">{form.top_p.toFixed(2)}</span></div>
+            <div class="shead"><span>Top P</span><span class="sval mono">{Number(form.top_p ?? 0.95).toFixed(2)}</span></div>
             <input type="range" min="0" max="1" step="0.01" bind:value={form.top_p} />
           </div>
           <div class="srow">
@@ -501,7 +504,7 @@
             <input type="range" min="0" max="120" step="1" bind:value={form.top_k} />
           </div>
           <div class="srow">
-            <div class="shead"><span>Repeat penalty</span><span class="sval mono">{form.repeat_penalty.toFixed(2)}</span></div>
+            <div class="shead"><span>Repeat penalty</span><span class="sval mono">{Number(form.repeat_penalty ?? 1.1).toFixed(2)}</span></div>
             <input type="range" min="1" max="1.6" step="0.01" bind:value={form.repeat_penalty} />
           </div>
           <div class="row">
@@ -541,7 +544,7 @@
       </section>
 
       <!-- prompt & token saving: everything that shapes what actually gets sent -->
-      <section id="sec-saving">
+      <section id="sec-saving" hidden={activeSec !== 'saving'}>
         <div class="stitle"><Gauge size={13} />Prompt &amp; token saving{#if model}<span class="formodel mono">{model.id}</span>{/if}</div>
 
         {#if saver}
@@ -632,7 +635,7 @@
           {/if}
 
           <div class="substitle">System prompt</div>
-          <div class="hint">Added after the core prompt, for this model only. The core prompt every model shares is further down{#if app.user?.role !== 'owner'} (owner only){/if}.</div>
+          <div class="hint">Added after the core prompt, for this model only. The core prompt every model shares is in Core prompt{#if app.user?.role !== 'owner'} (owner only){/if}.</div>
           <label class="sys">
             <textarea rows="3" bind:value={form.system_prompt} placeholder="(none)"></textarea>
           </label>
@@ -642,7 +645,7 @@
       </section>
 
       <!-- per-model tool toggles -->
-      <section id="sec-tools">
+      <section id="sec-tools" hidden={activeSec !== 'tools'}>
         <div class="stitle"><Wrench size={13} />Tools{#if model}<span class="formodel mono">{model.id}</span>{/if}</div>
         {#if form}
           <div class="hint">Everything's on by default. Turn off what this model shouldn't be offered — fewer tools can make small models call the right one more reliably.</div>
@@ -665,7 +668,7 @@
       </section>
 
       <!-- appearance -->
-      <section id="sec-appearance">
+      <section id="sec-appearance" hidden={activeSec !== 'appearance'}>
         <div class="stitle"><Palette size={13} />Appearance</div>
         <button class="wide" onclick={() => { app.view = 'chat'; app.themeStudioOpen = true; }}>
           <Palette size={14} />Open Theme Studio — colors, layouts, custom CSS
@@ -697,7 +700,7 @@
       </section>
 
       <!-- sidebar nav pins — same idea as Unsloth Studio's pin-to-menu setting -->
-      <section id="sec-navigation">
+      <section id="sec-navigation" hidden={activeSec !== 'navigation'}>
         <div class="stitle"><PanelLeft size={13} />Sidebar navigation</div>
         <div class="hint">Pinned pages show inline; the rest collapse into "More".</div>
         <div class="row">
@@ -731,7 +734,7 @@
       </section>
 
       <!-- behavior -->
-      <section id="sec-behavior">
+      <section id="sec-behavior" hidden={activeSec !== 'behavior'}>
         <div class="stitle"><ToggleLeft size={13} />Behavior</div>
         {#each [
           ['autoScroll', 'Auto-scroll', 'follow the reply as it streams'],
@@ -750,7 +753,7 @@
       </section>
 
       <!-- image generation -->
-      <section id="sec-images">
+      <section id="sec-images" hidden={activeSec !== 'images'}>
         <div class="stitle"><ImageIcon size={13} />Image generation</div>
         <div class="row">
           <div class="rlabel"><div class="rt">Let the model generate images</div><div class="rd">in-chat generate_image tool, on top of the Files tab</div></div>
@@ -770,15 +773,15 @@
         <div class="row">
           <div class="rlabel"><div class="rt">Quality</div><div class="rd">steps vs. speed — applies everywhere images get generated</div></div>
           <select value={app.user?.image_quality ?? 'medium'} onchange={setImageQuality}>
-            <option value="fast">Fast</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
+            <option value="fast">Fast · quick draft</option>
+            <option value="medium">Balanced · recommended</option>
+            <option value="high">Quality · guided, slower</option>
           </select>
         </div>
       </section>
 
       <!-- long-term memory -->
-      <section id="sec-memory">
+      <section id="sec-memory" hidden={activeSec !== 'memory'}>
         <div class="stitle"><Brain size={13} />Memory</div>
         <div class="row">
           <div class="rlabel">
@@ -813,7 +816,7 @@
       </section>
 
       <!-- what the model may do on its own -->
-      <section id="sec-permissions">
+      <section id="sec-permissions" hidden={activeSec !== 'permissions'}>
         <div class="stitle"><ShieldCheck size={13} />What the model may do</div>
         <div class="hint">
           Reading is always free. This decides what happens when the model wants to change
@@ -862,7 +865,7 @@
       </section>
 
       <!-- github -->
-      <section id="sec-github">
+      <section id="sec-github" hidden={activeSec !== 'github'}>
         <div class="stitle"><GitBranch size={13} />GitHub</div>
         {#if gh}
           <div class="hint">
@@ -889,7 +892,7 @@
       </section>
 
       <!-- content filter — image nudity only; chat is free -->
-      <section id="sec-filter">
+      <section id="sec-filter" hidden={activeSec !== 'filter'}>
         <div class="stitle"><Shield size={13} />Content filter</div>
         <div class="row">
           <div class="rlabel">
@@ -909,7 +912,7 @@
       </section>
 
       <!-- account -->
-      <section id="sec-account">
+      <section id="sec-account" hidden={activeSec !== 'account'}>
         <div class="stitle"><KeyRound size={13} />Account</div>
         <div class="hint">Signed in as <b>{app.user?.username}</b> · {app.user?.role}</div>
         <input type="password" placeholder="current password" bind:value={pwCurrent} autocomplete="current-password" />
@@ -921,7 +924,7 @@
 
       <!-- owner: users & access -->
       {#if app.user?.role === 'owner'}
-        <section id="sec-users">
+        <section id="sec-users" hidden={activeSec !== 'users'}>
           <div class="stitle"><UserPlus size={13} />Users &amp; access</div>
           {#each users as u (u.id)}
             <div class="urow">
@@ -983,7 +986,7 @@
         </section>
 
         <!-- owner: core prompt fronting every chat -->
-        <section id="sec-core">
+        <section id="sec-core" hidden={activeSec !== 'core'}>
           <div class="stitle"><ScrollText size={13} />Core prompt</div>
           <div class="hint">
             Conduct rules sent ahead of every chat, for all users and models.
@@ -1002,12 +1005,7 @@
         </section>
       {/if}
 
-      <div class="about">
-        <Duck px={1.1} />
-        <div class="aname">DuckPond</div>
-        <div class="aver mono">self-hosted{#if build} · v{build.version}{#if build.commit} · {build.commit}{/if}{/if}</div>
-      </div>
-
+    </div>
       <div class="savebar">
         <span class="savehint">
           {#if model}Sliders &amp; prompts save to <b class="mono">{model.id}</b>{:else}Toggles save instantly{/if}
@@ -1022,69 +1020,26 @@
 </div>
 
 <style>
-  /* ========== page shell ========== */
-  .page {
-    flex: 1; min-height: 0; display: flex;
-    overflow: hidden;
-  }
-  .wrap {
-    display: flex; gap: 34px;
-    width: 100%; max-width: 1400px; margin: 0 auto;
-    min-height: 0; padding: 0 36px;
-    box-sizing: border-box;
-  }
-  .secnav {
-    width: 208px; flex-shrink: 0;
-    padding: 28px 0 20px;
-    display: flex; flex-direction: column; gap: 2px;
-    overflow-y: auto;
-  }
-  .navhead {
-    font-size: 28px; font-weight: 600; letter-spacing: -0.035em;
-    padding: 2px 10px 16px; user-select: none;
-  }
-  .navitem {
-    all: unset; cursor: pointer; box-sizing: border-box;
-    display: flex; align-items: center; gap: 10px;
-    padding: 7px 10px; border-radius: calc(9px * var(--rf));
-    font-size: 13px; color: var(--text-dim);
-    position: relative;
-    transition: background 120ms ease, color 120ms ease;
-  }
+  .page { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+  .wrap { display: flex; width: 100%; max-width: 1260px; margin: 0 auto; min-height: 0; padding: 0 32px; }
+  .secnav { width: 224px; flex-shrink: 0; padding: 28px 22px 28px 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; border-right: 1px solid var(--border-soft); }
+  .navhead { font-size: 22px; font-weight: 600; letter-spacing: -.03em; padding: 0 10px 18px; }
+  .section-search { width: 100%; min-width: 0; font-size: 12px; padding: 9px 10px; margin-bottom: 10px; }
+  .navgroup { font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); padding: 18px 10px 5px; }
+  .navitem { all: unset; cursor: pointer; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: calc(7px * var(--rf)); font-size: 13px; color: var(--text-dim); }
   .navitem:hover { background: var(--bg-hover); color: var(--text); }
-  .navitem.on { background: var(--bg-raised); color: var(--text); }
-  .navitem.on::before {
-    content: ''; position: absolute; left: -6px; top: 22%; bottom: 22%;
-    width: 3px; border-radius: 3px; background: var(--accent);
-  }
-  .navitem :global(svg) { color: var(--text-faint); flex-shrink: 0; transition: color 120ms ease; }
-  .navitem.on :global(svg) { color: var(--accent); }
-
-  .content {
-    flex: 1; min-width: 0;
-    overflow-y: auto;
-    padding: 28px 2px 28px;
-    position: relative; /* sections' offsetTop anchors here for the scrollspy */
-    -webkit-overflow-scrolling: touch;
-  }
-
-  /* ========== sections as soft cards ========== */
-  section {
-    background: color-mix(in srgb, var(--bg-card) 55%, transparent);
-    border: 1px solid var(--border-soft);
-    border-radius: calc(14px * var(--rf));
-    padding: 18px 20px 20px;
-    margin-bottom: 14px;
-    display: flex; flex-direction: column; gap: 11px;
-    scroll-margin-top: 10px;
-  }
-  section:global([hidden]) { display: none; }
-  .stitle {
-    display: flex; align-items: center; gap: 7px;
-    font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase;
-    color: var(--text-faint);
-  }
-  .stitle :global(svg) { color: var(--accent); }
+  .navitem.on { background: var(--bg-raised); color: var(--text); font-weight: 550; }
+  .navitem :global(svg) { flex-shrink: 0; }
+  .settings-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .content { flex: 1; min-height: 0; overflow-y: auto; padding: 38px 40px 32px; }
+  .section-heading { margin-bottom: 30px; }
+  .section-kicker { font-size: 11px; color: var(--text-faint); margin-bottom: 8px; }
+  .section-heading h1 { font-size: 28px; line-height: 1.2; letter-spacing: -.035em; font-weight: 600; margin: 0; }
+  .section-heading p { color: var(--text-dim); font-size: 13px; margin: 10px 0 0; }
+  section { display: flex; flex-direction: column; gap: 18px; padding: 0; }
+  section[hidden] { display: none; }
+  .stitle { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 550; color: var(--text-dim); padding-bottom: 16px; border-bottom: 1px solid var(--border-soft); }
+  .stitle :global(svg) { color: var(--text-dim); }
   .formodel {
     margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400;
     max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1099,7 +1054,7 @@
     border-radius: calc(10px * var(--rf)); padding: 10px 13px; font-size: 13px;
   }
   .cdot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; }
-  .cdot.ok { background: var(--green); box-shadow: 0 0 6px rgba(107, 158, 90, 0.6); }
+  .cdot.ok { background: var(--green);  }
   .cdot.bad { background: var(--red); }
   .cdot.wait { background: var(--yellow); animation: pulse 1s ease infinite; }
   @keyframes pulse { 50% { opacity: 0.4; } }
@@ -1115,7 +1070,7 @@
 
   .srow { display: flex; flex-direction: column; gap: 7px; }
   .shead { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-dim); }
-  .sval { color: var(--accent); font-size: 12px; }
+  .sval { color: var(--text); font-size: 12px; }
 
   .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .rlabel { min-width: 0; }
@@ -1141,7 +1096,7 @@
     transition: transform 180ms cubic-bezier(0.25, 1, 0.35, 1), background 180ms ease;
   }
   .tog.on { background: var(--accent-deep); border-color: transparent; }
-  .tog.on .knob { transform: translateX(16px); background: #16110a; }
+  .tog.on .knob { transform: translateX(16px); background: var(--on-accent); }
 
   .toolrow {
     display: flex; align-items: flex-start; gap: 10px; cursor: pointer;
@@ -1175,9 +1130,9 @@
   .savehero {
     display: flex; align-items: center; gap: calc(12px * var(--rf));
     padding: calc(11px * var(--rf)) calc(13px * var(--rf));
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    border: 1px solid var(--border-soft);
     border-radius: 10px;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--bg-raised);
   }
   .savenum {
     font-size: calc(24px * var(--rf)); font-weight: 700; color: var(--accent);
@@ -1201,13 +1156,6 @@
     color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
   }
   .statetag.on { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
-
-  .about {
-    display: flex; flex-direction: column; align-items: center; gap: 3px;
-    padding: 20px 0 8px; user-select: none;
-  }
-  .aname { font-size: 13px; font-weight: 600; margin-top: 6px; }
-  .aver { font-size: 10.5px; color: var(--text-faint); }
 
   /* long-term memory list */
   .memlist { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
@@ -1233,70 +1181,36 @@
   .memrow:hover .memdel { opacity: 0.8; }
   .memdel:hover { background: rgba(192, 96, 79, 0.15); color: var(--red); }
 
-  /* ========== sticky save bar ========== */
-  .savebar {
-    position: sticky; bottom: 0; z-index: 5;
-    display: flex; gap: 9px; align-items: center;
-    padding: 11px 14px;
-    background: color-mix(in srgb, var(--bg) 92%, transparent);
-    -webkit-backdrop-filter: blur(14px);
-    backdrop-filter: blur(14px);
-    border: 1px solid var(--border-soft);
-    border-radius: calc(14px * var(--rf));
-    box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.22);
-  }
-  .savehint {
-    flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-faint);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .savehint b { font-weight: 500; color: var(--text-dim); }
-  .savebar button { display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 13px; }
-
-  /* ========== phone / narrow: nav becomes a chip strip ========== */
-  @media (max-width: 900px) {
-    .wrap { flex-direction: column; gap: 0; padding: 0 12px; }
-    .secnav {
-      width: 100%;
-      flex-direction: row; align-items: center; gap: 6px;
-      overflow-x: auto; overflow-y: hidden;
-      padding: 10px 0 10px;
-      scrollbar-width: none;
-      flex-shrink: 0;
-    }
-    .secnav::-webkit-scrollbar { display: none; }
-    .navhead { display: none; } /* the topbar already says Settings */
-    .navitem {
-      flex-shrink: 0;
-      padding: 7px 13px; border-radius: 999px;
-      background: var(--bg-raised); border: 1px solid var(--border-soft);
-      font-size: 12.5px;
-    }
-    .navitem.on {
-      background: var(--bg-card); border-color: var(--accent-dim); color: var(--text);
-    }
-    .navitem.on::before { display: none; }
-    .content { padding: 2px 0 20px; }
-    section { padding: 14px 14px 16px; gap: 12px; }
-    .row { flex-wrap: wrap; gap: 8px; align-items: flex-start; }
-    .rlabel { width: 100%; }
-    .row select,
-    .row input,
-    .row textarea {
-      max-width: 100%; width: 100%;
-      font-size: 16px; min-height: 44px; box-sizing: border-box;
-    }
-    .srow input[type='range'] { width: 100%; }
-    .shead { font-size: 14px; }
-    .conn { flex-wrap: wrap; }
-    .wide { min-height: 44px; font-size: 14px; }
-    .stitle { flex-wrap: wrap; gap: 6px; row-gap: 4px; }
-    .formodel { max-width: 100%; margin-left: 0; width: 100%; font-size: 11px; }
-    textarea { max-width: 100%; box-sizing: border-box; resize: vertical; }
-    .savebar {
-      padding: 10px 12px;
-      padding-bottom: max(10px, env(safe-area-inset-bottom));
-    }
+  .savebar { display: flex; gap: 8px; align-items: center; padding: 16px 40px; border-top: 1px solid var(--border-soft); background: var(--bg); flex-shrink: 0; }
+  .savehint { flex: 1; min-width: 0; font-size: 11px; color: var(--text-faint); }
+  .savehint b { display: block; font-weight: 400; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+  .savebar button { display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px; min-height: 38px; }
+  .row { padding: 10px 0 18px; border-bottom: 1px solid var(--border-soft); gap: 24px; }
+  .rd { margin-top: 4px; line-height: 1.55; max-width: 420px; font-size: 12px; }
+  .row select { min-width: 150px; min-height: 36px; }
+  .srow { padding: 8px 0; }
+  .wide { width: fit-content; padding: 9px 16px; min-height: 38px; }
+  .toolrow { padding: 12px; border: 1px solid var(--border-soft); }
+  .tdesc { font-size: 12px; margin-top: 4px; }
+  .substitle { margin-top: 16px; }
+  @media (max-width: 1000px) { .wrap { padding: 0 20px; } .content { padding: 28px 24px; } .savebar { padding: 14px 24px; } .secnav { width: 196px; padding-right: 16px; } }
+  @media (max-width: 700px) {
+    .wrap { flex-direction: column; padding: 0; }
+    .secnav { width: 100%; flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--border-soft); padding: 10px 16px; flex-shrink: 0; }
+    .navhead, .navgroup, .section-search { display: none; }
+    .navitem { flex-shrink: 0; min-height: 40px; }
+    .content { padding: 24px 20px; }
+    .section-heading { margin-bottom: 24px; }
+    .section-heading h1 { font-size: 25px; }
+    .row { flex-wrap: wrap; gap: 12px; }
+    .rlabel { flex: 1 1 200px; }
+    .row select { max-width: 100%; width: 100%; }
+    .savebar { padding: 12px 20px max(12px, env(safe-area-inset-bottom)); }
     .savehint { display: none; }
-    .savebar button { flex: 1; min-height: 44px; font-size: 13.5px; }
+    .savebar button { flex: 1; min-height: 44px; }
+    .wide { max-width: 100%; text-align: left; }
+    .formodel { overflow-wrap: anywhere; max-width: 65%; }
+    .endpoint { overflow-wrap: anywhere; }
+    textarea { max-width: 100%; }
   }
 </style>

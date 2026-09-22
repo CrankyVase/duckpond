@@ -2,7 +2,6 @@
   // Usage stats dashboard: totals + a per-model breakdown. Backend is a single
   // GET /api/stats (server/src/routes/stats.js) — this is pure display.
   import { api } from '../lib/api.js';
-  import Duck from './Duck.svelte';
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import Activity from '@lucide/svelte/icons/activity';
   import ArrowDownToLine from '@lucide/svelte/icons/arrow-down-to-line';
@@ -39,7 +38,6 @@
 <div class="stats">
   <header class="head">
     <div class="title">
-      <Duck px={1.1} mood="idle" interactive />
       <div>
         <h1>Stats</h1>
         <p>Requests, tokens, and speed across your pond.</p>
@@ -162,12 +160,6 @@
   .empty {
     padding: 64px 20px; text-align: center; color: var(--text-faint); font-size: 13px;
   }
-  .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 1.6s linear infinite;
-  }
-  @keyframes shimmer { to { background-position: -200% 0; } }
 
   .totals { display: flex; gap: 12px; margin-bottom: 16px; }
   .card {
@@ -290,7 +282,7 @@
       width: 100%; max-width: 100%;
       overflow-x: auto; -webkit-overflow-scrolling: touch;
       /* subtle cue that it scrolls sideways */
-      mask-image: linear-gradient(90deg, #000 92%, transparent);
+
     }
     table { width: max-content; min-width: 100%; font-size: 11px; }
     th, td { padding: 8px 8px; }
@@ -302,4 +294,24 @@
       font-size: 10.5px;
     }
   }
+
+  .stats { max-width: 1180px; }
+  .head { margin-bottom: 30px; }
+  .title p { margin-top: 8px; line-height: 1.6; }
+  .empty { margin: 20px 0; padding: 64px 24px; border: 1px dashed var(--border); border-radius: calc(10px * var(--rf)); line-height: 1.7; }
+  @media(max-width: 768px) { .stats { padding: 24px 16px; } .title h1 { font-size: 25px; } }
+  .totals { gap: 0; border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); margin-bottom: 28px; overflow: hidden; background: var(--bg); }
+  .card { border: 0; border-right: 1px solid var(--border-soft); border-radius: 0; background: none; padding: 24px; }
+  .card:last-child { border-right: 0; }
+  .card:hover { transform: none; }
+  .cardlabel { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 400; color: var(--text-dim); margin-bottom: 16px; }
+  .cardval { font-family: var(--sans); font-size: 32px; font-weight: 500; letter-spacing: -.035em; }
+  .card.hero { background: none; border-color: var(--border-soft); }
+  .cardval.saved { color: var(--text); }
+  .surface { padding: 24px; background: var(--bg); border-radius: calc(10px * var(--rf)); margin-bottom: 24px; }
+  .subhead { font-size: 15px; text-transform: none; letter-spacing: -.01em; color: var(--text); font-weight: 550; margin-bottom: 22px; }
+  th { padding: 12px 14px; font-size: 10px; background: var(--bg-raised); }
+  td { padding: 14px; }
+  .barrow { padding-top: 10px; padding-bottom: 10px; }
+  @media(max-width: 768px) { .totals { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); } .card { padding: 18px; border-bottom: 1px solid var(--border-soft); min-width: 0; } .cardval { font-size: 28px; } .surface { padding: 18px; } }
 </style>

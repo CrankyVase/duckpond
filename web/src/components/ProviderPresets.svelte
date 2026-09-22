@@ -6,7 +6,6 @@
   import { toast } from '../lib/toast.svelte.js';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import Plus from '@lucide/svelte/icons/plus';
-  import Sparkles from '@lucide/svelte/icons/sparkles';
 
   let { isOwner = false, onadded } = $props();
 
@@ -44,7 +43,7 @@
 
 {#if isOwner && remaining.length}
   <section class="presets">
-    <h2 class="subhead"><Sparkles size={13} /> Quick add — free-model starters</h2>
+    <h2 class="subhead"><Plus size={14} /> Available providers</h2>
     <p class="hint">Curated OpenAI-compatible providers with free models. Paste an API key and you're
       done — the catalog imports itself, grouped in the picker under the provider's name.</p>
     <div class="presetgrid">
@@ -77,7 +76,7 @@
   .presets {
     background: var(--bg-card);
     border: 1px solid var(--border-soft);
-    border-radius: var(--rf, 12px);
+    border-radius: calc(10px * var(--rf));
     padding: 14px 16px;
     margin-bottom: 14px;
   }
@@ -89,7 +88,7 @@
   .hint { font-size: 12px; color: var(--text-faint); margin: 0 0 12px; }
   .presetgrid {
     display: grid; gap: 10px;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
   }
   .preset {
     border: 1px solid var(--border-soft);
@@ -126,4 +125,5 @@
   }
   .addb:hover:not(:disabled) { background: var(--accent-deep, var(--accent)); }
   .addb:disabled { opacity: 0.45; cursor: default; }
+.presets { padding: 24px; background: var(--bg); } .preset { padding: 18px; background: var(--bg-raised); } .ptop { flex-wrap: wrap; } .pblurb { min-height: 36px; }
 </style>

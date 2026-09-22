@@ -1,0 +1,43 @@
+// Actual preview routes and browser assets; temporary files only, no app DB or models.
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Fastify from '../../server/node_modules/fastify/fastify.js';
+import { createPreviewStore, workspacePreviewRoutes } from '../../server/src/workspacePreview.js';
+const {chromium}=await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const root=await mkdtemp(join(tmpdir(),'duckpond-preview-browser-'));
+const server=Fastify();
+let browser, protectedCalls=0;
+try {
+  await mkdir(join(root,'game'));
+  await writeFile(join(root,'game/index.html'),`<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Snake workspace</h1><p id="version">Loading</p><script type="module" src="main.mjs"></script></body></html>`);
+  await writeFile(join(root,'game/style.css'),'body { background: rgb(240, 244, 248); color: #17212f; font: 20px system-ui; padding: 40px; }');
+  await writeFile(join(root,'game/version.mjs'),'export const version="First build";');
+  await writeFile(join(root,'game/main.mjs'),`import {version} from './version.mjs'; document.querySelector('#version').textContent=version; try { parent.document.body.replaceChildren(); } catch { document.body.dataset.isolated='yes'; } fetch('/api/auth/me').catch(()=>{});`);
+  const store=createPreviewStore(), session=store.issue(root,1,1);
+  const path=`/api/workspace-preview/${session.token}/game/index.html`;
+  await server.register(workspacePreviewRoutes,{store});
+  server.get('/api/auth/me',async()=>{protectedCalls++;return {secret:'must never be requested'};});
+  server.get('/',async(_,reply)=>reply.type('text/html').send(`<h1>Chat history stays here</h1><iframe title="Project preview" sandbox="allow-scripts allow-modals" style="width:95vw;height:70vh;border:1px solid #ccc" src="${path}"></iframe>`));
+  const origin=await server.listen({host:'127.0.0.1',port:0});
+  browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE || undefined,args:['--no-sandbox']});
+  const page=await browser.newPage({viewport:{width:1280,height:900}});
+  await page.goto(origin);
+  const frame=page.frameLocator('iframe');
+  await frame.getByText('First build',{exact:true}).waitFor();
+  assert.equal(await frame.locator('body').getAttribute('data-isolated'),'yes');
+  assert.equal(await frame.locator('body').evaluate(e=>getComputedStyle(e).backgroundColor),'rgb(240, 244, 248)');
+  await page.getByRole('heading',{name:'Chat history stays here'}).waitFor();
+  assert.equal(protectedCalls,0,'CSP prevents generated scripts from calling account APIs');
+  await writeFile(join(root,'game/version.mjs'),'export const version="Updated build";');
+  await page.locator('iframe').evaluate((el,path)=>el.src=path+'?n=2',path);
+  await frame.getByText('Updated build',{exact:true}).waitFor();
+  await page.screenshot({path:'/tmp/duckpond-preview-assets.png',fullPage:true});
+  await page.evaluate(()=>addEventListener('message',e=>{if(e.data?.type==='duckpond:preview-error') document.body.dataset.previewError=e.data.message;}));
+  await frame.locator('body').evaluate(()=>setTimeout(()=>{throw new Error('Synthetic preview error');},0));
+  await page.getByRole('heading',{name:'Chat history stays here'}).waitFor();
+  await page.waitForFunction(()=>document.body.dataset.previewError==='Uncaught Error: Synthetic preview error');
+  assert.equal(protectedCalls,0);
+  console.log('Real browser preview passed: nested HTML, CSS, module imports, fresh assets after reload, isolated scripts and errors.');
+} finally { await browser?.close(); await server.close(); await rm(root,{recursive:true,force:true}); }

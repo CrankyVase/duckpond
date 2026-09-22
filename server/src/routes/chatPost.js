@@ -229,13 +229,12 @@ export function registerChatPost(app) {
       // remote models: sandbox/agent tooling stays local-only (a paid API
       // model driving shell loops would be a bill and a half). Inline tools —
       // web search, widgets, memory, image gen — work fine remotely.
-      if (remote) {
+      if (conv.mode !== 'agent') {
         wsRow = null;
         disabledTools.add('start_project');
       }
       // capability gate (generative UI): small models fumble the nested
       // tool-call JSON a dashboard needs — don't offer or describe it to them
-      if (!dashboardCapable(conv.model_id)) disabledTools.add('show_dashboard');
       // constrained output (Settings → Structured output): a GBNF grammar or
       // JSON schema forces the shape of the WHOLE reply, which is incompatible
       // with tool-call JSON — the turn runs plain, and the system prompt skips
@@ -253,7 +252,7 @@ export function registerChatPost(app) {
       const ghOn = hasGithub(req.user.id);
       const turnTools = constrained ? [] : filterTools(
         wsRow
-          ? [...AGENT_TOOLS, ...(ghOn ? GITHUB_TOOLS : []), ...WIDGET_TOOLS, ...memTools]
+          ? AGENT_TOOLS
           : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
             ...(ghOn ? GITHUB_READ_TOOLS : []), ...WIDGET_TOOLS, ...memTools],
         disabledTools,
@@ -610,6 +609,7 @@ export function registerChatPost(app) {
         }
       } catch (err) {
         if (abort.signal.aborted || constrained || !/tool/i.test(String(err.message))) throw err;
+        if (conv.mode === 'agent') throw new Error(`The selected model endpoint rejected tool calls: ${err.message}. Check its chat template or provider configuration; your model selection has not changed.`);
         req.log.warn({ model: conv.model_id }, 'template rejected tools — plain chat fallback');
         toolsOn = false;
         res = await streamChat({
@@ -627,7 +627,7 @@ export function registerChatPost(app) {
       }
       text = stripFakeImages(text);
       // the guard itself — one retry, only when project mode is available
-      if (toolsOn && !remote && !constrained && !wsRow && !res.toolCalls?.length
+      if (toolsOn && conv.mode === 'agent' && !constrained && !wsRow && !res.toolCalls?.length
           && !disabledTools.has('start_project')
           && looksLikeProjectNarration(text, reasoning)) {
         send({ type: 'notice', message: 'That belongs in a workspace — starting project mode…' });
@@ -657,7 +657,7 @@ export function registerChatPost(app) {
       const wantsInlineTools = callNames.has('web_search') || callNames.has('fetch_page')
         || [...WIDGET_TOOL_NAMES].some((n) => callNames.has(n))
         || [...MEMORY_TOOL_NAMES].some((n) => callNames.has(n));
-      if (toolsOn && res.toolCalls?.length && wantsInlineTools && !callNames.has('start_project')) {
+      if (toolsOn && !wsRow && res.toolCalls?.length && wantsInlineTools && !callNames.has('start_project')) {
         // inline-tools turn: web search (with live trace + citations),
         // interactive widgets, and/or memory ops, in one batched loop;
         // the model answers at the end.
@@ -685,7 +685,7 @@ export function registerChatPost(app) {
         reasoning = r.reasoning ?? reasoning;
         timings = r.timings ?? timings;
         usage = r.usage ?? usage;
-      } else if (toolsOn && !remote && res.toolCalls?.length) {
+      } else if (toolsOn && conv.mode === 'agent' && res.toolCalls?.length) {
         // the model reached for file/shell tools → this turn becomes an agent
         // run (local models only — remote/paid models never drive the sandbox)
         const r = await runAgentTurn({

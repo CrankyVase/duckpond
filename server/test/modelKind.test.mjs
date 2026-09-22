@@ -22,6 +22,8 @@ ok('MiniMax-Music3 is audio', modelKind('audio-cpp/MiniMax-Music3-GGUF') === 'au
 ok('Krea GGUF is image, not chat', modelKind('vantagewithai/Krea-2-Turbo-GGUF') === 'image');
 ok('ideogram is image', modelKind('ideogram-ai/ideogram-4-fp8') === 'image');
 ok('LTX-2-GGUF is video', modelKind('unsloth/LTX-2-GGUF') === 'video');
+ok('MiniMax H3 GGUF is video', modelKind('unsloth/MiniMax-H3-GGUF') === 'video');
+ok('MiniMax M3 remains chat', modelKind('MiniMaxAI/MiniMax-M3') === 'chat');
 ok('LTX-Video is video', modelKind('Lightricks/LTX-Video-0.9.7-distilled') === 'video');
 ok('chat GGUF stays chat', modelKind('unsloth/Qwen3.8-27B-GGUF') === 'chat');
 ok('Dream-7B text diffusion stays chat', modelKind('Dream-v0-7B-GGUF') === 'chat');
@@ -36,6 +38,7 @@ ok('MiniMax-Music3 is audio', mediaTask('audio-cpp/MiniMax-Music3-GGUF', 'image'
 ok('SDXL stays image', mediaTask('stabilityai/stable-diffusion-xl-base-1.0', 'image') === 'image');
 ok('Krea stays image', mediaTask('vantagewithai/Krea-2-Turbo-GGUF', 'image') === 'image');
 ok('LTX stays video', mediaTask('Lightricks/LTX-Video-0.9.7-distilled', 'image') === 'video');
+ok('MiniMax H3 corrects stale image task', mediaTask('unsloth/MiniMax-H3-GGUF', 'image') === 'video');
 ok('declared tts kept when name is unknown', mediaTask('someone/mystery', 'tts') === 'tts');
 ok('speech tag beats id', mediaTask('org/untitled', 'image', 'text-to-speech') === 'tts');
 

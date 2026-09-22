@@ -14,13 +14,20 @@ const DEFAULTS = {
   caret: 'beam',             // beam | block | dot — streaming typing caret style
   // sidebar nav ids pinned inline; anything else collapses into "More" —
   // same idea as Unsloth Studio's "pin to chat's + side menu" setting.
-  pinnedNav: ['files', 'media', 'stats', 'providers', 'hub', 'costs'],
+  pinnedNav: ['media', 'hub'],
   // Model Hub landing tab — unsloth | popular | image | audio | video.
   hubDefaultTab: 'unsloth',
 };
 
 function load() {
-  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? '{}') }; }
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}');
+    // Migrate only the former untouched default; preserve custom pin choices.
+    if (JSON.stringify(saved?.pinnedNav) === JSON.stringify(['files', 'media', 'stats', 'providers', 'hub', 'costs'])) {
+      saved.pinnedNav = [...DEFAULTS.pinnedNav];
+    }
+    return { ...DEFAULTS, ...saved };
+  }
   catch { return { ...DEFAULTS }; }
 }
 

@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+process.env.DUCKPOND_DB = ':memory:';
+const { db } = await import('../src/db.js');
+const { setMediaQueuePaused, mediaQueuePaused, createMediaJob, cancelMediaJob, recoverMediaJobs, getMediaJob, retryMediaJob } = await import('../src/mediaJobs.js');
+// A paused queue must not even contact a provider/bridge. This test imports no
+// inference runtime and rejects accidental network use.
+globalThis.fetch = () => { throw new Error('Network forbidden in paused queue test'); };
+db.prepare("INSERT INTO users (id, username, pass_hash, role) VALUES (1, 'pause-test', 'x', 'owner')").run();
+setMediaQueuePaused(true);
+assert.equal(mediaQueuePaused(), true);
+const job = createMediaJob(1, { prompt: 'Do not execute', enhance: false });
+assert.equal(job.status, 'queued');
+assert.equal(job.paused, true);
+recoverMediaJobs();
+assert.equal(getMediaJob(job.id, 1).status, 'queued');
+assert.equal(cancelMediaJob(job.id, 1).status, 'cancelled');
+db.prepare("INSERT INTO media_jobs (user_id, task, prompt, status, bridge_tag) VALUES (1, 'image', 'interrupted', 'running', 'persisted-tag')").run();
+recoverMediaJobs();
+const row = db.prepare("SELECT * FROM media_jobs WHERE prompt = 'interrupted'").get();
+assert.equal(row.status, 'error');
+assert.equal(row.phase, 'needs_reconciliation');
+assert.equal(row.bridge_tag, 'persisted-tag');
+assert.equal(getMediaJob(row.id, 1).needs_reconciliation, true);
+assert.throws(() => retryMediaJob(row.id, 1), /Check the engine/);
+const referenceJob = createMediaJob(1, { prompt: 'With reference', enhance: false, imagesB64: ['sample-reference'] });
+assert.equal(referenceJob.params.imagesB64, undefined);
+cancelMediaJob(referenceJob.id, 1);
+const retried = retryMediaJob(referenceJob.id, 1);
+const request = JSON.parse(db.prepare('SELECT params FROM media_jobs WHERE id = ?').get(retried.id).params);
+assert.deepEqual(request.imagesB64, ['sample-reference']);
+assert.equal(request.enhance, 0);
+assert.equal(retryMediaJob(referenceJob.id, 99), null);
+cancelMediaJob(retried.id, 1);
+assert.equal(db.prepare("SELECT value FROM app_settings WHERE key = 'media_queue_paused'").get().value, '1');
+console.log('Persistent media pause and honest restart status passed; zero generation requests.');
