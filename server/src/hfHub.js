@@ -14,6 +14,7 @@ import {
   unlinkSync, writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { gpuVram } from './llama.js';
 import { modelParamsB } from './modelDescribe.js';
@@ -588,7 +589,7 @@ export async function modelVariants(repoId) {
 
 // Variant include patterns are glob-ish (`dir/*`, `base-*-of-00003.gguf`, a
 // plain path). We match them against the snapshot's real file list.
-function includeMatches(include, path) {
+export function includeMatches(include, path) {
   if (!include) return true; // whole-repo variant: caller handles separately
   const re = new RegExp('^' + include.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
   return re.test(path);
@@ -662,14 +663,28 @@ export function upsertRouterPreset(modelPath, { alias, ctxSize = 32768 } = {}) {
   if (!existsSync(ROUTER_INI)) {
     throw Object.assign(new Error(`router preset ini missing (${ROUTER_INI})`), { status: 500 });
   }
-  const id = alias || aliasFromPath(path);
   const raw = readFileSync(ROUTER_INI, 'utf8');
+  const sections = raw.split(/(?=^\[)/m).map((block) => ({
+    block,
+    name: block.match(/^\[([^\]]+)\]/)?.[1],
+    model: block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim(),
+  }));
+  // A second repository can use the same GGUF filename. Keep the first
+  // model's alias and give the new one a stable path-based suffix.
+  const existing = sections.find((s) => s.model === path)?.name;
+  let id = alias || existing || aliasFromPath(path);
+  const occupied = (name) => sections.some((s) => s.name === name && s.model !== path);
+  if (occupied(id) && alias) {
+    throw Object.assign(new Error(`model name ${id} is already in use`), { status: 409 });
+  }
+  if (occupied(id)) {
+    const hash = createHash('sha256').update(path).digest('hex').slice(0, 10);
+    id = `${id.slice(0, 68)}-${hash}`;
+  }
   const kept = [];
-  for (const block of raw.split(/(?=^\[)/m)) {
-    const a = block.match(/^\[([^\]]+)\]/)?.[1];
-    const model = block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim();
-    if (a === id || model === path) continue;
-    kept.push(block);
+  for (const section of sections) {
+    if (section.name === id || section.model === path) continue;
+    kept.push(section.block);
   }
   const section = [
     `[${id}]`,

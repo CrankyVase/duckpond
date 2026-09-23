@@ -9,7 +9,6 @@
   import Cloud from '@lucide/svelte/icons/cloud';
   import Download from '@lucide/svelte/icons/download';
   import Files from '@lucide/svelte/icons/files';
-  import MessageSquare from '@lucide/svelte/icons/message-square';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
   import PiggyBank from '@lucide/svelte/icons/piggy-bank';
   import Settings2 from '@lucide/svelte/icons/settings-2';
@@ -26,13 +25,9 @@
   };
   const viewMeta = $derived(VIEWS[app.view] ?? null);
 
-  const vram = $derived(app.gpu?.totalBytes
-    ? `${(app.gpu.usedBytes / 1e9).toFixed(1)} / ${(app.gpu.totalBytes / 1e9).toFixed(0)} GB`
-    : null);
-  const vramPct = $derived(app.gpu?.totalBytes ? app.gpu.usedBytes / app.gpu.totalBytes : 0);
 </script>
 
-<header>
+<header class:integrated={app.view !== 'chat' && !app.sidebarCollapsed}>
   {#if app.sidebarCollapsed}
     <button class="ghost iconb" onclick={() => (app.sidebarCollapsed = false)}
       title="Show menu" aria-label="Menu">
@@ -40,39 +35,24 @@
     </button>
   {/if}
   {#if app.view === 'chat'}
-    <!-- sidebar owns the switcher when it's visible; this is the fallback -->
     {#if app.sidebarCollapsed}<ModeSwitch compact />{/if}
     <div class="mid">
       <ModelPicker />
     </div>
   {:else}
-    <button class="ghost iconb backchat" onclick={() => {
-      app.view = 'chat';
-      app.themeStudioOpen = false;
-    }} title="Back to chat">
-      <MessageSquare size={16} />
-    </button>
-    <span class="viewtitle">
+    {#if app.sidebarCollapsed}<span class="viewtitle">
       {#if viewMeta}<viewMeta.icon size={14} /> {viewMeta.label}{/if}
-    </span>
+    </span>{/if}
     <div class="spacer"></div>
-  {/if}
-  {#if vram}
-    <span class="vram desk" class:hot={vramPct > 0.9}
-      title="GPU VRAM used / total — {Math.round(vramPct * 100)}%">
-      <span class="vlabel">VRAM</span>
-      <span class="meter"><span class="fill" style="width:{Math.min(100, vramPct * 100)}%"></span></span>
-      <span class="vnum">{vram}</span>
-    </span>
   {/if}
   {#if app.view === 'chat'}
     <div class="desk ctxwrap"><ContextBar /></div>
   {/if}
-  <button class="ghost iconb" class:onview={app.view === 'settings'}
+  {#if app.sidebarCollapsed}<button class="ghost iconb" class:onview={app.view === 'settings'}
     onclick={() => { app.view = 'settings'; app.themeStudioOpen = false; }}
     title="Settings" aria-label="Settings">
     <Settings2 size={18} />
-  </button>
+  </button>{/if}
 </header>
 
 <style>
@@ -90,6 +70,7 @@
     max-width: 100%;
     box-sizing: border-box;
   }
+  header.integrated { display: none; }
   .mid {
     flex: 1 1 auto;
     min-width: 0;
@@ -113,24 +94,6 @@
     min-width: 0;
   }
   .viewtitle :global(svg) { color: var(--text-faint); flex-shrink: 0; }
-  .vram {
-    display: inline-flex; align-items: center; gap: 7px;
-    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
-    padding: 5px 11px; border-radius: 999px;
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    white-space: nowrap; user-select: none; flex-shrink: 0;
-  }
-  .vram.hot { color: var(--red); }
-  .vlabel { color: var(--text-faint); letter-spacing: 0.05em; }
-  .meter {
-    width: 38px; height: 4px; border-radius: 2px; overflow: hidden;
-    background: var(--bg-hover); display: inline-block; flex-shrink: 0;
-  }
-  .fill {
-    display: block; height: 100%; border-radius: 2px;
-    background: var(--accent); transition: width 400ms ease, background 300ms ease;
-  }
-  .vram.hot .fill { background: var(--red); }
   .ctxwrap { flex-shrink: 0; }
 
   @media (max-width: 768px) {
@@ -151,7 +114,6 @@
     }
     /* VRAM + context eat too much horizontal space on phones */
     .desk { display: none !important; }
-    .backchat { display: none; }
     .mid { flex: 1 1 0; min-width: 0; overflow: hidden; }
     .viewtitle {
       font-size: 14px; flex: 1; min-width: 0;

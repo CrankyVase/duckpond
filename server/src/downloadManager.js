@@ -15,7 +15,7 @@ import { createDownloadRate } from './downloadRate.js';
 //    continues where it left off.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertRepoId } from './hfHub.js';
 
@@ -54,7 +54,7 @@ const cacheDir = (repoId) => join(HF_HOME, 'hub', `models--${String(repoId).repl
 function scanProgress(repoId, include) {
   const root = cacheDir(repoId);
   const blobs = join(root, 'blobs');
-  if (!existsSync(blobs)) return { downloadedBytes: 0, totalBytes: null };
+  if (!existsSync(blobs)) return { downloadedBytes: 0, incompleteBytes: 0 };
   let downloaded = 0;
   let incomplete = 0;
   try {
@@ -65,8 +65,8 @@ function scanProgress(repoId, include) {
         downloaded += statSync(p).size;
       } catch { /* vanished mid-scan */ }
     }
-  } catch { return { downloadedBytes: 0, totalBytes: null }; }
-  return { downloadedBytes: downloaded + incomplete, totalBytes: null };
+  } catch { return { downloadedBytes: 0, incompleteBytes: 0 }; }
+  return { downloadedBytes: downloaded + incomplete, incompleteBytes: incomplete };
 }
 
 // Speed/ETA from a time window of disk scans; extra polling tabs share it.
@@ -88,42 +88,89 @@ function spawnWorker(job) {
   job.pid = child.pid;
   let errTail = '';
   child.stderr.on('data', (d) => { errTail = (errTail + d.toString('utf8')).slice(-2000); });
-  child.on('close', (code, signal) => {
+  let settled = false;
+  const finish = (code, signal, error = null) => {
+    if (settled) return;
+    settled = true;
     procs.delete(job.key);
+    job.pid = null;
     job.finishedAt = Date.now();
     if (job.state === 'cancelling') { job.state = 'cancelled'; job.error = null; }
-    else if (code === 0) { job.state = 'done'; job.error = null; }
-    else { job.state = 'error'; job.error = errTail.trim().split('\n').pop() ?? `exited ${code ?? signal}`; }
+    else if (error) { job.state = 'error'; job.error = error.message; }
+    else if (code === 0) { job.state = 'done'; job.error = null; if (job.totalBytes) job.downloadedBytes = job.totalBytes; job.etaSec = 0; }
+    else { job.state = 'error'; job.error = errTail.trim().split('\n').pop() || `exited ${code ?? signal}`; }
     persistJob(job);
-  });
+  };
+  child.on('error', (error) => finish(null, null, error));
+  child.on('close', (code, signal) => finish(code, signal));
 }
 
 function persistJob(job) {
+  const file = stateFile(job.key);
+  const temp = `${file}.${process.pid}.tmp`;
   try {
-    writeFileSync(stateFile(job.key), JSON.stringify({ ...job, pid: undefined }));
-  } catch { /* state dir unwritable — job still tracked in memory */ }
+    writeFileSync(temp, JSON.stringify(job));
+    renameSync(temp, file);
+  } catch {
+    try { rmSync(temp, { force: true }); } catch { /* best effort */ }
+    // State dir unwritable — job still tracked in memory.
+  }
 }
 
-// Boot-time reap: workers from a previous DuckPond process whose parent died
-// self-exit (hf CLI has no parent-death watch, so we kill orphans ourselves).
+// A previous worker may survive a direct Node crash outside systemd. Only
+// signal a PID if /proc confirms it still runs this repo through our HF CLI;
+// process IDs can be reused by unrelated programs.
+function stopPreviousWorker(job) {
+  if (!Number.isInteger(job.pid) || job.pid <= 0) return;
+  try {
+    const argv = readFileSync(`/proc/${job.pid}/cmdline`, 'utf8').split('\0');
+    if (argv.includes(HF_CLI) && argv.includes('download') && argv.includes(job.repoId)) {
+      process.kill(job.pid, 'SIGKILL');
+    }
+  } catch { /* already exited or a non-Linux host */ }
+}
+
+// Restore in-flight downloads after a server crash or restart. The HF cache
+// keeps partial blobs, so a fresh CLI worker resumes instead of starting over.
+// A prior explicit Cancel is terminal and must never be resumed.
 export function reapOrphans() {
+  const resume = [];
   try {
     for (const f of readdirSync(STATE_DIR)) {
       if (!f.endsWith('.json')) continue;
       try {
         const j = JSON.parse(readFileSync(join(STATE_DIR, f), 'utf8'));
-        if (j.state === 'running' && j.pid) {
-          try { process.kill(j.pid, 'SIGKILL'); } catch { /* already gone */ }
-        }
-        if (j.state === 'running' || j.state === 'cancelling') {
+        if (!j.key || !j.repoId) continue;
+        if (j.state === 'running') {
+          assertRepoId(j.repoId);
+          stopPreviousWorker(j);
+          j.pid = null;
+          j.resumeCount = (j.resumeCount || 0) + 1;
+          j.restartedAt = Date.now();
+          j.error = null;
+          j.finishedAt = null;
+          resume.push(j);
+        } else if (j.state === 'cancelling') {
+          stopPreviousWorker(j);
           j.state = 'cancelled';
+          j.pid = null;
           j.finishedAt = Date.now();
-          persistJob(j);
         }
         jobs.set(j.key, j);
+        persistJob(j);
       } catch { /* corrupt state file — skip */ }
     }
   } catch { /* no state dir yet */ }
+  // Let a just-signalled old worker exit before any new writer starts.
+  for (const job of resume) {
+    setTimeout(() => {
+      if (jobs.get(job.key) === job && job.state === 'running' && !procs.has(job.key)) {
+        spawnWorker(job);
+        persistJob(job);
+      }
+    }, 750).unref();
+  }
+  return resume.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,12 +185,23 @@ export function reapOrphans() {
 // listDownloads, so progress/speed never advanced there.
 function refreshProgress(job) {
   if (job.state !== 'running') return job;
-  const { downloadedBytes } = scanProgress(job.repoId, job.include);
-  job.downloadedBytes = downloadedBytes;
-  const { speed } = sampleSpeed(job.key, downloadedBytes);
+  const { downloadedBytes: repoBytes } = scanProgress(job.repoId, job.include);
+  // The HF blob directory contains every quant in this repo. Subtract the
+  // bytes already present before this transfer so a second quant cannot start
+  // at 100% merely because the first one is cached.
+  if (!Number.isFinite(job.baselineBytes)) {
+    // Older job records stored repo-wide bytes. If that exceeds this file's
+    // expected size, discard it rather than showing a false 100% on recovery.
+    const carried = job.totalBytes && job.downloadedBytes > job.totalBytes
+      ? 0 : (job.downloadedBytes || 0);
+    job.baselineBytes = Math.max(0, repoBytes - carried);
+  }
+  const transferred = Math.max(0, repoBytes - job.baselineBytes);
+  job.downloadedBytes = job.totalBytes ? Math.min(job.totalBytes, transferred) : transferred;
+  const { speed } = sampleSpeed(job.key, job.downloadedBytes);
   job.speedBytesPerSec = speed;
   job.etaSec = job.totalBytes && speed
-    ? Math.max(0, Math.round((job.totalBytes - downloadedBytes) / speed)) : null;
+    ? Math.max(0, Math.round((job.totalBytes - job.downloadedBytes) / speed)) : null;
   return job;
 }
 
@@ -182,11 +240,15 @@ export function startDownload(repoId, { include, variant, totalBytes } = {}) {
     }
   }
   generation += 1;
+  const cache = scanProgress(repoId, include);
+  const prior = existing?.state === 'cancelled' || existing?.state === 'error'
+    ? Math.max(0, Number(existing.downloadedBytes) || 0) : 0;
+  const initialBytes = totalBytes ? Math.min(totalBytes, prior) : prior;
   const job = {
     key, repoId, include: include ?? null, variant: variant ?? include ?? null,
     state: 'running', generation, startedAt: Date.now(), finishedAt: null,
-    error: null, downloadedBytes: 0, totalBytes: totalBytes ?? null,
-    speedBytesPerSec: null, etaSec: null,
+    error: null, downloadedBytes: initialBytes, baselineBytes: Math.max(0, cache.downloadedBytes - initialBytes),
+    totalBytes: totalBytes ?? null, speedBytesPerSec: null, etaSec: null,
   };
   jobs.set(key, job);
   spawnWorker(job);
@@ -199,8 +261,17 @@ export function cancelDownload(repoId, include) {
   const job = jobs.get(key);
   if (!job || job.state !== 'running') return { ok: true, state: job?.state ?? 'idle' };
   job.state = 'cancelling';
+  persistJob(job);
   const child = procs.get(key);
-  if (child) child.kill('SIGTERM');
+  if (!child) {
+    // Recovery may be waiting briefly for the old process to exit. There is
+    // no worker to deliver a close event, so settle cancellation right here.
+    job.state = 'cancelled';
+    job.finishedAt = Date.now();
+    persistJob(job);
+    return { ok: true, state: 'cancelled' };
+  }
+  child.kill('SIGTERM');
   // Watchdog: if SIGTERM didn't take in 10s, SIGKILL.
   setTimeout(() => {
     const c = procs.get(key);

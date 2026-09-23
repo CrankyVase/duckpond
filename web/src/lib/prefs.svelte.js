@@ -9,7 +9,6 @@ const DEFAULTS = {
   autoScroll: true,          // follow the stream
   sendOnEnter: true,         // Enter sends, Shift+Enter newline
   autoExpandThinking: false, // open finished thought panels by default
-  autoCompact: true,         // summarize old turns automatically at 75% context
   researchMode: 'normal',    // quick | normal | ultra — web-search depth
   caret: 'beam',             // beam | block | dot — streaming typing caret style
   // sidebar nav ids pinned inline; anything else collapses into "More" —

@@ -1,9 +1,9 @@
 <script>
   import { untrack } from 'svelte';
-  import { api, sse, sseGet } from '../lib/api.js';
+  import { api, sseGet } from '../lib/api.js';
   import { prefs, savePrefs } from '../lib/prefs.svelte.js';
   import {
-    app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, localWorkspace, newConversation, openConversation, refreshContext, visiblePath,
+    app, childrenMap, deepestLeaf, loadConversations, loadModels, localWorkspace, newConversation, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
 import { toast } from '../lib/toast.svelte.js';
@@ -19,10 +19,11 @@ import ChatFiles from './ChatFiles.svelte';
   import Globe from '@lucide/svelte/icons/globe';
   import Lightbulb from '@lucide/svelte/icons/lightbulb';
   import Paperclip from '@lucide/svelte/icons/paperclip';
-  import Telescope from '@lucide/svelte/icons/telescope';
   import Square from '@lucide/svelte/icons/square';
+  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
 
   let input = $state('');
+  let composerOptionsOpen = $state(false);
   let draftOwner = null;
   // Save on every input change and before navigation/unmount. Using a captured
   // store prevents a departing account's draft from being saved to another account.
@@ -47,10 +48,6 @@ import ChatFiles from './ChatFiles.svelte';
   let pendThink = '';
   let toolBuf = null; // { index, name, args } — streaming tool-call arguments
   let ctxPromptBaseline = null; // last server-reported prompt size → tok_s grows the bar live
-
-  // ----- follow-up prompt chips (messageId → string[]) -----
-  let followups = $state(null); // { messageId, items: string[], loading?: boolean } | null
-  let followupsConvId = null;
 
   // ----- message queue (send while AI is busy) -----
   let msgQueue = $state([]); // { id, content }[]
@@ -292,22 +289,9 @@ import ChatFiles from './ChatFiles.svelte';
           if (!app.conv.messages.some(m => m.id === ev.msg.id)) app.conv.messages.push(ev.msg);
           app.conv.active_leaf_id = ev.msg.id;
           if (ev.msg.run_id) app.filesVersion++;
-          // chips load after the model finishes a second cheap pass
-          followups = { messageId: ev.msg.id, items: [], loading: true };
-          followupsConvId = convId;
           scrollToBottom();
         }
         app.streaming = null;
-        break;
-      case 'followups':
-        // short clickable next-messages under the just-finished reply
-        if (here && ev.messageId && Array.isArray(ev.items) && ev.items.length) {
-          followups = { messageId: ev.messageId, items: ev.items.slice(0, 3), loading: false };
-          followupsConvId = convId;
-          scrollToBottom();
-        } else if (here && followups?.loading && followups.messageId === ev.messageId) {
-          followups = null; // model returned nothing useful
-        }
         break;
       case 'image_job':
         if (s) { s.loading = false; s.image = { prompt: ev.prompt, phase: 'starting', step: null, steps: null, preview: null }; }
@@ -391,6 +375,12 @@ import ChatFiles from './ChatFiles.svelte';
         break;
       case 'resume': {
         const workspaceId = ev.workspace?.id ?? ev.run?.workspace_id;
+        // The detached POST can save the prompt before the GET attaches.
+        // Replay its real message id so the tree stays correct on fast starts.
+        if (here && ev.userMsg && !app.conv.messages.some((m) => m.id === ev.userMsg.id)) {
+          app.conv.messages.push(ev.userMsg);
+          app.conv.active_leaf_id = ev.userMsg.id;
+        }
         if (here && workspaceId && !app.conv.workspace_id) {
           app.conv.workspace_id = workspaceId;
           app.filesVersion++;
@@ -409,7 +399,7 @@ import ChatFiles from './ChatFiles.svelte';
           app.streaming = null;
           break;
         }
-        if (ev.status === 'stopped' || ev.status === 'error') {
+        if (ev.status === 'stopped' || ev.status === 'error' || ev.status === 'interrupted') {
           // Prefer a server-saved finalMsg (has a real id on the tree)
           if (ev.finalMsg) {
             if (here && !app.conv.messages.some((m) => m.id === ev.finalMsg.id)) {
@@ -431,6 +421,7 @@ import ChatFiles from './ChatFiles.svelte';
         }
         app.streaming = {
           convId,
+          jobId: ev.jobId ?? null,
           text: ev.text || '',
           thinking: ev.thinking || '',
           tokS: ev.tokS ?? null,
@@ -461,6 +452,7 @@ import ChatFiles from './ChatFiles.svelte';
   function emptyStreaming(convId) {
     return {
       convId, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
+      jobId: null,
       run: null, events: [], liveTool: null, lastWrite: null, pendingApproval: null,
       image: null, diffusion: null, queued: 0,
       search: null, widgets: [],
@@ -470,7 +462,7 @@ import ChatFiles from './ChatFiles.svelte';
   let intentionalStop = false;
   let resumeToken = 0;
   let resuming = false;
-  let reconnectBudget = 0;
+  let reconnectFailures = 0;
 
   /** Resolve a parent id the server will accept (no tmp-* client leaves). */
   function realParentId() {
@@ -492,38 +484,43 @@ import ChatFiles from './ChatFiles.svelte';
     app.streaming = emptyStreaming(convId);
     pendText = ''; pendThink = ''; toolBuf = null;
     intentionalStop = false;
-    reconnectBudget = 3;
+    reconnectFailures = 0;
     // Always pass a real DB parent so "continue" after a drop stays on the same branch
     const outBody = {
       ...body,
       parentId: body.parentId !== undefined ? body.parentId : realParentId(),
       researchMode: prefs.researchMode,
     };
-    stream = sse(`/api/conversations/${convId}/chat`, outBody, (ev) => handleEvent(ev, convId));
-    let reattached = false;
+    let started = false;
     try {
-      await stream.done;
+      // The POST only creates the server job. Read progress through a separate
+      // live feed so a proxy's request limit cannot interrupt generation.
+      const accepted = await api(`/api/conversations/${convId}/chat`, { method: 'POST', body: outBody });
+      if (app.streaming?.convId === convId) app.streaming.jobId = accepted.jobId ?? null;
+      started = true;
+      await tryResume(convId, { nested: true });
     } catch (err) {
       if (err?.name === 'AbortError') { /* stop / tab close */ }
-      else if (/already generating/i.test(String(err.message ?? ''))) {
-        // Server still working — reattach live bubble, do not start a new turn / wipe
-        toast('Still generating — reconnected to the live reply', 'ok');
-        reattached = true;
-        await tryResume(convId, { nested: false });
+      else if (err?.status === 409) {
+        // Another tab started this conversation first. Its job remains the
+        // source of truth; show it instead of creating a second generation.
+        if (body.content && !input) input = body.content;
+        toast('This chat is already replying. Your message is ready in the composer.', 'ok');
+        started = true;
+        await tryResume(convId, { nested: true });
       } else if (app.streaming) {
         app.streaming.error = String(err.message ?? err);
       }
     } finally {
-      // tryResume owns the live tail when we reattached to an in-flight job
-      if (!reattached) await endStream(convId);
+      if (started) await endStream(convId);
+      else {
+        if (app.streaming?.convId === convId) app.streaming = null;
+        if (app.conv?.id === convId) {
+          if (body.content && !input) input = body.content;
+          toast('Could not start the reply. Your message is ready in the composer.', 'error');
+        }
+      }
     }
-  }
-
-  function snapHasContent(snap) {
-    if (!snap) return false;
-    return !!(snap.text || snap.thinking || snap.error || snap.run
-      || snap.events?.length || snap.liveTool || snap.lastWrite
-      || snap.widgets?.length || snap.image || snap.diffusion);
   }
 
   function codeFenceFromWrite(w) {
@@ -600,7 +597,6 @@ import ChatFiles from './ChatFiles.svelte';
       stream = null;
       if (app.conv?.id === convId) {
         refreshContext();
-        maybeAutoCompact();
         if (!app.streaming) pumpQueue(convId);
       }
       return;
@@ -610,48 +606,47 @@ import ChatFiles from './ChatFiles.svelte';
       promoteSnapToMessage(convId, snap, '\n\n> stopped');
       app.streaming = null;
       stream = null;
-    } else if (reconnectBudget > 0 && app.conv?.id === convId) {
-      // Unexpected local disconnect (proxy timeout, blip). KEEP the live bubble
-      // visible while we reattach — never blank the thread.
-      reconnectBudget -= 1;
-      stream = null;
-      // Mark reconnecting so UI can still show the bubble (streaming stays set)
-      if (app.streaming?.convId === convId) app.streaming.loading = true;
-      // Soft-reattach without clearing the bubble. tryResume waits until the
-      // live tail ends (done / stream_end / network drop).
-      await tryResume(convId, { preserveSnap: snap, nested: true });
-      if (app.streaming?.convId === convId) {
-        // Live tail died again while still generating — fall through to save
-        // partial or keep trying until budget is gone
-        if (reconnectBudget > 0) {
-          reconnectBudget -= 1;
-          await tryResume(convId, { preserveSnap: app.streaming, nested: true });
-        }
-      }
-      if (app.streaming?.convId === convId) {
-        // Still no clean finish — park partial so it never vanishes
-        promoteSnapToMessage(convId, app.streaming, '\n\n> connection dropped — partial reply kept');
-        toast('Connection dropped — partial kept. Say continue to pick up.', 'error', 4500);
-        app.streaming = null;
-      } else {
-        // done applied (incl. server-saved interrupt) — refresh from DB so continue
-        // hangs under a real message id, not a tmp-* leaf
-        try { await openConversation(convId); } catch { /* ignore */ }
-      }
-      stream = null;
     } else {
-      // Out of reconnect attempts — keep whatever we had
-      if (snapHasContent(snap)) {
-        promoteSnapToMessage(convId, snap, '\n\n> connection lost');
-        toast('Connection lost — partial kept. Say continue to pick up.', 'error', 4500);
+      // Proxy timeouts and lost tabs affect only this viewer. Keep the job and
+      // its live bubble, then attach again until the server reports completion.
+      stream = null;
+      while (app.streaming?.convId === convId && !intentionalStop) {
+        app.streaming.loading = true;
+        const result = await tryResume(convId, { preserveSnap: app.streaming, nested: true });
+        if (!app.streaming || app.streaming.convId !== convId) break;
+        if (result?.active === false) {
+          // The server has no job (finished during a long outage, or restarted).
+          // Reload saved messages before deciding whether a partial is needed.
+          if (app.conv?.id === convId) {
+            try { await openConversation(convId); } catch { /* keep local snapshot */ }
+            promoteSnapToMessage(convId, app.streaming, '\n\n> connection lost — partial reply kept');
+          }
+          app.streaming = null;
+          break;
+        }
+        reconnectFailures += 1;
+        // The live feed is only a viewer. If an intermediary keeps closing
+        // SSE, fetch the durable job snapshot over an ordinary short request.
+        if (reconnectFailures >= 3 && app.streaming?.jobId) {
+          try {
+            const snapshot = await api(`/api/conversations/${convId}/job?jobId=${encodeURIComponent(app.streaming.jobId)}`);
+            if (snapshot?.type === 'resume') handleEvent(snapshot, convId);
+            if (!app.streaming || app.streaming.convId !== convId) break;
+          } catch { /* keep retrying the live feed */ }
+        }
+        const pause = Math.min(8_000, 500 * 2 ** Math.min(reconnectFailures, 4));
+        await new Promise((resolve) => setTimeout(resolve, pause));
       }
-      app.streaming = null;
+      if (intentionalStop && app.streaming?.convId === convId) {
+        promoteSnapToMessage(convId, app.streaming, '\n\n> stopped');
+        app.streaming = null;
+        intentionalStop = false;
+      }
       stream = null;
     }
 
     if (app.conv?.id === convId) {
       refreshContext();
-      maybeAutoCompact();
       if (!app.streaming) pumpQueue(convId);
     }
   }
@@ -667,11 +662,15 @@ import ChatFiles from './ChatFiles.svelte';
     const token = ++resumeToken;
     try {
       let gotResume = false;
-      const handle = sseGet(`/api/conversations/${convId}/live`, (ev) => {
+      let status = null;
+      const jobId = app.streaming?.convId === convId ? app.streaming.jobId : null;
+      const path = `/api/conversations/${convId}/live${jobId ? `?jobId=${encodeURIComponent(jobId)}` : ''}`;
+      const handle = sseGet(path, (ev) => {
         if (token !== resumeToken) return;
         if (ev.type === 'resume') {
           gotResume = true;
-          if (reconnectBudget <= 0) reconnectBudget = 3;
+          status = ev.status;
+          reconnectFailures = 0;
           // If resume snapshot is empty but we still have local text, merge it
           // so a blip mid-code doesn't wipe the bubble before the next delta.
           if (preserveSnap && ev.status === 'running') {
@@ -694,7 +693,7 @@ import ChatFiles from './ChatFiles.svelte';
       if (nested) {
         // endStream owns cleanup
         if (!gotResume) stream = null;
-        return;
+        return { gotResume, active: handle.active, status };
       }
       // Boot / popstate path: if we attached and the job later finished, done
       // already cleared streaming. If the live socket died mid-run, endStream.
@@ -729,45 +728,11 @@ import ChatFiles from './ChatFiles.svelte';
     if (!msgQueue.length) return;
     const next = msgQueue[0];
     msgQueue = msgQueue.slice(1);
-    followups = null; // a queued message is the next turn — hide chips
     run({ content: next.content });
   }
 
-  // Clear follow-up chips when leaving a chat or starting a new one
-  $effect(() => {
-    const id = app.conv?.id;
-    if (id !== followupsConvId) {
-      followups = null;
-      followupsConvId = id ?? null;
-    }
-  });
-
-  // Drop the "loading" skeleton if the stream ended without a followups event
-  $effect(() => {
-    if (!followups?.loading) return;
-    if (app.streaming) return;
-    const t = setTimeout(() => {
-      if (followups?.loading) followups = null;
-    }, 12_000);
-    return () => clearTimeout(t);
-  });
-
   function removeQueued(id) {
     msgQueue = msgQueue.filter((q) => q.id !== id);
-  }
-
-  // fires after each exchange: summarize old turns before the context wall
-  async function maybeAutoCompact() {
-    if (!prefs.autoCompact || app.compacting || app.streaming) return;
-    const { used, budget } = app.context;
-    if (!used || used / Math.max(1, budget) < 0.75) return;
-    toast('Context 75% full — compacting older messages…');
-    try {
-      const r = await compactNow();
-      if (r) toast(`Compacted ${r.compacted} messages`, 'ok');
-    } catch (err) {
-      toast(`Auto-compact failed: ${err.message ?? err}`, 'error');
-    }
   }
 
   function send() {
@@ -775,7 +740,6 @@ import ChatFiles from './ChatFiles.svelte';
     if (!content || !app.conv) return;
     input = '';
     if (inputEl) inputEl.style.height = 'auto';
-    followups = null;
     pushHistory(content);
     if (app.streaming) {
       // queue while the model is working — grey chips under the live bubble
@@ -787,12 +751,11 @@ import ChatFiles from './ChatFiles.svelte';
     run({ content, parentId: realParentId() });
   }
 
-  function suggest(prompt) {
-    if (prompt.endsWith('\n\n')) {           // template that wants user input
+  function suggest(prompt, { draft = false } = {}) {
+    if (draft || prompt.endsWith('\n\n')) { // template that wants user input
       input = prompt;
       inputEl?.focus();
     } else {
-      followups = null;
       pushHistory(prompt);
       if (app.streaming) {
         msgQueue = [...msgQueue, { id: `q-${Date.now()}`, content: prompt }];
@@ -800,15 +763,6 @@ import ChatFiles from './ChatFiles.svelte';
         run({ content: prompt });
       }
     }
-  }
-
-  /** One-tap follow-up chip under the last assistant reply. */
-  function useFollowup(text) {
-    const t = String(text ?? '').trim();
-    if (!t || !app.conv || app.streaming) return;
-    followups = null;
-    pushHistory(t);
-    run({ content: t, parentId: realParentId() });
   }
 
   async function stop() {
@@ -919,13 +873,11 @@ import ChatFiles from './ChatFiles.svelte';
   }
 
 
-  // web-search depth: cycle quick → normal → ultra
+  // Search depth belongs with the other optional composer controls.
   const RESEARCH = { quick: 'Quick', normal: 'Normal', ultra: 'Ultra research' };
-  function cycleResearch() {
-    const order = ['quick', 'normal', 'ultra'];
-    prefs.researchMode = order[(order.indexOf(prefs.researchMode) + 1) % order.length];
+  function setResearch(mode) {
+    prefs.researchMode = mode;
     savePrefs();
-    toast(`Search depth: ${RESEARCH[prefs.researchMode]}${prefs.researchMode === 'ultra' ? ' — deep, slow, ~400 sources' : ''}`);
   }
 
   async function approve(ok) {
@@ -1139,7 +1091,7 @@ import ChatFiles from './ChatFiles.svelte';
         {#if streamingHere.image}
           <div class="imgjob fade-in">
             {#if streamingHere.image.preview}
-              <img class="imgpreview" src={streamingHere.image.preview} alt="image taking shape" />
+               <img class="imgpreview" src={streamingHere.image.preview} alt="Preview taking shape" />
             {:else}
               <div class="imgshimmer"></div>
             {/if}
@@ -1182,20 +1134,6 @@ import ChatFiles from './ChatFiles.svelte';
           </div>
         {/each}
       {/if}
-      {#if followups && !streamingHere && !msgQueue.length
-          && path.length && path[path.length - 1]?.id === followups.messageId}
-        <div class="followups fade-in" aria-label="Suggested follow-ups">
-          {#if followups.loading}
-            <span class="fup-skel shimmer">Suggesting follow-ups…</span>
-          {:else}
-            {#each followups.items as item (item)}
-              <button type="button" class="fup" onclick={() => useFollowup(item)} title="Send this follow-up">
-                {item}
-              </button>
-            {/each}
-          {/if}
-        </div>
-      {/if}
       <div class="pad"></div>
     </div>
   </div>
@@ -1206,7 +1144,7 @@ import ChatFiles from './ChatFiles.svelte';
         <ArrowDown size={16} />
       </button>
     {/if}
-    <div class="composer" class:active={busy} class:drag={dragOver}
+    <div class="composer" class:active={busy} class:drag={dragOver} role="group" aria-label="Message composer"
       ondragenter={onComposerDrag} ondragover={onComposerDrag}
       ondragleave={onComposerDrag} ondrop={onComposerDrag}
       onpaste={onComposerPaste}>
@@ -1235,6 +1173,18 @@ import ChatFiles from './ChatFiles.svelte';
         bind:value={input} bind:this={inputEl} onkeydown={composerKey} oninput={autoGrow}
         onpaste={onComposerPaste}
         disabled={!app.conv}></textarea>
+      {#if composerOptionsOpen}
+        <div class="composer-options" id="composer-options">
+          <div class="option-copy"><Globe size={16} /><div><strong>Web search depth</strong><span>How thoroughly DuckPond searches when a reply needs the web.</span></div></div>
+          <div class="search-choices" role="group" aria-label="Web search depth">
+            {#each ['quick', 'normal', 'ultra'] as mode}
+              <button type="button" class:selected={prefs.researchMode === mode} aria-pressed={prefs.researchMode === mode} onclick={() => setResearch(mode)}>{RESEARCH[mode]}</button>
+            {/each}
+          </div>
+          <div class="option-copy"><Lightbulb size={16} /><div><strong>Reasoning</strong><span>{thinkingOn ? 'The selected model can think through complex requests.' : 'The selected model replies without its extra reasoning mode.'}</span></div></div>
+          <button type="button" class="reasoning-choice" class:selected={thinkingOn} disabled={!model} aria-pressed={!!thinkingOn} onclick={toggleThinking}>{thinkingOn ? 'On' : 'Off'}</button>
+        </div>
+      {/if}
       <div class="bar">
         <input type="file" multiple hidden bind:this={fileInput}
           accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
@@ -1242,15 +1192,12 @@ import ChatFiles from './ChatFiles.svelte';
         <button class="tool" class:on={attachedDocs.length > 0 || attachedImgs.length > 0} disabled={uploading}
           title={uploading ? 'Reading…' : 'Attach images or documents — every model can read them'}
           onclick={pickFiles}><Paperclip size={15} /></button>
-        <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
-          title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
-          onclick={cycleResearch}>
-          {#if prefs.researchMode === 'ultra'}<Telescope size={15} />{:else}<Globe size={15} />{/if}
-          {#if prefs.researchMode !== 'normal'}<span class="rlbl">{prefs.researchMode === 'ultra' ? 'Ultra' : 'Quick'}</span>{/if}
+        <button type="button" class="options-trigger" class:on={composerOptionsOpen}
+          aria-label="Chat options" title="Chat options" aria-expanded={composerOptionsOpen} aria-controls="composer-options"
+          onclick={() => (composerOptionsOpen = !composerOptionsOpen)}>
+          <SlidersHorizontal size={15} /><span class="option-label">Options</span>
+          {#if prefs.researchMode !== 'normal'}<span class="option-badge">{RESEARCH[prefs.researchMode]}</span>{/if}
         </button>
-        <button class="tool" class:on={thinkingOn} disabled={!model}
-          title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
-          onclick={toggleThinking}><Lightbulb size={15} /></button>
         <div class="grow"></div>
         {#if msgQueue.length}
           <span class="qcount" title="{msgQueue.length} message{msgQueue.length === 1 ? '' : 's'} queued">{msgQueue.length} queued</span>
@@ -1294,12 +1241,10 @@ import ChatFiles from './ChatFiles.svelte';
   }
   .mono { font-family: var(--mono); }
   .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 1.6s linear infinite;
+    color: var(--text-dim);
+    animation: pulse 1.6s ease-in-out infinite;
   }
-  @keyframes shimmer { to { background-position: -200% 0; } }
+  @keyframes pulse { 50% { opacity: .55; } }
 
   .dock {
     position: relative; max-width: var(--chat-maxw); width: 100%; margin: 0 auto;
@@ -1361,6 +1306,24 @@ import ChatFiles from './ChatFiles.svelte';
   }
   .dx:hover { background: var(--bg-hover); color: var(--red); }
   .bar { display: flex; align-items: center; gap: 2px; }
+  .composer-options {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    gap: 12px 18px; padding: 16px 4px; margin: 2px 0 10px;
+    border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft);
+  }
+  .option-copy { display: flex; align-items: flex-start; gap: 10px; min-width: 0; color: var(--text-dim); }
+  .option-copy :global(svg) { flex: 0 0 auto; margin-top: 2px; color: var(--accent); }
+  .option-copy strong { display: block; color: var(--text); font-size: 12.5px; font-weight: 600; }
+  .option-copy span { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.4; }
+  .search-choices { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg-raised); }
+  .search-choices button, .reasoning-choice { border: 0; border-radius: 7px; padding: 6px 9px; background: transparent; color: var(--text-dim); font-size: 11.5px; white-space: nowrap; }
+  .search-choices button.selected, .reasoning-choice.selected { background: var(--accent-glow); color: var(--accent); }
+  .search-choices button:hover, .reasoning-choice:hover { background: var(--bg-hover); }
+  .reasoning-choice { border: 1px solid var(--border-soft); min-width: 46px; }
+  .reasoning-choice:disabled { opacity: .45; cursor: default; }
+  .options-trigger { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text-dim); font-size: 12px; }
+  .options-trigger:hover, .options-trigger.on { background: var(--bg-hover); color: var(--text); }
+  .option-badge { color: var(--accent); font-size: 11px; }
   .grow { flex: 1; }
   .tool {
     all: unset; cursor: pointer;
@@ -1372,10 +1335,6 @@ import ChatFiles from './ChatFiles.svelte';
   .tool:hover { background: var(--bg-hover); color: var(--text-dim); }
   .tool:focus-visible { outline: none; background: var(--bg-hover); color: var(--text-dim); }
   .tool.on { color: var(--accent); }
-  .tool.ultra { color: var(--accent); background: var(--accent-glow); }
-  .tool.ultra:focus-visible { outline: none; background: var(--accent-glow); }
-  .tool :global(.rlbl) { font-size: 11px; font-weight: 600; line-height: 1; }
-  .tool:has(.rlbl) { width: auto; gap: 5px; padding: 0 8px; }
   .tool:disabled { opacity: 0.35; cursor: default; }
   .send {
     width: 34px; height: 34px; border-radius: 50%; padding: 0; line-height: 0;
@@ -1405,10 +1364,9 @@ import ChatFiles from './ChatFiles.svelte';
     width: min(320px, 100%); height: min(320px, 70vw); max-width: 100%;
     border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
-    background: linear-gradient(110deg, var(--bg-raised) 40%, var(--bg-hover) 50%, var(--bg-raised) 60%);
-    background-size: 220% 100%; animation: imgshim 1.6s linear infinite;
+    background: var(--bg-raised);
+    animation: pulse 1.6s ease-in-out infinite;
   }
-  @keyframes imgshim { to { background-position: -120% 0; } }
   .imgphase { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
 
   .diffjob {
@@ -1472,31 +1430,6 @@ import ChatFiles from './ChatFiles.svelte';
     padding: 0 6px; white-space: nowrap;
   }
 
-  /* clickable next-message chips under the last assistant reply */
-  .followups {
-    display: flex; flex-wrap: wrap; gap: 8px;
-    margin: 6px 0 4px 42px;
-    max-width: calc(100% - 42px);
-  }
-  .fup {
-    all: unset; cursor: pointer; box-sizing: border-box;
-    max-width: 100%;
-    padding: 8px 14px; border-radius: 999px;
-    font-size: 13px; line-height: 1.35; color: var(--text-dim);
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-    word-break: break-word;
-  }
-  .fup:hover {
-    color: var(--text);
-    border-color: color-mix(in srgb, var(--accent-dim) 40%, var(--border));
-    background: var(--bg-hover);
-  }
-  .fup:active { background: var(--bg-card); }
-  .fup-skel {
-    font-size: 12px; color: var(--text-faint); padding: 6px 2px;
-  }
-
   @media (max-width: 768px) {
     .chat, .main {
       width: 100%;
@@ -1550,23 +1483,13 @@ import ChatFiles from './ChatFiles.svelte';
     }
     .bar::-webkit-scrollbar { display: none; }
     .tool { width: 40px; height: 40px; flex-shrink: 0; }
-    .tool:has(.rlbl) { min-height: 40px; }
+    .options-trigger { min-height: 40px; flex-shrink: 0; }
+    .composer-options { grid-template-columns: 1fr; gap: 8px; }
+    .search-choices { width: fit-content; margin-bottom: 6px; }
+    .reasoning-choice { justify-self: start; }
     .send { width: 42px; height: 42px; flex-shrink: 0; }
     .dname { max-width: 120px; }
     .tobottom { width: 40px; height: 40px; top: -50px; }
-    .followups {
-      margin: 8px 0 2px 0;
-      max-width: 100%;
-      gap: 8px;
-    }
-    .fup {
-      flex: 1 1 auto;
-      min-width: min(100%, 160px);
-      padding: 11px 14px;
-      font-size: 13.5px;
-      border-radius: calc(12px * var(--rf));
-      text-align: left;
-    }
     .pad { height: 12px; }
     .qmsg { margin-left: 0; }
     .imgpreview, .imgshimmer { width: 100%; max-width: 100%; }
@@ -1576,7 +1499,8 @@ import ChatFiles from './ChatFiles.svelte';
   @media (max-width: 420px) {
     .thread { padding: 8px 10px 0; }
     .dock { padding: 4px 8px max(6px, env(safe-area-inset-bottom)); }
-    .fup { min-width: 100%; }
+    .option-label, .option-badge { display: none; }
+    .options-trigger { width: 40px; justify-content: center; padding: 0; }
   }
   .bar .send + .send { margin-left: 4px; }
   .bar .send.stop { margin-right: 2px; }

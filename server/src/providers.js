@@ -7,6 +7,7 @@ import { trackStreamProgress } from './streamProgress.js';
 import { createHash } from 'node:crypto';
 import { db } from './db.js';
 import { makeThinkSplitter } from './reasoning.js';
+import { createStreamDeadline } from './streamDeadline.js';
 
 // ---------- id helpers ----------
 
@@ -491,7 +492,24 @@ export function estimateTokens(messages) {
 // Mirrors llama.js streamChat exactly: onDelta(chunk, meta) per SSE chunk,
 // resolves { content, reasoning, timings:null, usage, toolCalls, finishReason }.
 
-export async function streamRemote({ provider, model, messages, params = {}, onDelta, abortSignal }) {
+export async function streamRemote(args) {
+  const { provider, abortSignal, startupTimeoutMs = 180_000, idleTimeoutMs = 120_000 } = args;
+  const deadline = createStreamDeadline({
+    signal: abortSignal, label: `${provider.name} chat stream`,
+    startupMs: startupTimeoutMs, idleMs: idleTimeoutMs,
+  });
+  try {
+    return await streamRemoteInner({ ...args, abortSignal: deadline.signal, onProgress: () => deadline.progress() });
+  } catch (err) {
+    throw deadline.error(err);
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function streamRemoteInner({
+  provider, model, messages, params = {}, onDelta, abortSignal, onProgress = () => {},
+}) {
   onDelta = trackStreamProgress(onDelta, { messages, tools: params.tools });
   const res = await fetch(stripSlash(provider.base_url) + '/chat/completions', {
     method: 'POST',
@@ -524,6 +542,7 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
   let reasoning = '';
   let usage = null;
   let finishReason = null;
+  let sawDone = false;
   const toolCalls = [];
   const splitter = makeThinkSplitter();
 
@@ -544,7 +563,7 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
     };
   };
 
-  while (true) {
+  streamLoop: while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
@@ -554,9 +573,14 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
       buf = buf.slice(nl + 1);
       if (!line.startsWith('data:')) continue;
       const payload = line.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
+      if (payload === '[DONE]') {
+        sawDone = true;
+        break streamLoop;
+      }
+      if (!payload) continue;
       let json;
       try { json = JSON.parse(payload); } catch { continue; }
+      onProgress();
       noteUsage(json.usage);
       if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
       const delta = json.choices?.[0]?.delta ?? {};
@@ -594,6 +618,10 @@ export async function streamRemote({ provider, model, messages, params = {}, onD
         }
       }
     }
+  }
+  if (sawDone) await reader.cancel().catch(() => {});
+  if (!sawDone && !finishReason) {
+    throw new Error(`${provider.name} chat stream ended before the model finished`);
   }
   // Anything held back as a possible partial tag is real content after all.
   const tail = splitter.flush();

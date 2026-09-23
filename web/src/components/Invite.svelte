@@ -65,9 +65,7 @@
 <style>
   .wrap {
     height: 100vh; display: grid; place-items: center;
-    background:
-      radial-gradient(ellipse 60% 45% at 50% 0%, rgba(166, 124, 82, 0.07), transparent),
-      var(--bg);
+    background: var(--bg);
   }
   .card {
     width: 330px; display: flex; flex-direction: column; gap: 12px;

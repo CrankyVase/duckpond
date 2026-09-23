@@ -124,15 +124,8 @@
         <div class="cardlabel"><Percent size={13} /> Savings rate</div>
         <div class="cardval saved">{savedPct == null ? '—' : `${savedPct.toFixed(0)}%`}</div>
       </div>
-      <div class="card">
-        <div class="cardlabel"><CalendarDays size={13} /> This month</div>
-        <div class="cardval sm">{usd(summary.month?.spend)} <span class="savedinline">+{usd(summary.month?.saved)} saved</span></div>
-      </div>
-      <div class="card">
-        <div class="cardlabel"><Database size={13} /> Cache</div>
-        <div class="cardval sm">{fmtFull(summary.cache?.n)} <span class="cachehits">{fmtFull(summary.cache?.hits)} hits</span></div>
-      </div>
     </div>
+    <div class="supporting-totals"><span><CalendarDays size={14} /> This month: {usd(summary.month?.spend)} spent, {usd(summary.month?.saved)} saved</span><span><Database size={14} /> Cache: {fmtFull(summary.cache?.hits)} hits</span></div>
 
     {#if byKind.length}
       <section class="surface">
@@ -201,8 +194,8 @@
     {/if}
 
     {#if byModel.length}
-      <section class="surface">
-        <h2 class="subhead">By model</h2>
+      <details class="surface detail-surface">
+        <summary>Costs by model <span>Detailed token and request counts</span></summary>
         <div class="tablewrap">
           <table>
             <thead>
@@ -225,12 +218,12 @@
             </tbody>
           </table>
         </div>
-      </section>
+      </details>
     {/if}
 
     {#if events?.length}
-      <section class="surface">
-        <h2 class="subhead">Recent events</h2>
+      <details class="surface detail-surface">
+        <summary>Recent events <span>Individual provider charges and savings</span></summary>
         <div class="tablewrap">
           <table>
             <thead>
@@ -257,7 +250,7 @@
             </tbody>
           </table>
         </div>
-      </section>
+      </details>
     {/if}
   {/if}
 </div>
@@ -303,16 +296,20 @@
     font-variant-numeric: tabular-nums; line-height: 1.1;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .cardval.sm { font-size: 20px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
   .saved { color: var(--green); }
-  .savedinline { font-size: 12px; color: var(--green); }
-  .cachehits { font-size: 12px; color: var(--text-faint); }
 
   .surface {
     background: var(--bg-card); border: 1px solid var(--border-soft);
     border-radius: calc(14px * var(--rf));
     padding: 16px 18px; margin-bottom: 16px;
   }
+  .supporting-totals { display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; margin:-14px 0 26px; color:var(--text-dim); font-size:12px; }
+  .supporting-totals span { display:inline-flex; align-items:center; gap:6px; }
+  .detail-surface { padding:0; }
+  .detail-surface summary { cursor:pointer; padding:20px 24px; font-size:13px; font-weight:600; }
+  .detail-surface summary span { margin-left:8px; color:var(--text-faint); font-size:11.5px; font-weight:400; }
+  .detail-surface[open] { padding-bottom:20px; }
+  .detail-surface[open] > :not(summary) { margin-left:24px; margin-right:24px; }
   .subhead {
     font-size: 11px; font-weight: 600; color: var(--text-faint);
     text-transform: uppercase; letter-spacing: 0.08em;
@@ -388,7 +385,6 @@
     .card { padding: 14px 16px; min-width: 0; }
     .card.hero { grid-column: 1 / -1; }
     .cardval { font-size: 22px; }
-    .cardval.sm { font-size: 16px; }
     .surface { padding: 14px; margin-bottom: 12px; }
     .barrow { grid-template-columns: 110px 1fr 100px; gap: 8px; padding: 6px 6px; margin: 0 -6px; }
     .barlabel { font-size: 11px; }
@@ -402,22 +398,25 @@
   }
 
   .costs { max-width: 1180px; }
-  .head { margin-bottom: 30px; }
+  .head { margin-bottom: 20px; }
   .title p { margin-top: 8px; line-height: 1.6; }
   .empty { margin: 20px 0; padding: 64px 24px; border: 1px dashed var(--border); border-radius: calc(10px * var(--rf)); line-height: 1.7; }
   @media(max-width: 768px) { .costs { padding: 24px 16px; } .title h1 { font-size: 25px; } }
-  .totals { gap: 0; border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); margin-bottom: 28px; overflow: hidden; background: var(--bg); }
-  .card { border: 0; border-right: 1px solid var(--border-soft); border-radius: 0; background: none; padding: 24px; }
+  .totals { gap: 0; border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); margin-bottom: 18px; overflow: hidden; background: var(--bg); }
+  .card { border: 0; border-right: 1px solid var(--border-soft); border-radius: 0; background: none; padding: 20px; }
   .card:last-child { border-right: 0; }
   .card:hover { transform: none; }
   .cardlabel { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 400; color: var(--text-dim); margin-bottom: 16px; }
   .cardval { font-family: var(--sans); font-size: 32px; font-weight: 500; letter-spacing: -.035em; }
   .card.hero { background: none; border-color: var(--border-soft); }
   .cardval.saved { color: var(--text); }
-  .surface { padding: 24px; background: var(--bg); border-radius: calc(10px * var(--rf)); margin-bottom: 24px; }
+  .surface { padding: 20px; background: var(--bg); border-radius: calc(10px * var(--rf)); margin-bottom: 16px; }
   .subhead { font-size: 15px; text-transform: none; letter-spacing: -.01em; color: var(--text); font-weight: 550; margin-bottom: 22px; }
   th { padding: 12px 14px; font-size: 10px; background: var(--bg-raised); }
   td { padding: 14px; }
   .barrow { padding-top: 10px; padding-bottom: 10px; }
   @media(max-width: 768px) { .totals { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); } .card { padding: 18px; border-bottom: 1px solid var(--border-soft); min-width: 0; } .cardval { font-size: 28px; } .surface { padding: 18px; } }
+  .detail-surface { padding:0; }
+  .detail-surface[open] { padding-bottom:20px; }
+  @media(max-width:768px) { .supporting-totals { margin-top:-12px; } .detail-surface summary span { display:block; margin:5px 0 0 18px; } }
 </style>

@@ -2,20 +2,11 @@
   import AgentProject from './components/AgentProject.svelte';
   import Chat from './components/Chat.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
-  import CostsPanel from './components/CostsPanel.svelte';
   import Duck from './components/Duck.svelte';
   import DuckGallery from './components/DuckGallery.svelte';
-  import FilesPanel from './components/FilesPanel.svelte';
-  import HubPanel from './components/HubPanel.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
-  import MediaPanel from './components/MediaPanel.svelte';
-  import ProvidersPanel from './components/ProvidersPanel.svelte';
-  import SettingsPanel from './components/SettingsPanel.svelte';
   import Sidebar from './components/Sidebar.svelte';
-  import SpeechPanel from './components/SpeechPanel.svelte';
-  import StatsPanel from './components/StatsPanel.svelte';
-  import ThemeStudio from './components/ThemeStudio.svelte';
   import Toast from './components/Toast.svelte';
   import Topbar from './components/Topbar.svelte';
   import { applyPrefs } from './lib/prefs.svelte.js';
@@ -251,6 +242,15 @@
     document.body.classList.toggle('dp-drawer-open', open);
     return () => document.body.classList.remove('dp-drawer-open');
   });
+
+  // A desktop window narrowed to phone width should start with the drawer
+  // closed, just like a page opened directly on a phone.
+  $effect(() => {
+    const narrow = window.matchMedia('(max-width: 768px)');
+    const onChange = (event) => { if (event.matches) app.sidebarCollapsed = true; };
+    narrow.addEventListener('change', onChange);
+    return () => narrow.removeEventListener('change', onChange);
+  });
 </script>
 
 <svelte:window onkeydown={shortcuts} />
@@ -282,21 +282,61 @@
             <div class="modewrap" class:from-agent={app.view === 'chat' && app.mode === 'agent'}>
               {#if app.view === 'chat' && app.mode === 'agent'}<AgentProject />{/if}
               {#if app.view === 'stats'}
-                <div class="panel-enter view-panel"><StatsPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/StatsPanel.svelte')}
+                    <div class="panel-loading">Opening stats…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open stats. Reload to try again.</div>{/await}
+                </div>
               {:else if app.view === 'speech'}
-                <div class="panel-enter view-panel"><SpeechPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/SpeechPanel.svelte')}
+                    <div class="panel-loading">Opening speech…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open speech. Reload to try again.</div>{/await}
+                </div>
               {:else if app.view === 'files'}
-                <div class="panel-enter view-panel"><FilesPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/FilesPanel.svelte')}
+                    <div class="panel-loading">Opening files…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open files. Reload to try again.</div>{/await}
+                </div>
               {:else if app.view === 'media'}
-                <div class="panel-enter view-panel"><MediaPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/MediaPanel.svelte')}
+                    <div class="panel-loading">Opening Studio…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open Studio. Reload to try again.</div>{/await}
+                </div>
               {:else if app.view === 'providers'}
-                <div class="panel-enter view-panel"><ProvidersPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/ProvidersPanel.svelte')}
+                    <div class="panel-loading">Opening providers…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open providers. Reload to try again.</div>{/await}
+                </div>
               {:else if app.view === 'costs'}
-                <div class="panel-enter view-panel"><CostsPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/CostsPanel.svelte')}
+                    <div class="panel-loading">Opening costs…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open costs. Reload to try again.</div>{/await}
+                </div>
               {:else if app.view === 'hub'}
-                <div class="panel-enter view-panel"><HubPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/HubPanel.svelte')}
+                    <div class="panel-loading">Opening Model Hub…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open Model Hub. Reload to try again.</div>{/await}
+                </div>
               {:else if app.view === 'settings'}
-                <div class="panel-enter view-panel"><SettingsPanel /></div>
+                <div class="panel-enter view-panel">
+                  {#await import('./components/SettingsPanel.svelte')}
+                    <div class="panel-loading">Opening settings…</div>
+                  {:then panel}<panel.default />
+                  {:catch}<div class="panel-loading">Could not open settings. Reload to try again.</div>{/await}
+                </div>
               {:else}
                 <div class="view-panel"><Chat /></div>
               {/if}
@@ -304,7 +344,12 @@
           {/key}
         </div>
       </main>
-      <ThemeStudio />
+      {#if app.themeStudioOpen}
+        {#await import('./components/ThemeStudio.svelte')}
+          <div class="panel-loading">Opening Theme Studio…</div>
+        {:then panel}<panel.default />
+        {:catch}<div class="panel-loading">Could not open Theme Studio. Reload to try again.</div>{/await}
+      {/if}
     </div>
     {#snippet failed({ error })}
       <div class="crashed">
@@ -322,6 +367,7 @@
 
 <style>
   .boot { height: 100%; height: 100dvh; display: grid; place-items: center; }
+  .panel-loading { padding: 32px; color: var(--text-dim); font-size: 14px; }
   .pulse { animation: pulse 1.2s ease infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .layout {

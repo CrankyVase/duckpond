@@ -239,17 +239,6 @@
     toast(v === 'auto' ? 'Image model: auto' : `Image model: ${v}`, 'ok');
   }
 
-  async function setContentFilter(e) {
-    const v = e.target.value || 'off';
-    await api('/api/auth/me', { method: 'PATCH', body: { content_filter: v } });
-    if (app.user) app.user.content_filter = v;
-    const labels = {
-      off: 'off (images unrestricted)',
-      safe: 'no nudity on images',
-      strict: 'strict (no sexy image shoots)',
-    };
-    toast(`Content filter: ${labels[v] ?? v}`, 'ok');
-  }
 
   // animations live in the theme effects layer (same knob as Theme Studio)
   function setAnim(e) {
@@ -428,29 +417,51 @@
   const SECTIONS = $derived(sections.filter(s => app.user?.role === 'owner' || !['users', 'core'].includes(s.id)));
   let activeSec = $state('appearance');
   let sectionQuery = $state('');
+  let openGroups = $state(['Workspace']);
   let contentEl = $state(null);
   const activeSection = $derived(SECTIONS.find(s => s.id === activeSec) ?? SECTIONS[0]);
   const matches = (s) => `${s.label} ${s.description}`.toLowerCase().includes(sectionQuery.toLowerCase().trim());
   function jump(id) {
     activeSec = id;
+    const group = SECTION_GROUPS.find((g) => g.ids.includes(id));
+    if (group && !openGroups.includes(group.label)) openGroups = [...openGroups, group.label];
     if (contentEl) contentEl.scrollTop = 0;
+  }
+  function toggleGroup(label) {
+    openGroups = openGroups.includes(label)
+      ? openGroups.filter((name) => name !== label)
+      : [...openGroups, label];
   }
 </script>
 
 <div class="page">
   <div class="wrap">
+    <label class="mobile-section-picker"><span>Settings section</span>
+      <select aria-label="Settings section" value={activeSec} onchange={(event) => jump(event.currentTarget.value)}>
+        {#each SECTION_GROUPS as group}
+          <optgroup label={group.label}>
+            {#each SECTIONS.filter((s) => group.ids.includes(s.id)) as s}
+              <option value={s.id}>{s.label}</option>
+            {/each}
+          </optgroup>
+        {/each}
+      </select>
+    </label>
     <nav class="secnav" aria-label="Settings sections">
       <div class="navhead">Settings</div>
       <input class="section-search" type="search" aria-label="Find a settings section" placeholder="Find a section…" bind:value={sectionQuery} />
       {#each SECTION_GROUPS as group}
         {@const items = SECTIONS.filter(s => group.ids.includes(s.id) && matches(s))}
         {#if items.length}
-          <div class="navgroup">{group.label}</div>
-          {#each items as s (s.id)}
+          <button type="button" class="navgroup" aria-expanded={sectionQuery.trim() ? true : openGroups.includes(group.label)}
+            onclick={() => toggleGroup(group.label)}>
+            <span>{group.label}</span><span aria-hidden="true">{sectionQuery.trim() || openGroups.includes(group.label) ? '−' : '+'}</span>
+          </button>
+          {#if sectionQuery.trim() || openGroups.includes(group.label)}{#each items as s (s.id)}
             <button type="button" class="navitem" class:on={activeSec === s.id} aria-current={activeSec === s.id ? 'page' : undefined} onclick={() => jump(s.id)}>
               <s.icon size={16} /><span>{s.label}</span>
             </button>
-          {/each}
+          {/each}{/if}
         {/if}
       {/each}
       {#if !SECTIONS.some(matches)}<p class="hint">No matching sections.</p>{/if}
@@ -586,22 +597,11 @@
           </div>
         {/if}
 
-        <div class="row">
-          <div class="rlabel">
-            <div class="rt">Auto-compaction</div>
-            <div class="rd">summarize older turns when the context fills up, instead of dropping them</div>
-          </div>
-          <button class="tog" class:on={prefs.autoCompact} role="switch" aria-checked={prefs.autoCompact}
-            onclick={() => { prefs.autoCompact = !prefs.autoCompact; savePrefs(); }}>
-            <span class="knob"></span>
-          </button>
-        </div>
-
         {#if form}
           <div class="srow">
             <div class="shead"><span>Context budget</span><span class="sval mono">{Math.round(form.ctx_size / 1024)}k</span></div>
             <input type="range" min="4096" max="131072" step="4096" bind:value={form.ctx_size} />
-            <div class="hint">capped by the router preset for local models; remote models use what the provider reports</div>
+            <div class="hint">capped by the router preset for local models; remote models use what the provider reports. Older turns are summarized by the server when the context gets close to full.</div>
           </div>
 
           <div class="substitle">Thinking</div>
@@ -648,7 +648,7 @@
       <section id="sec-tools" hidden={activeSec !== 'tools'}>
         <div class="stitle"><Wrench size={13} />Tools{#if model}<span class="formodel mono">{model.id}</span>{/if}</div>
         {#if form}
-          <div class="hint">Everything's on by default. Turn off what this model shouldn't be offered — fewer tools can make small models call the right one more reliably.</div>
+          <div class="hint">DuckPond offers tools only when they fit the request. Turn off any capability this model should never use.</div>
           {#each toolGroups as g (g.category)}
             <div class="substitle">{g.category}</div>
             {#each g.tools as t (t.id)}
@@ -699,10 +699,10 @@
         </div>
       </section>
 
-      <!-- sidebar nav pins — same idea as Unsloth Studio's pin-to-menu setting -->
+      <!-- Main destinations stay visible; optional pages can be promoted from More. -->
       <section id="sec-navigation" hidden={activeSec !== 'navigation'}>
         <div class="stitle"><PanelLeft size={13} />Sidebar navigation</div>
-        <div class="hint">Pinned pages show inline; the rest collapse into "More".</div>
+        <div class="hint">Chat, Agent, Studio and Models are always easy to reach. Add the optional pages you use often to the sidebar.</div>
         <div class="row">
           <div class="rlabel"><div class="rt">Model Hub landing tab</div><div class="rd">which tab opens first when you visit the Hub</div></div>
           <select value={prefs.hubDefaultTab} onchange={(e) => { prefs.hubDefaultTab = e.target.value; savePrefs(); }}>
@@ -713,14 +713,13 @@
             <option value="video">Video</option>
           </select>
         </div>
-        {#each NAV_ITEMS as item (item.id)}
+        {#each NAV_ITEMS.filter((item) => item.id !== 'media' && item.id !== 'hub') as item (item.id)}
           <div class="row">
             <div class="rlabel"><div class="rt"><item.icon size={13} /> {item.label}</div></div>
             <button class="tog" class:on={prefs.pinnedNav.includes(item.id)} aria-label={`Show ${item.label} in sidebar`}
               role="switch" aria-checked={prefs.pinnedNav.includes(item.id)}
               onclick={() => {
                 if (prefs.pinnedNav.includes(item.id)) {
-                  if (prefs.pinnedNav.length <= 1) return;
                   prefs.pinnedNav = prefs.pinnedNav.filter((id) => id !== item.id);
                 } else {
                   prefs.pinnedNav = [...prefs.pinnedNav, item.id];
@@ -826,7 +825,7 @@
           <div class="rlabel">
             <div class="rt">Permission mode</div>
             <div class="rd">
-              {#if perm.mode === 'open'}Everything runs unattended. Dangerous shell commands still ask.
+              {#if perm.mode === 'open'}Project reads, edits, installs, and commands run unattended. Publishing, remote writes, and dangerous shell commands still ask.
               {:else if perm.mode === 'balanced'}Files in the sandbox are free; shell commands and anything leaving this machine ask first.
               {:else if perm.mode === 'careful'}Every change asks first, including sandbox file writes.
               {:else}The model can look but never touch.
@@ -834,10 +833,10 @@
             </div>
           </div>
           <select value={perm.mode} onchange={(e) => savePermMode(e.target.value)}>
-            <option value="open">open</option>
-            <option value="balanced">balanced</option>
-            <option value="careful">careful</option>
-            <option value="readonly">read-only</option>
+            <option value="open">Autonomous coding</option>
+            <option value="balanced">Balanced</option>
+            <option value="careful">Careful</option>
+            <option value="readonly">Read only</option>
           </select>
         </div>
         {#if permSummary}
@@ -891,23 +890,17 @@
         {/if}
       </section>
 
-      <!-- content filter — image nudity only; chat is free -->
+      <!-- Child safety and the always-on local image check. -->
       <section id="sec-filter" hidden={activeSec !== 'filter'}>
-        <div class="stitle"><Shield size={13} />Content filter</div>
+        <div class="stitle"><Shield size={13} />Image safety</div>
         <div class="row">
           <div class="rlabel">
-            <div class="rt">Image nudity filter</div>
-            <div class="rd">blocks nude / explicit-body image prompts only — chat stays unrestricted</div>
+            <div class="rt">Child safety stays on</div>
+            <div class="rd">Prompts involving nude or sexual depictions of minors are blocked. Adult content and gore have no prompt word filter.</div>
           </div>
-          <select value={app.user?.content_filter ?? 'off'} onchange={setContentFilter}>
-            <option value="off">Off</option>
-            <option value="safe">No nudity</option>
-            <option value="strict">Strict (no sexy shoots either)</option>
-          </select>
         </div>
         <div class="hint">
-          Applies to Files studio, in-chat generate_image, and agent image jobs.
-          Chat text is not filtered. Sexual content involving minors is always blocked.
+          The local checker also screens reference photos, previews, and results. It cannot reliably distinguish adult from underage explicit imagery, so uncertain adult images may still be blocked.
         </div>
       </section>
 
@@ -1022,10 +1015,13 @@
 <style>
   .page { flex: 1; min-height: 0; display: flex; overflow: hidden; }
   .wrap { display: flex; width: 100%; max-width: 1260px; margin: 0 auto; min-height: 0; padding: 0 32px; }
+  .mobile-section-picker { display: none; }
   .secnav { width: 224px; flex-shrink: 0; padding: 28px 22px 28px 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; border-right: 1px solid var(--border-soft); }
   .navhead { font-size: 22px; font-weight: 600; letter-spacing: -.03em; padding: 0 10px 18px; }
   .section-search { width: 100%; min-width: 0; font-size: 12px; padding: 9px 10px; margin-bottom: 10px; }
-  .navgroup { font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); padding: 18px 10px 5px; }
+  .navgroup { all: unset; cursor: pointer; box-sizing: border-box; display: flex; justify-content: space-between; align-items: center; width: 100%; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); padding: 18px 10px 7px; }
+  .navgroup:hover { color: var(--text-dim); }
+  .navgroup span:last-child { font-size: 15px; line-height: 1; }
   .navitem { all: unset; cursor: pointer; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: calc(7px * var(--rf)); font-size: 13px; color: var(--text-dim); }
   .navitem:hover { background: var(--bg-hover); color: var(--text); }
   .navitem.on { background: var(--bg-raised); color: var(--text); font-weight: 550; }
@@ -1196,9 +1192,9 @@
   @media (max-width: 1000px) { .wrap { padding: 0 20px; } .content { padding: 28px 24px; } .savebar { padding: 14px 24px; } .secnav { width: 196px; padding-right: 16px; } }
   @media (max-width: 700px) {
     .wrap { flex-direction: column; padding: 0; }
-    .secnav { width: 100%; flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--border-soft); padding: 10px 16px; flex-shrink: 0; }
-    .navhead, .navgroup, .section-search { display: none; }
-    .navitem { flex-shrink: 0; min-height: 40px; }
+    .secnav { display: none; }
+    .mobile-section-picker { display: flex; flex-direction: column; gap: 5px; padding: 12px 16px; border-bottom: 1px solid var(--border-soft); color: var(--text-dim); font-size: 12px; }
+    .mobile-section-picker select { width: 100%; min-height: 44px; padding: 8px 12px; }
     .content { padding: 24px 20px; }
     .section-heading { margin-bottom: 24px; }
     .section-heading h1 { font-size: 25px; }

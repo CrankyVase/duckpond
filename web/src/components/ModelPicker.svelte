@@ -9,6 +9,7 @@
   import { tick } from 'svelte';
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Download from '@lucide/svelte/icons/download';
   import Info from '@lucide/svelte/icons/info';
   import Play from '@lucide/svelte/icons/play';
   import Power from '@lucide/svelte/icons/power';
@@ -299,25 +300,23 @@
                 <span class="oname">{dispName(m)}</span>
                 <span class="meta">
                   {#if m.remote}
-                    remote
+                    Hosted
                     {#if kCtx(m.ctxSize)}&nbsp;·&nbsp;{kCtx(m.ctxSize)}k ctx{/if}
                     &nbsp;·&nbsp;<span class:noprice={!m.pricing || (m.pricing.in == null && m.pricing.out == null)}>{pricingMeta(m)}</span>
                   {:else}
-                    {unloading === m.id ? 'unloading…' : resident(m.status) ? m.status : 'on disk'}
+                    {unloading === m.id ? 'Unloading…' : m.status === 'loaded' ? 'Ready in memory' : m.status === 'loading' ? 'Loading…' : m.status === 'sleeping' ? 'Sleeping in memory' : 'On device · loads when you send'}
                     {#if kCtx(m.ctxSize)}&nbsp;·&nbsp;{kCtx(m.ctxSize)}k ctx{/if}
                   {/if}
                 </span>
+                {#if m.caps}
+                  <span class="caps">
+                    {#if m.caps.reasoning}<span class="cap" title="Supports a thinking / reasoning mode">reasoning</span>{/if}
+                    {#if m.caps.vision}<span class="cap" title="Can see images you attach">images</span>{/if}
+                    {#if m.caps.tools}<span class="cap" title="Can call tools — search, files, GitHub">tools</span>{/if}
+                    {#if m.caps.free}<span class="cap free" title="Free to use">free</span>{/if}
+                  </span>
+                {/if}
               </span>
-              <!-- Sniffed capability flags — the difference between "pick a
-                   model" and "pick a model that can actually do this". -->
-              {#if m.caps}
-                <span class="caps">
-                  {#if m.caps.reasoning}<span class="cap" title="Supports a thinking / reasoning mode">think</span>{/if}
-                  {#if m.caps.vision}<span class="cap" title="Can see images you attach">vision</span>{/if}
-                  {#if m.caps.tools}<span class="cap" title="Can call tools — search, files, GitHub">tools</span>{/if}
-                  {#if m.caps.free}<span class="cap free" title="Free to use">free</span>{/if}
-                </span>
-              {/if}
               {#if m.card?.url}
                 <a class="info" href={m.card.url} target="_blank" rel="noreferrer"
                   onclick={(e) => e.stopPropagation()}
@@ -330,28 +329,6 @@
                   <Info size={13} />
                 </button>
               {/if}
-              <button class="star" class:on={app.user?.default_model_id === m.id}
-                onclick={(e) => setDefault(m, e)}
-                title={app.user?.default_model_id === m.id ? 'Default model — click to clear' : 'Make default for new chats'}>
-                <Star size={13} fill={app.user?.default_model_id === m.id ? 'currentColor' : 'none'} />
-              </button>
-              {#if resident(m.status)}
-                <button class="eject" onclick={(e) => unload(m, e)} disabled={unloading === m.id}
-                  title="Unload from VRAM">
-                  <Power size={13} />
-                </button>
-              {:else if !m.remote}
-                <button class="eject load" onclick={(e) => load(m, e)} disabled={loading === m.id}
-                  title={loading === m.id ? 'Loading…' : 'Load into VRAM'}>
-                  <Play size={13} />
-                </button>
-              {/if}
-              {#if isOwner && !m.remote}
-                <button class="eject del" onclick={(e) => removeModel(m, e)} disabled={deleting === m.id}
-                  title="Delete from the shared model cache (frees disk)">
-                  <Trash2 size={13} />
-                </button>
-              {/if}
               {#if m.id === app.conv?.model_id}
                 <span class="check"><Check size={15} /></span>
               {/if}
@@ -360,6 +337,25 @@
           {:else}
             <div class="empty">no matches</div>
           {/each}
+        </div>
+        <div class="picker-actions">
+          <button class="browse-models" onclick={() => { app.modelPickerOpen = false; app.view = 'hub'; }}><Download size={14} /> Browse models on this device <ChevronDown size={13} class="browse-arrow" /></button>
+          {#if current}
+            <details class="manage-model">
+              <summary>Manage current model</summary>
+              <div class="manage-buttons">
+                <button onclick={(e) => setDefault(current, e)}><Star size={13} fill={app.user?.default_model_id === current.id ? 'currentColor' : 'none'} /> {app.user?.default_model_id === current.id ? 'Clear default' : 'Use for new chats'}</button>
+                {#if !current.remote}
+                  {#if resident(current.status)}
+                    <button onclick={(e) => unload(current, e)} disabled={unloading === current.id}><Power size={13} /> {unloading === current.id ? 'Unloading…' : 'Unload memory'}</button>
+                  {:else}
+                    <button onclick={(e) => load(current, e)} disabled={loading === current.id}><Play size={13} /> {loading === current.id ? 'Loading…' : 'Load now'}</button>
+                  {/if}
+                  {#if isOwner}<button class="danger" onclick={(e) => removeModel(current, e)} disabled={deleting === current.id}><Trash2 size={13} /> Delete files</button>{/if}
+                {/if}
+              </div>
+            </details>
+          {/if}
         </div>
         <div class="foot">
           <span><kbd>↑</kbd> <kbd>↓</kbd> navigate · <kbd>Enter</kbd> pick</span>
@@ -419,7 +415,7 @@
       box-sizing: border-box;
     }
     .opt { min-height: 48px; padding: 10px 12px; }
-    .info, .star, .eject { opacity: 0.85; width: 32px; height: 32px; }
+    .info { opacity: 0.85; width: 32px; height: 32px; }
   }
   .list { overflow-y: auto; }
   .gh {
@@ -437,7 +433,7 @@
   .opt.sel .oname { color: var(--accent); }
   .meta { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
   .noprice { opacity: 0.6; font-style: italic; }
-  .caps { display: inline-flex; gap: 3px; flex-shrink: 0; }
+  .caps { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 5px; }
   .cap {
     font-size: calc(9px * var(--rf)); letter-spacing: 0.03em;
     padding: 1px 5px; border-radius: 4px;
@@ -455,28 +451,16 @@
   }
   .opt:hover .info { opacity: 1; }
   .info:hover { color: var(--accent); }
-  .star {
-    all: unset; cursor: pointer;
-    display: grid; place-items: center;
-    width: 24px; height: 22px; border-radius: calc(6px * var(--rf));
-    color: var(--text-faint);
-    opacity: 0; transition: opacity 120ms ease, color 120ms ease;
-  }
-  .opt:hover .star, .star.on { opacity: 1; }
-  .star:hover { color: var(--accent); }
-  .star.on { color: var(--accent); }
-  .eject {
-    all: unset; cursor: pointer;
-    display: grid; place-items: center;
-    width: 24px; height: 22px; border-radius: calc(6px * var(--rf));
-    color: var(--text-dim);
-    transition: background 120ms ease, color 120ms ease;
-  }
-  .eject:hover { background: rgba(192, 96, 79, 0.16); color: var(--red); }
-  .eject.load:hover { background: var(--accent-glow); color: var(--accent); }
-  .eject:disabled { opacity: 0.4; cursor: default; }
-  .eject.del { color: var(--text-faint); }
-  .eject.del:hover { background: rgba(192, 96, 79, 0.16); color: var(--red); }
+  .picker-actions { flex-shrink: 0; border-top: 1px solid var(--border-soft); padding: 10px 16px; }
+  .browse-models { display: flex; width: 100%; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; text-align: left; color: var(--text); background: var(--bg-card); font-size: 12px; }
+  .browse-models:hover { border-color: var(--accent-dim); background: var(--bg-hover); }
+  .browse-models :global(.browse-arrow) { margin-left: auto; transform: rotate(-90deg); color: var(--text-faint); }
+  .manage-model { margin-top: 8px; }
+  .manage-model summary { cursor: pointer; padding: 6px 2px; font-size: 11px; color: var(--text-dim); }
+  .manage-buttons { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 5px; }
+  .manage-buttons button { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 7px 9px; border: 1px solid var(--border-soft); background: var(--bg-raised); color: var(--text-dim); border-radius: 6px; }
+  .manage-buttons button:hover:not(:disabled) { color: var(--text); background: var(--bg-hover); }
+  .manage-buttons button.danger:hover { color: var(--red); }
   .empty { padding: 14px; color: var(--text-faint); text-align: center; font-size: 13px; }
   .foot {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -504,17 +488,15 @@
   .opt { position: relative; min-height: 66px; padding: 12px; gap: 9px; }
   .meta { font-family: var(--sans); margin-top: 5px; font-size: 11px; }
   .opt.sel .oname { color: var(--text); font-weight: 550; }
-  .info, .star, .eject { flex-shrink: 0; width: 28px; height: 28px; }
-  .opt:focus-within .info, .opt:focus-within .star { opacity: 1; }
-  .caps { position: absolute; bottom: 8px; left: 28px; }
-  .opt:has(.caps) { padding-bottom: 32px; }
+  .info { flex-shrink: 0; width: 28px; height: 28px; }
+  .opt:focus-within .info { opacity: 1; }
   .cap { border: 0; padding: 0 6px 0 0; font-size: 10px; }
   .foot { margin: 0; padding: 12px 18px; }
   @media(max-width: 768px) {
     .menu { width: auto; max-width: none; left: 8px; right: 8px; max-height: 75dvh; }
     .picker-heading { padding: 16px; }
     .opt { padding-left: 8px; padding-right: 8px; gap: 5px; }
-    .info, .star, .eject { width: 30px; height: 36px; opacity: 1; }
+    .info { width: 30px; height: 36px; opacity: 1; }
     .meta { overflow-wrap: anywhere; }
     .oname { font-size: 12px; }
   }

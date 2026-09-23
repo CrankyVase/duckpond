@@ -1,4 +1,5 @@
 <script>
+  import { onDestroy } from 'svelte';
   // Theme Studio — the full look-and-feel workshop. Everything previews LIVE
   // on the real app behind the dialog: preset gallery, community marketplace,
   // per-token color editing, effects (glass/glow/motion/backgrounds/scale/
@@ -13,7 +14,7 @@
     sanitizeEffects, snapshotTheme, theme, toggleFavorite,
   } from '../lib/theme.svelte.js';
   import {
-    ALL_PRESETS, ALL_TOKENS, ANIM_MODES, BG_MODES, BROWSE_PRESETS, COLOR_GROUPS,
+    ALL_PRESETS, ALL_TOKENS, ANIM_MODES, BROWSE_PRESETS, COLOR_GROUPS,
     DEFAULT_EFFECTS, DEFAULT_LAYOUT, FEATURED_PRESETS, FONT_OPTIONS,
     filterPresets, GLASS_MODES, LAYOUT_OPTIONS, PRESETS, TOKEN_GROUPS,
   } from '../lib/themes.js';
@@ -79,6 +80,11 @@
       if (snap && JSON.stringify(snapshotTheme()) !== JSON.stringify(snap)) restoreTheme(snap);
       wasOpen = false;
     }
+  });
+  onDestroy(() => {
+    // The dialog is lazy-loaded. Closing it unmounts this component before a
+    // reactive close effect can always run, so restore an unsaved preview here.
+    if (snap && JSON.stringify(snapshotTheme()) !== JSON.stringify(snap)) restoreTheme(snap);
   });
 
   $effect(() => {
@@ -204,6 +210,10 @@
   }
 
   function applyCss() {
+    if (/\b(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/i.test(cssDraft)) {
+      toast('Gradient CSS is disabled. Use flat colors instead.', 'error');
+      return;
+    }
     theme.customCss = cssDraft;
     applyTheme();
   }
@@ -722,35 +732,7 @@
                     oninput={(e) => setFx('glassOpacity', +e.target.value)} />
                 </label>
               </div>
-              <p class="hint">Glass shows best over a Gradient or Animated background.</p>
-            {/if}
-          </div>
-
-          <div class="fxblock">
-            <div class="subhead">Background</div>
-            <div class="seg" role="group" aria-label="Background">
-              {#each BG_MODES as [id, label, blurb] (id)}
-                <button type="button" class="segbtn" class:on={fx.bg === id} onclick={() => setFx('bg', id)} title={blurb}>
-                  <span class="seglabel">{label}</span>
-                  <span class="segblurb">{blurb}</span>
-                </button>
-              {/each}
-            </div>
-            {#if fx.bg !== 'solid'}
-              <div class="sliders">
-                <label class="colorlab">From
-                  <input class="swatch" type="color" value={fx.bgA || resolved.bg}
-                    oninput={(e) => setFx('bgA', e.target.value)} />
-                </label>
-                <label class="colorlab">To
-                  <input class="swatch" type="color" value={fx.bgB || resolved['accent-dim']}
-                    oninput={(e) => setFx('bgB', e.target.value)} />
-                </label>
-                <label>Angle <span class="val mono">{fx.bgAngle}°</span>
-                  <input type="range" min="0" max="360" step="5" value={fx.bgAngle}
-                    oninput={(e) => setFx('bgAngle', +e.target.value)} />
-                </label>
-              </div>
+              <p class="hint">Glass adds a soft tint to the theme's flat surfaces.</p>
             {/if}
           </div>
 
@@ -903,7 +885,7 @@
           </div>
 
         {:else}
-          <p class="hint">Raw CSS appended after everything else — override any token
+          <p class="hint">Raw CSS appended after everything else. Gradient CSS is disabled. Override any token
             (<span class="mono">--accent</span>, <span class="mono">--bg</span>, …) or any element.
             Applied on this account only; a broken rule can't outlive Reset.</p>
           <textarea class="cssbox mono" rows="14" bind:value={cssDraft} spellcheck="false"

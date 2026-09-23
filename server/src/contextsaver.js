@@ -252,8 +252,9 @@ const STOP = new Set(('the a an and or but if then of to in on for with is are w
 const terms = (s) => new Set(String(s ?? '').toLowerCase().match(/[a-z][a-z0-9_-]{2,}/g)?.filter((w) => !STOP.has(w)) ?? []);
 
 /**
- * Last resort before the LLM compactor: drop the least relevant old messages
- * until the prompt fits. Relevance = term overlap with the live question, aged
+ * Last resort before the LLM compactor: drop the least relevant old assistant
+ * replies until the prompt fits. User messages are instructions and evidence;
+ * discarding them can silently reverse a correction. Relevance = term overlap with the live question, aged
  * by position — an old message about the thing being asked about right now
  * outranks a newer one about something else.
  */
@@ -265,7 +266,7 @@ export function trimToHeadroom(messages, budgetTokens, { keepLast = KEEP_VERBATI
   const scored = [];
   for (let i = 0; i < cut; i += 1) {
     const m = messages[i];
-    if (m.role === 'system') continue;                       // system is never dropped
+    if (m.role !== 'assistant' || m.tool_calls?.length) continue;
     const t = terms(typeof m.content === 'string' ? m.content : '');
     let overlap = 0;
     for (const w of t) if (q.has(w)) overlap += 1;
@@ -292,7 +293,7 @@ export function trimToHeadroom(messages, budgetTokens, { keepLast = KEEP_VERBATI
   // It goes into the LEADING system message, never as a mid-thread system turn:
   // buildPrompt hoists all system content into one message precisely because
   // qwen-style chat templates reject a system role in the middle of a thread.
-  const seam = `[${drop.size} older message(s) unrelated to the current question were dropped to fit the context window. Say so and ask the user if you need something from earlier in the conversation.]`;
+  const seam = `[${drop.size} older assistant reply/replies were omitted to fit the context window. User messages remain verbatim. Do not assume what the omitted replies said.]`;
   if (out[0]?.role === 'system' && typeof out[0].content === 'string') {
     out[0] = { ...out[0], content: `${out[0].content}\n\n${seam}` };
   } else {
@@ -376,7 +377,7 @@ export function saveContext(messages, { ctxSize = 32_768, level = 'auto', keepLa
 /** One-line human summary for the toast / ledger, or null if nothing fired. */
 export function saverSummary(report) {
   if (!report?.savedTokens || report.savedTokens < 200) return null;
-  const names = { tool_output: 'tool output', dedup: 'repeats', boilerplate: 'filler', headroom: 'off-topic history' };
+  const names = { tool_output: 'tool output', dedup: 'repeats', boilerplate: 'filler', headroom: 'older replies' };
   const parts = Object.keys(report.engines ?? {}).map((k) => names[k] ?? k);
   return `Context saver: −${report.savedTokens.toLocaleString()} tokens (${report.pct}%)${parts.length ? ` · ${parts.join(', ')}` : ''}`;
 }

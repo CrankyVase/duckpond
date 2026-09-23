@@ -8,7 +8,7 @@ import { countInputTokens, isModelLoaded, streamChat } from '../llama.js';
 import { estimateTokens } from '../providers.js';
 import { createWorkspaceRow, stopRunsForWorkspace } from './agent.js';
 import {
-  attachListener, getLiveJob, stopLiveJob,
+  attachListener, getLiveJob, getStoredLiveJob, stopLiveJob,
 } from '../liveJobs.js';
 // remote providers + cost saver (feat/remote-providers)
 import { auxModelFor, isRemoteId } from '../chatBackend.js';
@@ -19,7 +19,7 @@ import {
   buildPrompt, convForUser, insertMessage, pathToRoot, setLeaf,
 } from '../chatkit.js';
 import { registerChatPost } from './chatPost.js';
-import { COMPACT_PROMPT } from '../chatflow.js';
+import { COMPACT_PROMPT, compactTranscript } from '../compaction.js';
 
 // ---------- routes ----------
 
@@ -141,11 +141,30 @@ export default async function chatRoutes(app) {
 
   // Re-attach to an in-flight (or just-finished) generation after a refresh.
   // Sends a `resume` snapshot, then tails live events. 204 when nothing is live.
+  app.get('/api/conversations/:id/job', async (req, reply) => {
+    const conv = convForUser(req.params.id, req.user.id);
+    if (!conv) return reply.code(404).send({ error: 'not found' });
+    const job = getLiveJob(conv.id);
+    if (job && job.userId === req.user.id && (!req.query?.jobId || req.query.jobId === job.id)) {
+      return { type: 'resume', status: job.status, jobId: job.id, convId: conv.id,
+        ...job.state, finalMsg: job.finalMsg };
+    }
+    const stored = getStoredLiveJob(conv.id, req.user.id, req.query?.jobId ?? null);
+    return stored ?? reply.code(404).send({ error: 'job not found' });
+  });
+
   app.get('/api/conversations/:id/live', async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
     const job = getLiveJob(conv.id);
-    if (!job || job.userId !== req.user.id) return reply.code(204).send();
+    if (!job || job.userId !== req.user.id || (req.query?.jobId && req.query.jobId !== job.id)) {
+      const stored = req.query?.jobId && getStoredLiveJob(conv.id, req.user.id, req.query.jobId);
+      if (!stored) return reply.code(204).send();
+      reply.hijack();
+      reply.raw.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'x-accel-buffering': 'no' });
+      reply.raw.end(`data: ${JSON.stringify(stored)}\n\n`);
+      return;
+    }
 
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -167,8 +186,9 @@ export default async function chatRoutes(app) {
     const write = (obj) => {
       if (reply.raw.writableEnded || reply.raw.destroyed) return;
       try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
-      // done / stream_end — hang up so the client promise resolves
-      if (obj?.type === 'done' || obj?.type === 'stream_end') closeLive();
+      // Keep the tail through follow-up events emitted after the saved reply.
+      // The worker closes it with stream_end once its cleanup is complete.
+      if (obj?.type === 'stream_end') closeLive();
     };
     unsub = attachListener(job, write);
     // finished jobs only needed the resume snapshot — close immediately
@@ -232,7 +252,7 @@ export default async function chatRoutes(app) {
 
     const remote = isRemoteId(conv.model_id);
     const auxModel = remote ? await auxModelFor(conv.model_id, req.log) : conv.model_id;
-    const transcript = toCompact.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+    const transcript = compactTranscript(toCompact);
     const { content: summary, usage: compactUsage } = await streamChat({
       model: auxModel,
       messages: [{

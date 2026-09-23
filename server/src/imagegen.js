@@ -80,6 +80,20 @@ export async function bridgeGet(path) {
   return res.json();
 }
 
+export async function bridgeResult(tag) {
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(tag ?? '')) throw new Error('Invalid media job tag');
+  const res = await fetch(`${bridgeUrl()}/v1/results?tag=${encodeURIComponent(tag)}`, { signal: AbortSignal.timeout(30_000) });
+  if (res.status === 202) return { state: 'active' };
+  if (res.status === 404) return { state: 'missing' };
+  if (!res.ok) throw new Error(`bridge result lookup failed (${res.status})`);
+  return { state: 'done', result: await res.json() };
+}
+
+export async function acknowledgeBridgeResult(tag) {
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(tag ?? '')) return;
+  await bridgePost('/v1/results/ack', { tag });
+}
+
 export async function warmImageModel(model) {
   return bridgePost('/v1/models/warm', { model: model || 'auto' });
 }
@@ -133,7 +147,8 @@ export async function bridgeModels() {
       instruct: !!info.instruct, speakers: info.speakers ?? null,
       languages: info.languages ?? null, defaultSpeaker: info.default_speaker ?? null });
   }
-  return { available: true, models, default_model: health.default_model ?? 'auto' };
+  return { available: true, models, default_model: health.default_model ?? 'auto',
+    model_operation: health.model_operation ?? null };
 }
 
 export async function generateViaBridge({
@@ -145,7 +160,7 @@ export async function generateViaBridge({
   temperature = null, topP = null, topK = null, refAudioB64 = null, refText = null,
   maxNewTokens = null, imagesB64 = null, lyrics = null,
   speaker = null, language = null, instruct = null,
-  onProgress = () => {}, signal = null, onSubmission = () => {},
+  onProgress = () => {}, signal = null, onSubmission = () => {}, retainBridgeResult = false,
 }) {
   if (task === 'image' || task === 'video') {
     const { checkUserContent } = await import('./contentFilter.js');
@@ -157,7 +172,7 @@ export async function generateViaBridge({
   const resolvedModel = (model && model !== 'auto')
     ? model
     : (task === 'image' && prefs.model && prefs.model !== 'auto' ? prefs.model : (model || 'auto'));
-  const tag = randomUUID().replace(/-/g, '').slice(0, 12);
+  const tag = randomUUID().replace(/-/g, '');
   const preset = presetForQuality(quality ?? (task === 'image' ? prefs.quality : 'medium'));
   const body = {
     prompt: prompt.trim(), model: resolvedModel, size: size || '1024x1024', tag, enhance,
@@ -335,12 +350,17 @@ export async function generateViaBridge({
     // Caller disconnected or the run was aborted: stop watching, but keep a
     // detached save — if the bridge finishes the job anyway (cancel landed
     // between steps), the media still lands in the gallery on next load.
-    void post.then((r) => { if (r.ok) return saveResults(r); }).catch(() => {});
+    void post.then(async (r) => {
+      if (!r.ok) return;
+      await saveResults(r);
+      if (!retainBridgeResult) void acknowledgeBridgeResult(tag).catch(() => {});
+    }).catch(() => {});
     return { images: [], enhanced: null, model_used: null, task, cancelled: true };
   }
   const result = await post;
   if (!result.ok) throw result.e;
   const saved = await saveResults(result);
+  if (!retainBridgeResult) void acknowledgeBridgeResult(tag).catch(() => {});
   try {
     recordMediaTiming({ task, size: body.size, steps: body.steps, n: body.n, wallMs: Date.now() - t0, warm, trueCfg: resolvedCfg });
   } catch { /* calibration must never break generation */ }
@@ -350,39 +370,47 @@ export async function generateViaBridge({
   // name, and always keep every sample the bridge returned. Media files get
   // their own dir; images stay in IMAGES_DIR for backward compat.
   async function saveResults(result) {
-    const saved = [];
-    const resultTask = task;
-    const ext = resultTask === 'video' ? 'mp4' : resultTask === 'image' ? (result.r.output_format === 'webp' ? 'webp' : 'png') : 'wav';
-    const dir = resultTask === 'image' ? IMAGES_DIR : MEDIA_DIR;
-    let i = 0;
-    for (const item of result.r.data ?? []) {
-      if (!item.b64_json) continue;
-      const file = `${resultTask}-${Date.now()}-${i}-${randomUUID().slice(0, 8)}.${ext}`;
-      i += 1;
+    return saveBridgeOutput({ userId, prompt, task, body, resolvedModel, tag, result: result.r });
+  }
+}
+
+/** A deterministic filename makes replay safe when SQLite saved the image but
+ * the process exited before the media_jobs row reached `done`. */
+export function saveBridgeOutput({ userId, prompt, task, body, resolvedModel, tag, result }) {
+  const saved = [];
+  const ext = task === 'video' ? 'mp4' : task === 'image' ? (result.output_format === 'webp' ? 'webp' : 'png') : 'wav';
+  const dir = task === 'image' ? IMAGES_DIR : MEDIA_DIR;
+  let i = 0;
+  for (const item of result.data ?? []) {
+    if (!item.b64_json) continue;
+    const file = `${task}-${tag}-${i}.${ext}`;
+    i += 1;
+    let row = db.prepare('SELECT id, user_id FROM images WHERE file = ?').get(file);
+    if (row && Number(row.user_id) !== Number(userId)) throw new Error('Media result tag belongs to another user');
+    if (!row) {
       const bytes = Buffer.from(item.b64_json, 'base64');
       if (!bytes.length) continue;
-      const temporary = join(dir, `${file}.partial`);
+      const temporary = join(dir, `${file}.${randomUUID().slice(0, 8)}.partial`);
       writeFileSync(temporary, bytes, { flag: 'wx' });
       renameSync(temporary, join(dir, file));
       const info = db.prepare(`
         INSERT INTO images (user_id, prompt, enhanced_prompt, model, size, steps, file)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-        userId, prompt.trim(), result.r.prompt_enhanced ?? null,
-        result.r.model_used ?? resolvedModel, body.size,
-        result.r.steps_used ?? body.steps ?? null, file);
-      // ?v=filename busts browser caches if an id is ever reused
-      const id = info.lastInsertRowid;
-      saved.push({ id, url: `/api/images/${id}/file?v=${encodeURIComponent(file)}`, task: resultTask });
+        userId, prompt.trim(), result.prompt_enhanced ?? null,
+        result.model_used ?? resolvedModel, body.size,
+        result.steps_used ?? body.steps ?? null, file);
+      row = { id: info.lastInsertRowid };
     }
-    if (!saved.length) throw new Error('The media engine returned no usable output. No creation was saved.');
-    return {
-      images: saved,
-      enhanced: result.r.prompt_enhanced ?? null,
-      model_used: result.r.model_used ?? null,
-      steps_used: result.r.steps_used ?? body.steps ?? null,
-      steps_requested: result.r.steps_requested ?? body.steps ?? null,
-      steps_capped: !!result.r.steps_capped,
-      task: resultTask,
-    };
+    saved.push({ id: row.id, url: `/api/images/${row.id}/file?v=${encodeURIComponent(file)}`, task });
   }
+  if (!saved.length) throw new Error('The media engine returned no usable output. No creation was saved.');
+  return {
+    images: saved,
+    enhanced: result.prompt_enhanced ?? null,
+    model_used: result.model_used ?? null,
+    steps_used: result.steps_used ?? body.steps ?? null,
+    steps_requested: result.steps_requested ?? body.steps ?? null,
+    steps_capped: !!result.steps_capped,
+    task,
+  };
 }

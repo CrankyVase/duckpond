@@ -81,7 +81,7 @@ export default async function authRoutes(app) {
     const user = sessionUser(req.cookies?.dp_session);
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
     const row = db.prepare(
-      'SELECT default_model_id, allow_image_gen, image_quality, image_model, content_filter, memory_enabled, ui_theme FROM users WHERE id = ?',
+      'SELECT default_model_id, allow_image_gen, image_quality, image_model, memory_enabled, ui_theme FROM users WHERE id = ?',
     ).get(user.id);
     return {
       id: user.id, username: user.username, role: user.role,
@@ -89,7 +89,6 @@ export default async function authRoutes(app) {
       allow_image_gen: !!row.allow_image_gen,
       image_quality: row.image_quality,
       image_model: row.image_model || 'auto',
-      content_filter: row.content_filter || 'off',
       memory_enabled: !!row.memory_enabled,
       ui_theme: row.ui_theme ? JSON.parse(row.ui_theme) : null,
     };
@@ -97,7 +96,7 @@ export default async function authRoutes(app) {
 
   // per-user preferences that must survive across browsers (e.g. default model)
   app.patch('/api/auth/me', { preHandler: requireAuth }, async (req) => {
-    const { default_model_id, allow_image_gen, image_quality, image_model, content_filter } = req.body ?? {};
+    const { default_model_id, allow_image_gen, image_quality, image_model } = req.body ?? {};
     if (default_model_id !== undefined) {
       db.prepare('UPDATE users SET default_model_id = ? WHERE id = ?')
         .run(default_model_id || null, req.user.id);
@@ -113,13 +112,6 @@ export default async function authRoutes(app) {
     if (image_model !== undefined) {
       const m = String(image_model || 'auto').slice(0, 120);
       db.prepare('UPDATE users SET image_model = ? WHERE id = ?').run(m || 'auto', req.user.id);
-    }
-    if (content_filter !== undefined) {
-      const m = String(content_filter || 'off');
-      if (!['off', 'safe', 'strict'].includes(m)) {
-        return { ok: false, error: 'content_filter must be off, safe, or strict' };
-      }
-      db.prepare('UPDATE users SET content_filter = ? WHERE id = ?').run(m, req.user.id);
     }
     if (req.body?.memory_enabled !== undefined) {
       db.prepare('UPDATE users SET memory_enabled = ? WHERE id = ?')

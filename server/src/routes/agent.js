@@ -17,6 +17,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmS
 import { dirname, extname, join, resolve } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
+import { docFullText, listDocs, retrieveChunks } from '../docs.js';
 import { checkUserContent } from '../contentFilter.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
 import { streamChat } from '../llama.js';
@@ -34,11 +35,15 @@ import {
 } from '../github.js';
 
 export const DEFAULT_AGENT_MODEL = process.env.AGENT_MODEL ?? 'qwen3-coder-next-q4-k-m';
-// Bigger projects (games, multi-file app) routinely need more than 30 tool steps.
-// Still a safety rail so a runaway loop can't spin forever.
-const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 80);
+// Runs renew their step window while progress continues. An owner can still
+// set an explicit ceiling; zero (the default) has no arbitrary step cutoff.
+const configuredMaxSteps = Number(process.env.AGENT_MAX_STEPS ?? 0);
+const MAX_STEPS = Number.isFinite(configuredMaxSteps) ? Math.max(0, Math.floor(configuredMaxSteps)) : 0;
+const configuredStepEpoch = Number(process.env.AGENT_STEP_EPOCH ?? 80);
+const STEP_EPOCH = Number.isFinite(configuredStepEpoch) ? Math.max(1, Math.floor(configuredStepEpoch)) : 80;
 const MAX_WORKSPACES = 8;
 const APPROVAL_TIMEOUT_MS = 15 * 60 * 1000;
+const SUBAGENTS_ENABLED = process.env.DUCKPOND_SUBAGENTS === '1';
 // After a server restart every "running" row is orphaned (AbortControllers die
 // with the process). Reclaim them so the next chat doesn't hit 409 forever.
 const STALE_RUN_SEC = Number(process.env.AGENT_STALE_RUN_SEC ?? 45 * 60);
@@ -54,6 +59,23 @@ const runSubs = new Map();      // runId -> Set<send(obj)>
 const journal = toolJournal(db);
 const runAborts = new Map();    // runId -> AbortController
 const runApprovals = new Map(); // runId -> { eventId, resolve }
+const saveCheckpoint = db.prepare(`INSERT INTO agent_checkpoints (run_id, step, messages_json, tool_count)
+  VALUES (?, ?, ?, (SELECT COUNT(*) FROM agent_tool_invocations WHERE run_id = ?))
+  ON CONFLICT(run_id) DO UPDATE SET step = excluded.step, messages_json = excluded.messages_json,
+    tool_count = excluded.tool_count, updated_at = unixepoch()`);
+
+function checkpointRun(runId, step, messages) {
+  // A browser screenshot may be a multi-megabyte data URI. Keep its textual
+  // observation and ask the resumed worker to inspect pixels again.
+  const compact = messages.map((message) => {
+    if (!Array.isArray(message.content)) return message;
+    return { ...message, content: message.content.map((item) =>
+      item?.type === 'image_url' && String(item.image_url?.url ?? '').startsWith('data:')
+        ? { type: 'text', text: '[Screenshot omitted from restart checkpoint. Use browser again if visual inspection is needed.]' }
+        : item) };
+  });
+  saveCheckpoint.run(runId, step, JSON.stringify(compact), runId);
+}
 
 export function emit(runId, type, data, { store = true } = {}) {
   let id = null;
@@ -188,6 +210,22 @@ export const AGENT_TOOLS = [
     }, required: ['path'] },
   } },
   { type: 'function', function: {
+    name: 'list_documents', description: 'List documents uploaded by this user, with IDs and names. Use search_documents to locate relevant passages.',
+    parameters: { type: 'object', properties: {} },
+  } },
+  { type: 'function', function: {
+    name: 'search_documents', description: 'Search passages across this user’s uploaded documents. Returns document names and chunk numbers to cite in your answer.',
+    parameters: { type: 'object', properties: {
+      query: { type: 'string' }, document_ids: { type: 'array', items: { type: 'integer' } },
+    }, required: ['query'] },
+  } },
+  { type: 'function', function: {
+    name: 'read_document', description: 'Read a window of an uploaded document by ID. Use start_char and max_chars for large documents.',
+    parameters: { type: 'object', properties: {
+      document_id: { type: 'integer' }, start_char: { type: 'integer' }, max_chars: { type: 'integer' },
+    }, required: ['document_id'] },
+  } },
+  { type: 'function', function: {
     name: 'write_file',
     description: 'Create or overwrite a text file in the workspace with the FULL new content. For changes to an existing file, prefer edit_file — it is faster and safer than rewriting everything.',
     parameters: { type: 'object', properties: {
@@ -229,6 +267,13 @@ export const AGENT_TOOLS = [
   GENERATE_IMAGE_TOOL,
   WEB_SEARCH_TOOL,
   FETCH_PAGE_TOOL,
+  ...(SUBAGENTS_ENABLED ? [{ type: 'function', function: {
+    name: 'delegate_analysis',
+    description: 'Ask a separate, sequential model context to analyze a bounded problem. It cannot inspect files or run tools; include the needed facts in context. Disabled by default on single-GPU systems.',
+    parameters: { type: 'object', properties: {
+      task: { type: 'string' }, context: { type: 'string' },
+    }, required: ['task'] },
+  } }] : []),
 ];
 
 function agentSystemPrompt(ws) {
@@ -243,6 +288,8 @@ function agentSystemPrompt(ws) {
     '- For changes to an existing file, use edit_file with exact search/replace blocks — never rewrite a whole file to change a few lines. Reserve write_file for new files or total rewrites; write complete content, never fragments or placeholders.',
     '- Big files: read a window with start_line/max_lines instead of the whole file.',
     '- Search source with search_files. Read AGENTS.md and project manifests; use the existing framework and preserve unrelated changes.',
+    '- Uploaded user documents are available with list_documents, search_documents and read_document. Cite document names and passages when using them.',
+    ...(SUBAGENTS_ENABLED ? ['- delegate_analysis can request a separate sequential review or plan. Supply all facts it needs; it has no tools or file access.'] : []),
     '- Use start_server for persistent development servers, and server_status for readiness and logs. Vite: --host 0.0.0.0 --port 3000 --base "$DUCKPOND_PREVIEW_BASE". Return the actual preview URL.',
     '- Read project AGENTS.md, .todo/.todos and TODO.md; keep task checkboxes up to date as work is verified. Check nested instructions before editing nested folders.',
     '- Use browser to visit your running app or the user’s LAN URL, inspect controls and console errors, test interactions, then edit and recheck. Do not claim visual verification without a browser observation.',
@@ -326,6 +373,43 @@ export async function execTool(run, ws, name, args, abortSignal) {
         text = `(lines ${startLine}–${Math.min(total, maxLines ? startLine - 1 + maxLines : total)} of ${total})\n${text}`;
       }
       return truncateOutput(text, 24_000, 8_000).text;
+    }
+    case 'list_documents':
+      return JSON.stringify(listDocs(run.user_id).map(({ id, name, chunks, bytes }) => ({ id, name, chunks, bytes })));
+    case 'search_documents': {
+      const query = String(args.query ?? '').trim();
+      if (!query) return 'ERROR: query is required';
+      const owned = listDocs(run.user_id);
+      const allowed = new Set(owned.map((doc) => doc.id));
+      const ids = Array.isArray(args.document_ids) && args.document_ids.length
+        ? args.document_ids.map(Number).filter((id) => allowed.has(id))
+        : [...allowed];
+      const hits = await retrieveChunks(run.user_id, ids, query.slice(0, 2000), { k: 8 });
+      return JSON.stringify(hits.map(({ doc_id, idx, name, text }) => ({ document_id: doc_id, chunk: idx, name, text: text.slice(0, 1800) })));
+    }
+    case 'read_document': {
+      const doc = db.prepare('SELECT id, name FROM documents WHERE id = ? AND user_id = ?')
+        .get(Number(args.document_id), run.user_id);
+      if (!doc) return 'ERROR: document not found';
+      const full = docFullText(doc.id);
+      const start = Math.min(full.length, Math.max(0, Number(args.start_char) || 0));
+      const length = Math.min(24_000, Math.max(1, Number(args.max_chars) || 12_000));
+      return JSON.stringify({ name: doc.name, document_id: doc.id, start_char: start,
+        end_char: Math.min(full.length, start + length), total_chars: full.length,
+        text: full.slice(start, start + length) });
+    }
+    case 'delegate_analysis': {
+      if (!SUBAGENTS_ENABLED) return 'ERROR: subagents are disabled on this machine';
+      const task = String(args.task ?? '').trim().slice(0, 4000);
+      if (!task) return 'ERROR: task is required';
+      const context = String(args.context ?? '').slice(0, 20_000);
+      emit(run.id, 'notice', { message: 'Sequential analysis subagent is working.' });
+      const result = await streamChat({ model: run.model_id ?? DEFAULT_AGENT_MODEL,
+        messages: [
+          { role: 'system', content: 'You are a bounded analysis subagent. You have no tools or filesystem access. Analyze the supplied facts, state uncertainties, and return concise findings to the parent agent.' },
+          { role: 'user', content: `${task}\n\nContext:\n${context}` },
+        ], params: { max_tokens: 2048, temperature: 0.2 }, abortSignal });
+      return truncateOutput(result.content ?? '', 8000, 3000).text;
     }
     case 'write_file': {
       if (typeof args.content !== 'string') return 'ERROR: content must be a string. No file was changed. Retry with the complete file content, or use edit_file for an existing file.';
@@ -664,18 +748,56 @@ export function reclaimOrphanRuns({ olderThanSec = 0, workspaceId = null, log } 
   for (const row of rows) {
     if (isRunLive(row.id)) continue;
     if (olderThanSec > 0 && (now - (row.created_at ?? 0)) < olderThanSec) continue;
-    const unknownTools = journal.interrupt(row.id);
-    if (unknownTools) emit(row.id, 'error', { message: 'Interrupted tool outcome is unknown. Inspect project changes and running processes before retrying.', needs_reconciliation: true });
-    db.prepare(`UPDATE agent_runs SET status = 'error', finished_at = unixepoch() WHERE id = ?`)
-      .run(row.id);
-    runApprovals.get(row.id)?.finish(false, 'orphaned run reclaimed');
+    markInterruptedRun(row.id);
     n += 1;
     log?.info?.({ run: row.id, status: row.status }, 'reclaimed orphan agent run');
   }
   return n;
 }
 
-export function createRun(workspaceId, userId, modelId, task) {
+function markInterruptedRun(runId, reason = null, forceReconcile = false) {
+  const unknownTools = journal.interrupt(runId);
+  emit(runId, 'error', { message: reason ?? (unknownTools
+    ? 'The server restarted during a tool call. Its outcome is unknown. Inspect project changes and running processes before retrying.'
+    : 'The server restarted before this run could be resumed safely. Inspect the project before continuing.'),
+  needs_reconciliation: !!unknownTools || forceReconcile });
+  db.prepare("UPDATE agent_runs SET status = 'error', finished_at = unixepoch() WHERE id = ?").run(runId);
+  runApprovals.get(runId)?.finish(false, 'orphaned run reclaimed');
+}
+
+/** Resume only standalone runs from a complete transcript checkpoint. Chat
+ * turns need their conversation worker, so they are explicitly reconciled. */
+export function recoverAgentRuns(log) {
+  const rows = db.prepare("SELECT * FROM agent_runs WHERE status IN ('running','waiting_approval') ORDER BY id").all();
+  let resumed = 0, reconciled = 0;
+  for (const run of rows) {
+    if (isRunLive(run.id)) continue;
+    const checkpoint = db.prepare('SELECT * FROM agent_checkpoints WHERE run_id = ?').get(run.id);
+    const toolCount = db.prepare('SELECT COUNT(*) AS n FROM agent_tool_invocations WHERE run_id = ?').get(run.id).n;
+    const unresolved = db.prepare("SELECT COUNT(*) AS n FROM agent_tool_invocations WHERE run_id = ? AND status != 'complete'").get(run.id).n;
+    const ws = db.prepare('SELECT * FROM workspaces WHERE id = ? AND user_id = ?').get(run.workspace_id, run.user_id);
+    if (!run.source_conv_id && checkpoint && ws && !unresolved && toolCount === checkpoint.tool_count && run.status === 'running') {
+      try {
+        const messages = JSON.parse(checkpoint.messages_json);
+        if (!Array.isArray(messages)) throw new Error('invalid checkpoint');
+        emit(run.id, 'notice', { message: 'Server restarted; resuming from the last complete model step.' });
+        void runAgent(run, ws, {}, { step: checkpoint.step, messages })
+          .catch((err) => log?.error?.({ err, run: run.id }, 'recovered agent run failed'));
+        resumed += 1;
+        continue;
+      } catch (err) { log?.warn?.({ err, run: run.id }, 'checkpoint unreadable'); }
+    }
+    const changedTools = checkpoint && toolCount !== checkpoint.tool_count;
+    markInterruptedRun(run.id, changedTools
+      ? 'The server restarted after tool work that was not captured in a complete transcript checkpoint. Inspect project changes before continuing; this action will not replay automatically.'
+      : null, !!changedTools);
+    log?.warn?.({ run: run.id, sourceConvId: run.source_conv_id, changedTools, unresolved }, 'agent run needs reconciliation');
+    reconciled += 1;
+  }
+  return { resumed, reconciled };
+}
+
+export function createRun(workspaceId, userId, modelId, task, sourceConvId = null) {
   const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(workspaceId, userId);
   if (!workspace) throw Object.assign(new Error('Project not found'), { code: 404 });
   const projectKey = realpathSync(wsDir(workspaceId));
@@ -693,8 +815,8 @@ export function createRun(workspaceId, userId, modelId, task) {
   }
   let r;
   try {
-    r = db.prepare('INSERT INTO agent_runs (workspace_id, user_id, model_id, task, project_key) VALUES (?, ?, ?, ?, ?)')
-      .run(workspaceId, userId, modelId, task.slice(0, 2000), projectKey);
+    r = db.prepare('INSERT INTO agent_runs (workspace_id, user_id, model_id, task, project_key, source_conv_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(workspaceId, userId, modelId, task.slice(0, 2000), projectKey, sourceConvId);
   } catch (err) {
     if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') throw Object.assign(new Error('Another task is already working in this source folder. Wait for it to finish or stop it first.'), { code: 409 });
     throw err;
@@ -748,10 +870,10 @@ export function reapStaleAgentRuns(log) {
 // compacts mid-run — preserving coding state — instead of dying on overflow.
 export async function agentLoop({
   run, ws, messages, model, genParams = {}, abortSignal, firstResult = null, tools = AGENT_TOOLS,
-  ctxBudget = null,
+  ctxBudget = null, startStep = 0,
 }) {
   const brief = projectBrief(wsDir(ws.id));
-  if (brief) {
+  if (brief && !String(messages[0]?.content ?? '').includes('Project instructions and task files at the start of this run')) {
     const context = `\n\nProject instructions and task files at the start of this run (read updated files as needed):\n${brief}`;
     if (messages[0]?.role === 'system') messages[0] = { ...messages[0], content: messages[0].content + context };
     else messages.unshift({ role: 'system', content: context });
@@ -789,9 +911,16 @@ export async function agentLoop({
   };
   let lastUsed = 0;
   let lastEstimate = 0;
+  let completionChecked = false;
+  let unfinishedWithoutTools = 0;
+  let previousToolSignature = '';
+  let repeatedToolCalls = 0;
   const inputLimit = agentInputLimit(ctxBudget, genParams.max_tokens ?? genParams.max_completion_tokens);
-  for (let step = 0; step < MAX_STEPS; step++) {
+  for (let step = startStep; MAX_STEPS === 0 || step < MAX_STEPS; step++) {
     if (abortSignal?.aborted) return { status: 'aborted' };
+    if (step > startStep && step % STEP_EPOCH === 0) {
+      emit(run.id, 'status', { status: 'running', note: `continuing task after ${step} model steps`, step });
+    }
     trimAgentToolHistory(messages);
     let estimate = estimateAgentPrompt(messages, tools);
     const projected = calibratedPromptEstimate(estimate, lastEstimate, lastUsed);
@@ -802,6 +931,9 @@ export async function agentLoop({
         estimate = estimateAgentPrompt(messages, tools);
       }
     }
+    // This is the complete transcript before the next model call. If the
+    // process dies during generation, rerunning that call has no side effect.
+    checkpointRun(run.id, step, messages);
     let res;
     try {
       res = (step === 0 && firstResult) ? firstResult : await callStream();
@@ -817,8 +949,45 @@ export async function agentLoop({
     lastEstimate = estimate;
 
     if (!res.toolCalls?.length) {
+      // Give small models a second pass to check completion against the task.
+      // A response describing the next action should lead to a tool call.
+      if (!completionChecked) {
+        completionChecked = true;
+        messages.push({ role: 'assistant', content: res.content ?? '' });
+        messages.push({ role: 'user', content: 'Check the original task against work actually completed and tool results. If any requested work remains, use the next tool now. If complete, give the final answer with evidence. If blocked, state the exact blocker. Do not treat a plan or promise as completed work.' });
+        checkpointRun(run.id, step + 1, messages);
+        continue;
+      }
+      const answer = String(res.content ?? '');
+      const explicitlyUnfinished = /\b(?:not yet complete|unfinished|still (?:need|have|must)|remaining (?:work|tasks?|steps?)|need to (?:finish|implement|fix|verify)|next (?:I|we) (?:need|will)|I (?:will|need to) (?:now|next))\b/i.test(answer)
+        && !/\b(?:no remaining work|nothing remains|nothing left to do)\b/i.test(answer);
+      const explicitlyBlocked = /\b(?:blocked by|cannot proceed|can't proceed|unable to continue|permission denied|approval required)\b/i.test(answer);
+      if (explicitlyBlocked) return { status: 'blocked', message: answer.slice(0, 1000) };
+      if (explicitlyUnfinished) {
+        unfinishedWithoutTools += 1;
+        if (unfinishedWithoutTools >= 3) {
+          const message = 'The model repeatedly reported unfinished work without using a tool. The run stopped to avoid an unproductive loop; inspect the project and continue with a concrete next action.';
+          emit(run.id, 'error', { message });
+          return { status: 'blocked', message };
+        }
+        messages.push({ role: 'assistant', content: answer });
+        messages.push({ role: 'user', content: 'You said work remains. Call the specific next tool now. If a permission or missing dependency prevents it, explain that blocker plainly.' });
+        checkpointRun(run.id, step + 1, messages);
+        continue;
+      }
       return { status: 'final', content: res.content, reasoning: res.reasoning,
                timings: res.timings, usage: res.usage, step };
+    }
+
+    completionChecked = false;
+    unfinishedWithoutTools = 0;
+    const toolSignature = res.toolCalls.map((call) => `${call.function.name}:${call.function.arguments}`).join('\n');
+    repeatedToolCalls = toolSignature === previousToolSignature ? repeatedToolCalls + 1 : 0;
+    previousToolSignature = toolSignature;
+    if (repeatedToolCalls >= 8) {
+      const message = 'The model repeated the same tool calls without progress. The run stopped to avoid repeating side effects; inspect the latest tool results before continuing.';
+      emit(run.id, 'error', { message });
+      return { status: 'blocked', message };
     }
 
     emit(run.id, 'assistant', {
@@ -864,12 +1033,16 @@ export async function agentLoop({
       for (const msg of messages) if (msg.browserObservation) msg.content = '[Earlier browser screenshot omitted; see its tool snapshot.]';
       messages.push({ role: 'user', browserObservation: true, content: [{ type: 'text', text: 'Browser screenshots from the preceding actions. Inspect the rendered result, fix any problems, and continue the task.' }, ...screenshots.slice(-2)] });
     }
+    if (repeatedToolCalls === 3) {
+      messages.push({ role: 'user', content: 'You have repeated the same tool call several times. Read its result and choose a different action. If blocked, report the exact reason.' });
+    }
+    checkpointRun(run.id, step + 1, messages);
   }
-  emit(run.id, 'error', { message: `hit the ${MAX_STEPS}-step limit without finishing` });
+  emit(run.id, 'error', { message: `hit the configured ${MAX_STEPS}-step limit without finishing` });
   return { status: 'steplimit' };
 }
 
-async function runAgent(run, ws, hooks = {}) {
+async function runAgent(run, ws, hooks = {}, checkpoint = null) {
   const abort = new AbortController();
   runAborts.set(run.id, abort);
   const finish = (status, content) => {
@@ -877,7 +1050,7 @@ async function runAgent(run, ws, hooks = {}) {
     try { hooks.onFinish?.({ status, content }); } catch { /* observer only */ }
   };
   const model = run.model_id ?? DEFAULT_AGENT_MODEL;
-  const messages = [
+  const messages = checkpoint?.messages ?? [
     { role: 'system', content: agentSystemPrompt(ws) },
     { role: 'user', content: run.task },
   ];
@@ -894,6 +1067,7 @@ async function runAgent(run, ws, hooks = {}) {
       run, ws, messages, model,
       genParams: { temperature: 0.7, top_p: 0.8, max_tokens: 8192, chat_template_kwargs: { enable_thinking: false } },
       abortSignal: abort.signal,
+      startStep: checkpoint?.step ?? 0,
     });
     if (r.status === 'final') {
       emit(run.id, 'assistant', { content: r.content, thinking: r.reasoning || null, step: r.step, final: true });
@@ -901,7 +1075,7 @@ async function runAgent(run, ws, hooks = {}) {
     } else if (r.status === 'aborted') {
       finish('stopped');
     } else {
-      finish('error', 'step limit');
+      finish('error', r.message ?? 'configured step limit');
     }
   } catch (err) {
     if (abort.signal.aborted) {
@@ -1112,7 +1286,12 @@ export default async function agentRoutes(app) {
     const stored = db.prepare('SELECT id, type, json FROM agent_events WHERE run_id = ? AND id > ? ORDER BY id')
       .all(run.id, after);
     for (const e of stored) send({ id: e.id, run_id: run.id, type: e.type, ...JSON.parse(e.json) });
-    send({ type: 'run', run: db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(run.id) });
+    const currentRun = db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(run.id);
+    send({ type: 'run', run: currentRun });
+    if (!['running', 'waiting_approval'].includes(currentRun.status)) {
+      reply.raw.end();
+      return;
+    }
 
     let subs = runSubs.get(run.id);
     if (!subs) runSubs.set(run.id, (subs = new Set()));

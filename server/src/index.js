@@ -9,13 +9,14 @@ import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
 import { workspacePreviewRoutes } from './workspacePreview.js';
 import { healOrphanedPrompts } from './chatkit.js';
+import { activeChatJobCount, reconcileChatJobs } from './liveJobs.js';
 import { createDeploymentGuard } from './deployment.js';
 import { downloadBusy, reapOrphans } from './downloadManager.js';
 import { reapIdleModels } from './llama.js';
 import { backfillMissing, pruneMemories } from './memory.js';
 import { syncStaleProviders } from './providers.js';
 import { reapIdleSandboxes } from './sandbox.js';
-import agentRoutes, { reclaimOrphanRuns, reapStaleAgentRuns, activeRunCount } from './routes/agent.js';
+import agentRoutes, { recoverAgentRuns, reapStaleAgentRuns, activeRunCount } from './routes/agent.js';
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
 import costRoutes from './routes/costs.js';
@@ -49,7 +50,7 @@ process.on('unhandledRejection', (err) => { console.error('UNHANDLED_REJECTION',
 
 const app = Fastify({ logger: { level: 'info' } });
 app.log.info(`duckpond server ${versionLine()}`);
-const deployment = createDeploymentGuard({ extraBusy: () => downloadBusy() || activeRunCount() > 0 });
+const deployment = createDeploymentGuard({ extraBusy: () => downloadBusy() || activeRunCount() > 0 || activeChatJobCount() > 0 });
 deployment.install(app);
 await app.register(fastifyCookie);
 await app.register(fastifyWebsocket);
@@ -120,13 +121,19 @@ setInterval(() => syncStaleProviders(app.log), 6 * 60 * 60_000).unref();
 
 // Free any orphan agent runs left by the previous process before accepting traffic
 try {
-  const n = reclaimOrphanRuns({ log: app.log });
-  if (n) app.log.info({ n }, 'reclaimed orphan agent runs on boot');
+  const n = reconcileChatJobs();
+  if (n) app.log.warn({ n }, 'reconciled chat jobs interrupted by restart');
+} catch (err) { app.log.warn({ err }, 'chat job reconciliation failed'); }
+try {
+  const { resumed, reconciled } = recoverAgentRuns(app.log);
+  if (resumed || reconciled) app.log.info({ resumed, reconciled }, 'recovered agent runs on boot');
 } catch (err) { app.log.warn({ err }, 'orphan run reclaim failed'); }
 
-// Kill any download workers orphaned by a previous DuckPond process, and
-// re-adopt their job records so the UI shows them as cancelled, not "running".
-try { reapOrphans(); } catch (err) { app.log.warn({ err }, 'download orphan reap failed'); }
+// Recover interrupted HF transfers from their partial cache blobs.
+try {
+  const n = reapOrphans();
+  if (n) app.log.info({ n }, 'resuming interrupted model downloads');
+} catch (err) { app.log.warn({ err }, 'download recovery failed'); }
 
 // Media Studio background jobs: requeue queued rows left by a restart and
 // settle running ones as cancelled-with-retry so no card hangs forever.

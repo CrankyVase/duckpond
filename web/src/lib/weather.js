@@ -24,17 +24,17 @@ export function wmo(code, isDay = true) {
   }
 }
 
-// CSS gradient per theme (card background). White text sits on all of them.
+// Flat card colors by condition. White text remains legible on each.
 export const WEATHER_BG = {
-  clear: 'linear-gradient(160deg, #4a9fe0 0%, #2f6fb0 55%, #285f9c 100%)',
-  'clear-night': 'linear-gradient(160deg, #29304f 0%, #1c2138 60%, #141829 100%)',
-  partly: 'linear-gradient(160deg, #6aa8db 0%, #497fb4 60%, #3b6a9b 100%)',
-  'partly-night': 'linear-gradient(160deg, #313a5a 0%, #232a45 60%, #1a1f33 100%)',
-  cloud: 'linear-gradient(160deg, #6f7f92 0%, #55647a 60%, #47566a 100%)',
-  fog: 'linear-gradient(160deg, #8892a0 0%, #6d7684 60%, #5c6572 100%)',
-  rain: 'linear-gradient(160deg, #4a6076 0%, #37485c 60%, #2c3a4b 100%)',
-  snow: 'linear-gradient(160deg, #7f93ab 0%, #63768e 60%, #556678 100%)',
-  thunder: 'linear-gradient(160deg, #4a4361 0%, #322c47 60%, #241f36 100%)',
+  clear: '#285f9c',
+  'clear-night': '#1c2138',
+  partly: '#3b6a9b',
+  'partly-night': '#232a45',
+  cloud: '#47566a',
+  fog: '#5c6572',
+  rain: '#2c3a4b',
+  snow: '#556678',
+  thunder: '#241f36',
 };
 
 export function dayName(iso) {

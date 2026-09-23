@@ -102,6 +102,23 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_ws ON agent_runs(workspace_id, id DESC);
 
+-- Last observable state of each detached chat turn. A process crash cannot
+-- safely replay a model request or a shell command; it can report the last
+-- committed state and let the user continue from the saved conversation.
+CREATE TABLE IF NOT EXISTS chat_jobs (
+  id TEXT PRIMARY KEY,
+  conv_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  prompt_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+  status TEXT NOT NULL CHECK (status IN ('running','done','error','stopped','interrupted')),
+  state_json TEXT NOT NULL DEFAULT '{}',
+  final_msg_json TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_chat_jobs_conv ON chat_jobs(conv_id, created_at DESC);
+
 -- typed event stream per run (OpenHands-style): stored for replay, tailed live over SSE
 CREATE TABLE IF NOT EXISTS agent_events (
   id INTEGER PRIMARY KEY,
@@ -111,6 +128,14 @@ CREATE TABLE IF NOT EXISTS agent_events (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id, id);
+
+CREATE TABLE IF NOT EXISTS agent_checkpoints (
+  run_id INTEGER PRIMARY KEY REFERENCES agent_runs(id) ON DELETE CASCADE,
+  step INTEGER NOT NULL,
+  messages_json TEXT NOT NULL,
+  tool_count INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
 
 -- global app settings (owner-editable), e.g. the core system prompt
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -316,6 +341,8 @@ try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /
 // chat agent mode: an assistant message can embed an agent run; a conversation
 // keeps one workspace so follow-up tasks continue on the same files
 try { db.exec('ALTER TABLE messages ADD COLUMN run_id INTEGER'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE chat_jobs ADD COLUMN prompt_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE agent_runs ADD COLUMN source_conv_id INTEGER'); } catch { /* exists */ }
 // image generation preferences: can the model reach for generate_image at
 // all, and which quality/speed preset drives its default step count
 try { db.exec("ALTER TABLE users ADD COLUMN allow_image_gen INTEGER NOT NULL DEFAULT 1"); } catch { /* exists */ }
@@ -347,8 +374,9 @@ try { db.exec("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'ext
 // Preferred local diffusion model id for generate_image / studio (e.g. Juggernaut).
 // 'auto' lets the bridge pick; anything else is a ready bridge model id.
 try { db.exec("ALTER TABLE users ADD COLUMN image_model TEXT NOT NULL DEFAULT 'auto'"); } catch { /* exists */ }
-// Content filter: off | safe | strict (see contentFilter.js)
-try { db.exec("ALTER TABLE users ADD COLUMN content_filter TEXT NOT NULL DEFAULT 'off'"); } catch { /* exists */ }
+// Image safety is on by default for existing and new accounts.
+try { db.exec("ALTER TABLE users ADD COLUMN content_filter TEXT NOT NULL DEFAULT 'safe'"); } catch { /* exists */ }
+db.prepare("UPDATE users SET content_filter = 'safe' WHERE content_filter IS NULL OR content_filter = 'off'").run();
 
 // Migrate images → AUTOINCREMENT if the live table was created without it.
 // Without this, delete+regenerate reuses id N and immutable browser caches
@@ -607,6 +635,11 @@ CREATE TABLE IF NOT EXISTS media_jobs (
   finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_media_jobs_user ON media_jobs(user_id, id DESC);
+CREATE TABLE IF NOT EXISTS media_job_previews (
+  job_id INTEGER PRIMARY KEY REFERENCES media_jobs(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  jpeg BLOB NOT NULL
+);
 `);
 
 for (const [column, definition] of [['bridge_tag', 'TEXT'], ['cancel_requested', 'INTEGER NOT NULL DEFAULT 0']]) {

@@ -143,7 +143,7 @@ def attach_controls(info, cls=''):
     """Default sampling knobs and whether a pipeline can take reference photos."""
     lower = (cls or info.get('class') or '').lower()
     if 'qwenimage21' in lower:
-        info.update(supports_image=True, max_references=10, default_steps=40)
+        info.update(supports_image=True, max_references=4, default_steps=40)
     elif 'flux2klein' in lower:
         info.update(supports_image=True, max_references=4, default_steps=4)
     elif info.get('needs_image'):
@@ -242,7 +242,7 @@ def inspect_snapshot(snap, native_available=False, repo_id=''):
                 m = re.search(r'(Q\d[_A-Z0-9]*|F16|BF16)', pick.name, re.I)
                 info = dict(kind='qwen21_gguf', task='image', path=str(pick),
                             quant=(m.group(1).upper() if m else None),
-                            supports_image=True, max_references=10, default_steps=40,
+                            supports_image=True, max_references=4, default_steps=40,
                             **{'class': 'QwenImage21Pipeline'}, family='qwen-image-2.1')
                 try:
                     hub_root = snap.parents[2]
@@ -263,7 +263,8 @@ def inspect_snapshot(snap, native_available=False, repo_id=''):
                 if not base_cands:
                     return dict(info, ready=False,
                                 reason='Keep Qwen/Qwen-Image-2.1 downloaded — this quant borrows its text encoder and VAE')
-                return dict(info, ready=True)
+                return dict(info, ready=False,
+                            reason='This Diffusers runtime cannot load Qwen-Image 2.1 GGUF transformers yet; use the full Qwen/Qwen-Image-2.1 model')
     if any(snap.rglob('*.gguf')) and task in ('image', 'video', 'audio', 'tts'):
         return dict(kind='gguf', task=task, path=str(snap), ready=False,
                     reason='GGUF media needs a dedicated loader and companion encoders; choose a complete Diffusers repository')
@@ -372,8 +373,8 @@ def validate_request(body):
     if images is not None:
         if isinstance(images, str):
             images = [images]
-        if not isinstance(images, list) or len(images) > 10:
-            raise ValueError('At most 10 reference images')
+        if not isinstance(images, list) or len(images) > 4:
+            raise ValueError('At most 4 reference images')
         if any(not isinstance(item, str) or not item.strip() for item in images):
             raise ValueError('Reference images must be base64 strings')
     lyrics = body.get('lyrics')

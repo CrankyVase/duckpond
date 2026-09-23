@@ -1,4 +1,4 @@
-// POST /api/conversations/:id/chat — the main streaming turn, registered from
+// POST /api/conversations/:id/chat — starts a server-owned turn, registered from
 // routes/chat.js (same plugin scope, so the requireAuth hook applies). Split
 // out when the original chat.js outgrew one file.
 import { db } from '../db.js';
@@ -18,7 +18,7 @@ import { isDiffusionModel } from '../diffusiongen.js';
 import { acquireGpu } from '../gpuqueue.js';
 import { finishRun, isRunLive } from './agent.js';
 import {
-  broadcast, createLiveJob, finishLiveJob, getLiveJob,
+  broadcast, createLiveJob, finishLiveJob, getLiveJob, waitForStoppingJob,
 } from '../liveJobs.js';
 import { convDocs, docFullText, retrieveChunks } from '../docs.js';
 // remote providers + cost saver (feat/remote-providers)
@@ -33,18 +33,18 @@ import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tok
 import { saveContext, saverSummary } from '../contextsaver.js';
 import { reasoningDialect, reasoningParams } from '../reasoning.js';
 import { capabilityManifest } from '../permissions.js';
-import { GITHUB_READ_TOOLS, GITHUB_TOOLS, hasGithub } from '../github.js';
+import { GITHUB_READ_TOOLS, hasGithub } from '../github.js';
 import {
   GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
   WIDGET_TOOLS, WIDGET_TOOL_NAMES,
-  buildPrompt, convForUser, dashboardCapable, filterTools, insertMessage,
+  buildPrompt, convForUser, filterTools, insertMessage,
   persistInterruptedReply, recordUsage, setLeaf, stripFakeImages,
 } from '../chatkit.js';
 import {
-  RESEARCH_MODES, ULTRA_DIRECTIVE, makeSpeculator, withToolsPolicy,
+  RESEARCH_MODES, ULTRA_DIRECTIVE, makeSpeculator, selectTurnWidgets, withToolsPolicy,
 } from '../chatpolicy.js';
 import {
-  autoCompactMessages, generateFollowups, makeTurnDelta, replayCacheHit,
+  autoCompactMessages, makeTurnDelta, replayCacheHit,
   runAgentTurn, runDiffusionTurn, runImageTurn, runInlineSearch,
 } from '../chatflow.js';
 
@@ -76,119 +76,97 @@ const PROJECT_NUDGE = 'Stop. You are writing a multi-file project as chat text i
   + 'one-shot commands that exit. Do not paste project code into the chat.';
 
 export function registerChatPost(app) {
-  // The main event: send a user message (or regenerate) and stream the reply.
+  // Start a turn and return immediately. Progress is read from GET /live so a
+  // browser refresh or proxy request limit cannot cancel the model invocation.
   // body: { content?, parentId?, regenerateFrom? } — exactly one of content|regenerateFrom.
   app.post('/api/conversations/:id/chat', async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
     if (!conv.model_id) return reply.code(400).send({ error: 'no model selected' });
 
-    // one live generation per conversation — the client queues extras itself
+    // Stop followed by Send waits for prior cleanup; other concurrent sends still 409.
+    await waitForStoppingJob(conv.id);
     if (getLiveJob(conv.id)?.status === 'running') {
       return reply.code(409).send({ error: 'a reply is already generating for this chat' });
     }
 
     const { content, parentId, regenerateFrom } = req.body ?? {};
+    if (regenerateFrom) {
+      const src = db.prepare('SELECT role FROM messages WHERE id = ? AND conv_id = ?').get(regenerateFrom, conv.id);
+      if (src?.role !== 'assistant') return reply.code(400).send({ error: 'bad regenerateFrom' });
+    } else if (typeof content !== 'string' || !content.trim()) {
+      return reply.code(400).send({ error: 'empty message' });
+    }
     // remote (paid API) models take a different path for GPU queueing, warm-up
     // probes and agent tooling — and get the cost-saver pipeline on top
     const remote = isRemoteId(conv.model_id);
-    // coarse location, resolved from the request's own IP (no browser prompt,
-    // no client involvement) → lets show_weather/show_map default to where the
-    // user is when they name no place
-    const userLoc = await ipLocation(clientIp(req));
+    const sourceIp = clientIp(req);
     // search depth: quick | normal | ultra (deep research)
     const researchMode = RESEARCH_MODES[req.body?.researchMode] ? req.body.researchMode : 'normal';
     const modeCfg = RESEARCH_MODES[researchMode];
 
     let job;
-    try { job = createLiveJob(conv.id, req.user.id); }
-    catch (err) {
-      return reply.code(err.code === 409 ? 409 : 500).send({ error: err.message });
-    }
-    const abort = job.abort;
-
-    // take the socket away from Fastify — otherwise it "completes" the reply
-    // as soon as the handler yields and our SSE stream gets torn down
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-      'x-accel-buffering': 'no',
-    });
-    // Fan out every event to all attached clients (this tab + any reattach after
-    // refresh). The primary connection is just another listener — closing it
-    // must NOT abort the job.
-    const writePrimary = (obj) => {
-      if (reply.raw.writableEnded || reply.raw.destroyed) return;
-      try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
-    };
-    job.listeners.add(writePrimary);
-    const send = (obj) => broadcast(job, obj);
-    // Cloudflare / proxies kill "idle" SSE after ~100s. Keepalive comments
-    // (ignored by the client parser) prevent the reply vanishing mid-generation.
-    const pingPrimary = setInterval(() => {
-      if (reply.raw.writableEnded || reply.raw.destroyed) return;
-      try { reply.raw.write(': ping\n\n'); } catch { /* client gone */ }
-    }, 15_000);
-    reply.raw.on('close', () => {
-      clearInterval(pingPrimary);
-      job.listeners.delete(writePrimary);
-      // intentionally no abort.abort() — generation keeps going server-side
-    });
-
-    let releaseGpu = null;
-    let turnDelta = null;       // per-turn stream wiring (timer cleared in finally)
-    let promptLeaf = null;      // message the assistant will answer under (needed in finally)
-    const t0 = Date.now();      // turn wall-clock start (tok/s fallback below)
+    let promptLeaf;
     try {
-      if (regenerateFrom) {
-        const src = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(regenerateFrom, conv.id);
-        if (!src || src.role !== 'assistant') throw new Error('bad regenerateFrom');
-        promptLeaf = db.prepare('SELECT * FROM messages WHERE id = ?').get(src.parent_id);
-      } else {
-        if (typeof content !== 'string' || !content.trim()) throw new Error('empty message');
-        // Content filter (user Settings → Safety). Blocks before the turn is saved.
-        const filtered = checkUserContent(req.user.id, content, 'chat');
-        if (!filtered.ok) {
-          send({ type: 'error', message: filtered.reason, code: filtered.code });
-          return;
-        }
-        // parentId: null means "start a new root branch" — only fall back to the
-        // active leaf when the field is absent entirely
-        let parent = parentId !== undefined ? parentId : (conv.active_leaf_id ?? null);
-        // Client sometimes holds a tmp-* leaf after a dropped stream (not in DB).
-        // Fall back to the conversation's real active leaf — NEVER null-root here,
-        // or "continue" after a blip orphans the whole thread and looks like a wipe.
-        if (parent != null && !db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id)) {
-          const fresh = db.prepare('SELECT active_leaf_id FROM conversations WHERE id = ?').get(conv.id);
-          parent = fresh?.active_leaf_id ?? null;
+      // Commit the accepted prompt and its job together before returning 202.
+      // A restart can reconcile the job without re-inserting the user message.
+      db.transaction(() => {
+        if (regenerateFrom) {
+          const src = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(regenerateFrom, conv.id);
+          promptLeaf = src?.role === 'assistant'
+            ? db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(src.parent_id, conv.id)
+            : null;
+          if (!promptLeaf) throw Object.assign(new Error('bad regenerateFrom'), { code: 400 });
+        } else {
+          const filtered = checkUserContent(req.user.id, content, 'chat');
+          if (!filtered.ok) throw Object.assign(new Error(filtered.reason), { code: 400, filterCode: filtered.code });
+          // Explicit null starts a new root; an absent parent uses the current leaf.
+          let parent = parentId !== undefined ? parentId : (conv.active_leaf_id ?? null);
           if (parent != null && !db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id)) {
-            parent = null;
+            parent = db.prepare('SELECT active_leaf_id FROM conversations WHERE id = ?').get(conv.id)?.active_leaf_id ?? null;
+            if (parent != null && !db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id)) parent = null;
           }
-        }
-        // Soft continue: if the user is picking up after an interrupt, keep them
-        // on the interrupted assistant leaf so the model sees the partial work.
-        const trimmed = content.trim();
-        const continueLike = /^(continue|keep going|resume|go on|try again|pick up)\b/i.test(trimmed)
-          || /^(continue|keep going|resume)\s*[.!]?\s*$/i.test(trimmed);
-        if (continueLike && parent != null) {
-          const leaf = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id);
-          if (leaf?.role === 'assistant' && />\s*(Interrupted|Stopped|connection)/i.test(leaf.content || '')) {
-            // parent is already the interrupted assistant — perfect
-          } else if (leaf?.role === 'user') {
-            // leaf is the original user prompt; find interrupted sibling asst if any
-            const asst = db.prepare(`
-              SELECT * FROM messages WHERE conv_id = ? AND parent_id = ? AND role = 'assistant'
-              ORDER BY id DESC LIMIT 1`).get(conv.id, leaf.id);
-            if (asst && />\s*(Interrupted|Stopped|connection)/i.test(asst.content || '')) {
-              parent = asst.id;
+          // Continue under an interrupted assistant when that row is durable.
+          if (/^(continue|keep going|resume|go on|try again|pick up)\b/i.test(content.trim()) && parent != null) {
+            const leaf = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id);
+            if (leaf?.role === 'user') {
+              const asst = db.prepare(`SELECT * FROM messages WHERE conv_id = ? AND parent_id = ? AND role = 'assistant'
+                ORDER BY id DESC LIMIT 1`).get(conv.id, leaf.id);
+              if (asst && />\s*(Interrupted|Stopped|connection)/i.test(asst.content || '')) parent = asst.id;
             }
           }
+          promptLeaf = insertMessage(conv.id, parent, 'user', content);
+          setLeaf(conv.id, promptLeaf.id);
         }
-        promptLeaf = insertMessage(conv.id, parent, 'user', content);
-        send({ type: 'user_msg', msg: promptLeaf });
+        job = createLiveJob(conv.id, req.user.id, promptLeaf);
+      })();
+    }
+    catch (err) {
+      return reply.code(err.code === 409 ? 409 : err.code === 400 ? 400 : 500)
+        .send({ error: err.message, ...(err.filterCode ? { code: err.filterCode } : {}) });
+    }
+    const abort = job.abort;
+    const send = (obj) => broadcast(job, obj);
+    // The request ends here; all state and the abort signal belong to the job.
+    // setImmediate makes the 202 observable before slow setup (such as GeoIP).
+    setImmediate(() => { void processTurn().catch((err) => {
+      req.log.error({ err }, 'detached chat turn failed');
+      send({ type: 'error', message: String(err.message ?? err) });
+      finishLiveJob(job, 'error');
+      for (const fn of [...job.listeners]) {
+        try { fn({ type: 'stream_end' }); } catch { /* ignore */ }
       }
+      job.listeners.clear();
+    }); });
+    return reply.code(202).send({ convId: conv.id, jobId: job.id, status: 'running' });
+
+    async function processTurn() {
+    let releaseGpu = null;
+    let turnDelta = null;       // per-turn stream wiring (timer cleared in finally)
+    const t0 = Date.now();      // turn wall-clock start (tok/s fallback below)
+    try {
+      // Resolve location inside the job; a slow lookup must not hold the POST.
+      const userLoc = await ipLocation(sourceIp);
 
       // One GPU → serialize every LOCAL generation. A second concurrent user
       // waits here and sees their queue position; if they disconnect while
@@ -242,27 +220,41 @@ export function registerChatPost(app) {
       const schemaStr = String(conv._settings.json_schema ?? '').trim();
       const grammarStr = String(conv._settings.grammar ?? '').trim();
       const constrained = !!(schemaStr || grammarStr);
-      let promptMessages = constrained
-        ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
-        : withToolsPolicy(
-          buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
-      // The turn's tool list, hoisted so the capability manifest below can name
-      // the actual tools rather than describe the policy in the abstract.
-      const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
+      const requestedWidgets = wsRow ? new Set() : selectTurnWidgets(promptLeaf?.content);
+      for (const name of disabledTools) requestedWidgets.delete(name);
+      // Construct the tools before their prompt policy. A disabled or unavailable
+      // tool must not be described to the model as something it can call.
+      // Automatic extraction handles ordinary facts after the reply. Only
+      // advertise direct memory tools when the user explicitly asks to manage
+      // memory; small models otherwise see three irrelevant tool schemas.
+      const memoryRequest = String(promptLeaf?.content ?? '').toLowerCase();
+      const memoryNames = new Set();
+      if (/\b(remember|save (?:this|that|it|to (?:your )?memory)|keep (?:this|that|it) in mind)\b/.test(memoryRequest)) memoryNames.add('save_memory');
+      if (/\b(update|correct|change|fix)\b.{0,50}\b(memory|remembered|what you know|fact)\b|\bwhat you remember\b.{0,50}\b(wrong|outdated)\b/.test(memoryRequest)) memoryNames.add('update_memory');
+      if (/\b(forget|delete|remove)\b.{0,50}\b(memory|remember|about me|that|this|it)\b/.test(memoryRequest)) memoryNames.add('forget_memory');
+      const memTools = memoryEnabled(req.user.id)
+        ? MEMORY_TOOLS.filter((tool) => memoryNames.has(tool.function.name)) : [];
       const ghOn = hasGithub(req.user.id);
       const turnTools = constrained ? [] : filterTools(
         wsRow
           ? AGENT_TOOLS
           : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
-            ...(ghOn ? GITHUB_READ_TOOLS : []), ...WIDGET_TOOLS, ...memTools],
+            ...(ghOn ? GITHUB_READ_TOOLS : []),
+            ...WIDGET_TOOLS.filter((t) => requestedWidgets.has(t.function.name)), ...memTools],
         disabledTools,
       ).filter((t) => imgPrefs.allowed || t.function.name !== 'generate_image');
+      const availableTools = new Set(turnTools.map((t) => t.function.name));
+      let promptMessages = constrained
+        ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
+        : withToolsPolicy(
+          buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow,
+          imgPrefs.allowed, userLoc, disabledTools, requestedWidgets, availableTools);
 
       // Tell the model its own permissions. A model that doesn't know a tool
       // needs approval either avoids useful tools or promises things it can't
       // deliver — and it pre-asks in prose, which is exactly the double-prompt
       // the approval card is supposed to replace.
-      if (!constrained && promptMessages[0]?.role === 'system') {
+      if (!constrained && conv.mode === 'agent' && promptMessages[0]?.role === 'system') {
         const manifest = capabilityManifest(req.user.id, {
           tools: turnTools, hasWorkspace: !!wsRow, hasGithub: ghOn,
         });
@@ -293,20 +285,12 @@ export function registerChatPost(app) {
         // the top, and a memory that gets ignored is worse than none.
         // (For remote models the saver moves this block to the END instead —
         // keeping the stable prefix byte-identical is worth more there.)
-        const memBlock = '## Your long-term memory\n'
-          + 'You HAVE a persistent long-term memory about this user. It survives across conversations '
-          + 'and sessions: facts are extracted automatically as you chat, and you can manage it yourself '
-          + 'with your memory tools — save_memory (keep a new fact: core = permanent identity, durable = '
-          + 'preferences/interests, context = current projects), update_memory (fix a wrong or outdated '
-          + 'memory by its id), forget_memory (delete one by id). Never tell the user you are stateless, '
-          + 'that you cannot remember them, or that everything resets between chats — none of that is true. '
-          + "If they ask you to remember something, call save_memory; if they correct a remembered fact, "
-          + 'call update_memory.\n'
-          + (lines.length
-            ? 'Recalled as relevant to this message (use them directly and confidently; don\'t recite the '
-              + 'list unprompted):\n' + lines.join('\n')
-            : 'Nothing in memory matched this particular message — but your memory may still hold other '
-              + 'facts about them; absence here is not evidence you know nothing.');
+        const memBlock = '## Memory\n'
+          + 'Your memory persists across chats. Do not claim you are stateless. '
+          + (availableTools.has('save_memory')
+            ? 'Use save_memory for explicit requests to remember, update_memory for corrections, and forget_memory for deletion.\n'
+            : '\n')
+          + (lines.length ? 'Relevant memories (use naturally; do not recite):\n' + lines.join('\n') : '');
         promptMessages[0] = remote
           ? { role: 'system', content: promptMessages[0].content + '\n\n' + memBlock }
           : { role: 'system', content: memBlock + '\n\n' + promptMessages[0].content };
@@ -327,7 +311,7 @@ export function registerChatPost(app) {
               + 'Answer from it, cite by document name, and if it is not there say so honestly.\n';
             if (totalChars > 0 && totalChars <= 24_000) {
               req.log.info({ docs: attached.length, chars: totalChars }, 'full docs injected');
-              block += '\n' + fulls.map((d) => `### ${d.name}\n${d.text.slice(0, 20_000)}`).join('\n\n');
+              block += '\n' + fulls.map((d) => `### ${d.name}\n${d.text}`).join('\n\n');
             } else {
               const hits = await retrieveChunks(req.user.id, attached.map((d) => d.id), promptLeaf.content, { k: 10 });
               if (hits.length) {
@@ -417,7 +401,7 @@ export function registerChatPost(app) {
       // 1) stable-prefix ordering so provider prompt caches keep hitting
       // 2) auto-compaction when the prompt would blow the context budget
       // 3) exact response cache for identical plain turns
-      // 4) cheap-aux model for titles/followups/memory below
+      // 4) cheap-aux model for memory and compaction
       const remoteInfo = remote ? resolveRemote(conv.model_id) : null;
       // monthly spend cap: refuse the turn before anything bills (cache replays
       // are free, but a capped provider means "stop using this key" — the owner
@@ -578,7 +562,7 @@ export function registerChatPost(app) {
       }
 
       send({ type: 'context', used: estimateTokens(promptMessages), budget: conv._settings.ctx_size, estimated: true });
-      const spec = makeSpeculator(req.log);
+      const spec = makeSpeculator(req.log, abort.signal);
       turnDelta = makeTurnDelta({
         send, abort, log: req.log, spec,
         thinkTimeoutMs: Number(process.env.THINK_TIMEOUT_MS ?? modeCfg.thinkMs),
@@ -661,11 +645,9 @@ export function registerChatPost(app) {
         // inline-tools turn: web search (with live trace + citations),
         // interactive widgets, and/or memory ops, in one batched loop;
         // the model answers at the end.
-        const searchTools = filterTools([
-          ...(imgPrefs.allowed ? [GENERATE_IMAGE_TOOL] : []),
-          WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS,
-          ...(memoryEnabled(req.user.id) ? MEMORY_TOOLS : []),
-        ], disabledTools);
+        const inlineNames = new Set(['generate_image', 'web_search', 'fetch_page',
+          ...WIDGET_TOOL_NAMES, ...MEMORY_TOOL_NAMES]);
+        const searchTools = turnTools.filter((t) => inlineNames.has(t.function.name));
         const r = await runInlineSearch({
           conv, userId: req.user.id, userLoc, promptMessages, firstResult: res, params,
           searchTools, imgPrefs, caps: modeCfg, send, abort, onDelta, log: req.log, spec,
@@ -753,43 +735,13 @@ export function registerChatPost(app) {
         } catch { /* non-fatal */ }
       }
 
-      // auto-title on first exchange (on the cheap aux model for remote chats)
+      // A local title is immediate and avoids a second model pass after the
+      // answer. The user can still rename the conversation themselves.
       if (!abort.signal.aborted && conv.title === 'New chat' && !regenerateFrom) {
-        try {
-          // generous max_tokens: thinking models burn budget on reasoning first
-          const { content: title, reasoning: titleReasoning, usage: titleUsage } = await streamChat({
-            model: auxModel,
-            messages: [{
-              role: 'user',
-              content: `Reply with ONLY a 3-6 word title (no quotes, no punctuation at the end) for a chat that starts:\nUser: ${promptLeaf.content.slice(0, 400)}\nAssistant: ${text.slice(0, 400)}`,
-            }],
-            params: { max_tokens: 800, temperature: 0.3, chat_template_kwargs: { enable_thinking: false } },
-          });
-          logAux('aux_title', auxModel, titleUsage, 260, 20);
-          const raw = title.trim() || (titleReasoning ?? '').trim().split('\n').pop() || '';
-          const clean = raw.replace(/^["']|["']$/g, '').split('\n')[0].slice(0, 80);
-          if (clean) {
-            db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(clean, conv.id);
-            send({ type: 'title', title: clean });
-          }
-        } catch { /* non-fatal */ }
-      }
-
-      // clickable follow-up prompts under the reply (cheap aux model when remote)
-      if (!abort.signal.aborted && text && text.trim().length >= 40 && promptLeaf?.content) {
-        try {
-          const items = await generateFollowups({
-            model: auxModel,
-            userText: promptLeaf.content,
-            replyText: text,
-            abortSignal: abort.signal,
-          });
-          logAux('aux_followup', auxModel, null, 700, 60);
-          // always emit so the client can drop its "Suggesting…" skeleton
-          send({ type: 'followups', messageId: asst.id, items });
-        } catch (err) {
-          req.log.warn({ err }, 'followup generation failed (non-fatal)');
-          try { send({ type: 'followups', messageId: asst.id, items: [] }); } catch { /* socket gone */ }
+        const clean = promptLeaf?.content?.trim().replace(/\s+/g, ' ').split(' ').slice(0, 7).join(' ').slice(0, 72);
+        if (clean) {
+          db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(clean, conv.id);
+          send({ type: 'title', title: clean });
         }
       }
 
@@ -813,7 +765,6 @@ export function registerChatPost(app) {
       }
     } finally {
       turnDelta?.clearTimer();
-      clearInterval(pingPrimary);
       releaseGpu?.();
       // Always save a partial assistant row when we never reached a clean `done`.
       // This is what lets "continue" see the error + work instead of wiping the turn.
@@ -845,7 +796,6 @@ export function registerChatPost(app) {
           try { setLeaf(conv.id, promptLeaf.id); } catch { /* non-fatal */ }
         }
       }
-      job.listeners.delete(writePrimary);
       const st = aborted ? 'stopped'
         : (job.finalMsg ? (job.state.error ? 'error' : 'done')
           : (job.state.error ? 'error' : 'done'));
@@ -855,9 +805,7 @@ export function registerChatPost(app) {
         try { fn({ type: 'stream_end' }); } catch { /* ignore */ }
       }
       job.listeners.clear();
-      if (!reply.raw.writableEnded) {
-        try { reply.raw.end(); } catch { /* already gone */ }
-      }
+    }
     }
   });
 

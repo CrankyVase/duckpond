@@ -23,7 +23,6 @@ const DEFAULTS = {
 
 const clamp = (n, lo, hi, fb) => (Number.isFinite(+n) ? Math.min(hi, Math.max(lo, +n)) : fb);
 const oneOf = (v, list, fb) => (list.some(([id]) => id === v) ? v : fb);
-const hexOk = (v) => (/^#[0-9a-fA-F]{6}$/.test(String(v ?? '')) ? v : '');
 
 export function sanitizeEffects(raw) {
   const e = { ...DEFAULT_EFFECTS, ...(raw ?? {}) };
@@ -35,8 +34,6 @@ export function sanitizeEffects(raw) {
     anim: oneOf(e.anim, ANIM_MODES, 'subtle'),
     lab: !!e.lab,
     bg: oneOf(e.bg, BG_MODES, 'solid'),
-    bgA: hexOk(e.bgA), bgB: hexOk(e.bgB),
-    bgAngle: clamp(e.bgAngle, 0, 360, 160),
     uiScale: clamp(e.uiScale, 0.85, 1.25, 1),
     font: oneOf(e.font, FONT_OPTIONS, 'default'),
   };
@@ -87,8 +84,7 @@ export function applyTheme(t = theme) {
   const colors = { ...resolveColors(t) };
   const eNow = sanitizeEffects(t.effects);
 
-  // Glass makes the whole app breathe: surface tokens go translucent so the
-  // background (especially gradients) shows through every panel and card.
+  // Glass makes surface tokens translucent while keeping a flat theme color.
   // Chrome surfaces (sidebar/topbar/dock) additionally get backdrop blur via
   // app.css; cards stay blur-free so hundreds of bubbles stay cheap.
   if (eNow.glass !== 'off') {
@@ -120,9 +116,6 @@ export function applyTheme(t = theme) {
   el.dataset.bg = e.bg;
   el.style.setProperty('--glass-blur', `${e.glassBlur}px`);
   el.style.setProperty('--glass-a', `${Math.round(e.glassOpacity * 100)}%`);
-  el.style.setProperty('--bg-grad-a', e.bgA || colors.bg);
-  el.style.setProperty('--bg-grad-b', e.bgB || colors['accent-dim']);
-  el.style.setProperty('--bg-angle', `${e.bgAngle}deg`);
   el.style.setProperty('--ui-scale', String(e.uiScale));
   const font = FONT_OPTIONS.find(([id]) => id === e.font) ?? FONT_OPTIONS[0];
   el.style.setProperty('--sans', font[2]);
@@ -133,7 +126,9 @@ export function applyTheme(t = theme) {
     styleEl.id = 'dp-user-css';
     document.head.appendChild(styleEl);
   }
-  styleEl.textContent = t.customCss ?? '';
+  // Old saved themes may contain decorative blends. Never apply those rules.
+  const css = String(t.customCss ?? '');
+  styleEl.textContent = /\b(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/i.test(css) ? '' : css;
 }
 
 // snapshot/restore lets the studio preview freely and revert on cancel

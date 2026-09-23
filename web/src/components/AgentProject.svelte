@@ -7,7 +7,7 @@
   import { api } from '../lib/api.js';
   let projects = $state([]), selected = $state(''), name = $state(''), folder = $state('');
   let dialog;
-  let setupMode = $state('existing');
+  let setupMode = $state('new');
   let expanded = $state(false), error = $state(''), busy = $state(false), priorities = $state('');
   $effect(() => { if (expanded) dialog?.showModal(); else dialog?.close(); });
   const project = $derived(projects.find(p => String(p.id) === selected));
@@ -48,13 +48,22 @@
 <section class="projectbar" aria-label="Agent project">
   <div class="projectrow">
     <span class="pico"><FolderOpen size={13} /></span>
-    <select id="agent-project" bind:value={selected} disabled={busy || !!app.streaming} onchange={() => selectProject(selected)}>
-      {#each projects as p}<option value={String(p.id)}>{p.name}{p.host_path ? ' · linked folder' : ''}</option>{/each}
-    </select>
-    <span class="project-path" title={project?.host_path || 'Isolated project workspace'}>
-      {project?.host_path || 'sandbox workspace'}
+    {#if projects.length}
+      <select id="agent-project" aria-label="Current project" bind:value={selected}
+        disabled={busy || !!app.streaming} onchange={() => selectProject(selected)}>
+        <option value="" disabled>Select a project</option>
+        {#each projects as p}<option value={String(p.id)}>{p.name}{p.host_path ? ' · linked folder' : ''}</option>{/each}
+      </select>
+    {:else}
+      <span class="empty-project">No project attached</span>
+    {/if}
+    <span class="project-path" title={project?.host_path || 'Agent workspace'}>
+      {project?.host_path || (project ? 'Isolated workspace' : 'Choose a project or describe a task below')}
     </span>
-    <button class="setup-trigger" onclick={() => expanded = true} aria-haspopup="dialog"><Plus size={13} /> Project setup</button>
+    <button class="setup-trigger" onclick={() => expanded = true} aria-haspopup="dialog"
+      aria-label="Project setup" title="Open an existing folder or create a project">
+      <Plus size={13} /> <span class="setup-label">{project ? 'Projects' : 'Open project'}</span>
+    </button>
   </div>
   <dialog bind:this={dialog} onclose={() => expanded = false}>
     <div class="dialog-head"><div><h2>Project setup</h2><p>Open your source folder or start a new project.</p></div><button class="close" onclick={() => expanded = false} aria-label="Close project setup"><X size={18} /></button></div>
@@ -107,6 +116,7 @@
     padding: 3px 2px;
   }
   select:hover { color: var(--text); }
+  .empty-project { font-size: 13px; color: var(--text-dim); white-space: nowrap; }
   label, p { font-size: 12px; color: var(--text-dim); }
   .setup { display: grid; gap: 10px; padding: 20px 24px 24px; }
   .setup label { display: grid; gap: 6px; }
@@ -145,5 +155,11 @@
   @media (max-width: 768px) {
     .projectbar { padding: 7px 12px; }
     .setup-trigger { min-height: 34px; padding: 6px 10px; }
+    .projectrow { gap: 6px; }
+    .empty-project, select { flex: 1; min-width: 0; }
+  }
+  @media (max-width: 390px) {
+    .setup-trigger { width: 36px; justify-content: center; padding: 0; }
+    .setup-label { display: none; }
   }
 </style>

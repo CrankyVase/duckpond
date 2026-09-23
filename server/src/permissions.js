@@ -36,6 +36,10 @@ export const TOOL_RISK = {
   start_server: RISK.EXEC,
   stop_server: RISK.EXEC,
   read_file: RISK.READ,
+  list_documents: RISK.READ,
+  search_documents: RISK.READ,
+  read_document: RISK.READ,
+  delegate_analysis: RISK.READ,
   web_search: RISK.READ,
   fetch_page: RISK.READ,
   screenshot: RISK.READ,
@@ -57,7 +61,8 @@ export const TOOL_RISK = {
   github_commit: RISK.EXTERNAL,
   github_create_branch: RISK.EXTERNAL,
   github_open_pr: RISK.EXTERNAL,
-  generate_image: RISK.EXTERNAL,
+  // Local GPU work creates a local artifact; it does not publish anything.
+  generate_image: RISK.EXEC,
 };
 
 export const riskOf = (name) => TOOL_RISK[name] ?? RISK.WRITE; // unknown → cautious
@@ -67,7 +72,9 @@ export const riskOf = (name) => TOOL_RISK[name] ?? RISK.WRITE; // unknown → ca
 // default and is what almost everyone should stay on.
 export const MODES = {
   //            read    write   exec    external
-  open:      { read: 'allow', write: 'allow', exec: 'allow', external: 'allow' },
+  // Autonomous project work can edit, install and verify without stopping for
+  // each command. Publishing and remote writes remain a separate decision.
+  open:      { read: 'allow', write: 'allow', exec: 'allow', external: 'ask' },
   balanced:  { read: 'allow', write: 'allow', exec: 'ask',   external: 'ask' },
   careful:   { read: 'allow', write: 'ask',   exec: 'ask',   external: 'ask' },
   readonly:  { read: 'allow', write: 'deny',  exec: 'deny',  external: 'deny' },
@@ -256,7 +263,7 @@ export function capabilityManifest(userId, { tools = [], hasWorkspace = false, h
   lines.push('');
   lines.push('Risk tiers: ' + Object.entries(TIER_BLURB).map(([k, v]) => `${k} = ${v}`).join('; ') + '.');
   lines.push('A denied call comes back as `DENIED: …`. That is a real answer from the user, not an error to route around: do not retry it, do not reach for another tool to accomplish the same thing, and do not pretend it succeeded.');
-  if (!hasWorkspace) {
+  if (!hasWorkspace && names.includes('start_project')) {
     lines.push('');
     lines.push('You have no workspace yet — `start_project` creates one. Do that only for real multi-file work, not to answer a question.');
   }

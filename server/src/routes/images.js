@@ -1,15 +1,19 @@
-// Media studio routes (image + video + audio). The heavy lifting (bridge
-// POST + progress polling + saving) lives in ../imagegen.js, shared with the
-// in-chat generate_image tool.
+// Image/model and gallery routes. Generation requests enter the durable media
+// job runner, which uses imagegen.js for bridge progress and saved results.
 import { createReadStream, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { checkUserContent } from '../contentFilter.js';
-import { bridgePost, bridgeModels, generateViaBridge, getUserImagePrefs, IMAGES_DIR, MEDIA_DIR, stepsForQuality } from '../imagegen.js';
+import { bridgePost, bridgeModels, IMAGES_DIR, MEDIA_DIR, warmImageModel } from '../imagegen.js';
 import { acquireGpu } from '../gpuqueue.js';
+import { activeMediaJobCount, createMediaJob } from '../mediaJobs.js';
+import { prepareMediaGpu } from '../mediaGpu.js';
+import { gpuVram, listModels, reclaimIdleModel } from '../llama.js';
 
-const MIME = { png: 'image/png', mp4: 'video/mp4', wav: 'audio/wav' };
+const MIME = { png: 'image/png', webp: 'image/webp', mp4: 'video/mp4', wav: 'audio/wav' };
+let warming = false;
+let warmState = null;
 
 export default async function imageRoutes(app) {
   app.addHook('preHandler', requireAuth);
@@ -18,11 +22,44 @@ export default async function imageRoutes(app) {
   app.get('/api/images/models', async () => {
     const m = await bridgeModels().catch(() => ({ available: false, models: [] }));
     if (!m.available) return { available: false, models: [] };
-    return { available: true, models: m.models, default_model: m.default_model ?? 'auto' };
+    if (warmState?.type === 'error' && m.models.some((item) => item.id === warmState.model && item.loaded)) warmState = null;
+    return { available: true, models: m.models, default_model: m.default_model ?? 'auto', model_operation: warmState ?? m.model_operation };
+  });
+
+  // Start the slow Qwen load in the server. The browser receives an immediate
+  // response and can watch /api/images/models through a tunnel or after refresh.
+  app.post('/api/images/warm', async (req, reply) => {
+    if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    if (warming || activeMediaJobCount() > 0) return reply.code(409).send({ error: 'The image engine is busy. Wait for the current job to finish.' });
+    const model = String(req.body?.model ?? '');
+    const catalog = await bridgeModels();
+    const selected = catalog.models?.find((m) => m.id === model && m.task === 'image' && m.ready);
+    if (!selected || selected.className !== 'QwenImage21Pipeline') return reply.code(400).send({ error: 'Choose a ready Qwen-Image 2.1 model.' });
+    if (selected.loaded) return { ok: true, loaded: true };
+    warming = true;
+    warmState = { type: 'loading', model };
+    void (async () => {
+      let release = null;
+      try {
+        release = await acquireGpu();
+        await prepareMediaGpu({ models: catalog, requested: model, task: 'image',
+          memory: gpuVram, list: listModels, reclaim: reclaimIdleModel });
+        await warmImageModel(model);
+        warmState = null;
+      } catch (error) {
+        warmState = { type: 'error', model, message: error.message };
+        app.log.error({ err: error, model }, 'Image model prewarm failed');
+      } finally {
+        release?.();
+        warming = false;
+      }
+    })();
+    return reply.code(202).send({ ok: true, loading: true, model });
   });
 
   app.post('/api/images/unload', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
+    if (warming || activeMediaJobCount() > 0) return reply.code(409).send({ error: 'Wait for the image engine to finish before unloading.' });
     const model = req.body?.model;
     if (typeof model !== 'string' || !model) return reply.code(400).send({ error: 'model required' });
     try { return await bridgePost('/v1/models/unload', { model }); }
@@ -42,7 +79,7 @@ export default async function imageRoutes(app) {
     const row = db.prepare('SELECT file FROM images WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
     if (!row) return reply.code(404).send({ error: 'not found' });
     const ext = row.file.split('.').pop()?.toLowerCase() ?? 'png';
-    const dir = ext === 'png' ? IMAGES_DIR : MEDIA_DIR;
+    const dir = ext === 'png' || ext === 'webp' ? IMAGES_DIR : MEDIA_DIR;
     reply.header('cache-control', 'private, max-age=60, must-revalidate');
     reply.header('pragma', 'no-cache');
     reply.header('vary', 'Cookie');
@@ -55,8 +92,11 @@ export default async function imageRoutes(app) {
     if (!row || (row.user_id !== req.user.id && req.user.role !== 'owner')) {
       return reply.code(404).send({ error: 'not found' });
     }
+    try { unlinkSync(join(/\.(png|webp)$/i.test(row.file) ? IMAGES_DIR : MEDIA_DIR, row.file)); }
+    catch (error) {
+      if (error.code !== 'ENOENT') return reply.code(500).send({ error: 'Could not remove the saved file. Please try again.' });
+    }
     db.prepare('DELETE FROM images WHERE id = ?').run(row.id);
-    try { unlinkSync(join(row.file.endsWith('.png') ? IMAGES_DIR : MEDIA_DIR, row.file)); } catch { /* already gone */ }
     try {
       const max = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM images').get()?.m ?? 0;
       const keep = Math.max(max, row.id);
@@ -72,89 +112,17 @@ export default async function imageRoutes(app) {
     return { ok: true };
   });
 
-  // SSE: {type:'progress'} phases/steps, {type:'preview', b64} frames,
-  // {type:'done', images:[...]} — or {type:'error', message}.
+  // Legacy path now starts a durable job and returns its status URL. The old
+  // long SSE request was tied to browser and tunnel lifetime.
   app.post('/api/images/generate', { bodyLimit: 48 * 1024 * 1024 }, async (req, reply) => {
-    const {
-      prompt, model = 'auto', size = '1024x1024', steps = null, n = 1,
-      negative = '', enhance = true, seed = null, quality = null, trueCfg = null,
-      task = 'image', numFrames = null, fps = null, audioDuration = null, duration = null,
-      refAudioB64 = null, refText = null, imagesB64 = null, lyrics = null,
-      speaker = null, language = null, instruct = null,
-    } = req.body ?? {};
-    if (typeof prompt !== 'string' || !prompt.trim()) return reply.code(400).send({ error: 'prompt required' });
-    if (!['image', 'video', 'audio', 'tts'].includes(task)) return reply.code(400).send({ error: 'unknown media task' });
-
-    const filter = checkUserContent(req.user.id, [prompt, lyrics].filter(Boolean).join('\n'), 'image');
-    if (!filter.ok) {
-      reply.raw.writeHead(200, {
-        'content-type': 'text/event-stream',
-        'cache-control': 'no-cache',
-        connection: 'keep-alive',
-        'x-accel-buffering': 'no',
-      });
-      try {
-        reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: filter.reason, code: filter.code })}\n\n`);
-      } catch { /* */ }
-      reply.raw.end();
-      return;
-    }
-
-    reply.raw.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-      'x-accel-buffering': 'no',
-    });
-    const send = (obj) => {
-      if (reply.raw.writableEnded || reply.raw.destroyed) return;
-      try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
-    };
-    const abort = new AbortController();
-    reply.raw.on('close', () => { if (!reply.raw.writableEnded) abort.abort(); });
-
-    // SSE keep-alive: Cloudflare kills quiet connections at ~100s with a 524
-    // error page. Model loading can sit silent for minutes (worse when the
-    // bridge is struggling), so emit a ping the UI ignores until real
-    // progress flows again. Never let the stream look idle from outside.
-    const heartbeat = setInterval(() => send({ type: 'ping' }), 15_000);
-
-    let releaseGpu = null;
+    const body = req.body ?? {};
+    const prompt = String(body.prompt ?? '').trim();
+    if (!prompt) return reply.code(400).send({ error: 'prompt required' });
+    const filter = checkUserContent(req.user.id, [prompt, body.lyrics].filter(Boolean).join('\n'), 'image');
+    if (!filter.ok) return reply.code(400).send({ error: filter.reason, code: filter.code });
     try {
-      try {
-        releaseGpu = await acquireGpu({
-          signal: abort.signal,
-          onQueued: (position) => send({ type: 'progress', phase: 'queued', position }),
-        });
-      } catch { return; } // aborted while queued
-      const prefs = getUserImagePrefs(req.user.id);
-      const resolvedSteps = steps != null && steps !== ''
-        ? Number(steps)
-        : stepsForQuality(quality || prefs.quality);
-      const r = await generateViaBridge({
-        userId: req.user.id, prompt, model, size,
-        steps: resolvedSteps, quality, trueCfg,
-        n, negative, enhance, seed, task,
-        numFrames, fps, audioDuration, duration, refAudioB64, refText, imagesB64, lyrics,
-        speaker, language, instruct,
-        onProgress: send, signal: abort.signal,
-      });
-      send({
-        type: 'done',
-        images: r.images,
-        enhanced_prompt: r.enhanced,
-        model_used: r.model_used,
-        steps_used: r.steps_used,
-        steps_requested: r.steps_requested,
-        steps_capped: r.steps_capped,
-      });
-    } catch (e) {
-      req.log.error({ err: e }, `${task} generation failed`);
-      send({ type: 'error', message: e.message });
-    } finally {
-      clearInterval(heartbeat);
-      releaseGpu?.();
-      reply.raw.end();
-    }
+      const job = createMediaJob(req.user.id, body);
+      return reply.code(202).send({ job, status_url: `/api/media/jobs/${job.id}` });
+    } catch (error) { return reply.code(error?.code === 400 ? 400 : 500).send({ error: error.message }); }
   });
 }

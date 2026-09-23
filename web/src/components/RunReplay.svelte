@@ -8,7 +8,7 @@
 
   let events = $state([]);
   let run = $state(null);
-  let open = $state(true); // the work IS the message — hide it only on demand
+  let open = $state(false);
 
   const TERMINAL = new Set(['done', 'error', 'stopped']);
   const SKIP = new Set(['delta', 'tool_delta', 'status', 'image_job', 'image_progress', 'image_preview', 'image_done']);
@@ -33,6 +33,10 @@
 
   const edits = $derived(events.filter((e) => e.type === 'diff').length);
   const cmds = $derived(events.filter((e) => e.type === 'tool_output').length);
+  const failed = $derived(events.some((e) => e.type === 'error'
+    || (e.type === 'tool_output' && (e.timedOut || (e.exitCode != null && e.exitCode !== 0)))
+    || (e.type === 'tool_result' && /^(ERROR:|DENIED:|unknown tool:|exit (?!0(?:\s|$)))/.test(e.result || ''))));
+  $effect(() => { if (failed || run?.status === 'error') open = true; });
   const summary = $derived([
     edits && `${edits} file edit${edits > 1 ? 's' : ''}`,
     cmds && `${cmds} command${cmds > 1 ? 's' : ''}`,

@@ -426,6 +426,12 @@
             <div class="perr">last error: {p.last_error}</div>
           {/if}
 
+          <button class="catalog-open" onclick={() => toggleExpand(p)} aria-expanded={expanded === p.id}>
+            {#if expanded === p.id}<ChevronDown size={15} />{:else}<ChevronRight size={15} />{/if}
+            Browse {p.models ?? 0} models
+          </button>
+          <details class="provider-details">
+            <summary>Connection settings <span>Cache, imports, spending, and maintenance</span></summary>
           <div class="prow">
             <div class="cachetog">
               <span class="ct">Response cache</span>
@@ -440,10 +446,6 @@
               {/if}
             </div>
             <div class="pbtns">
-              <button class="ghost sm" onclick={() => toggleExpand(p)} title="Browse model catalog">
-                {#if expanded === p.id}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
-                Models
-              </button>
               {#if isOwner}
                 <button class="ghost sm" onclick={() => syncNow(p)} disabled={syncing[p.id]} title="Re-fetch the model catalog">
                   <RefreshCw size={14} />{syncing[p.id] ? 'Syncing…' : 'Sync now'}
@@ -507,6 +509,7 @@
               <span class="capspend mono">spent {usd2(p.month_spend)} this month</span>
             </div>
           </div>
+          </details>
 
           {#if expanded === p.id}
             <div class="mtable">
@@ -871,15 +874,15 @@
   }
 
   .prov { max-width: 1180px; }
-  .head { margin-bottom: 28px; }
-  .view-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--border-soft); margin-bottom: 30px; overflow-x: auto; }
+  .head { margin-bottom: 20px; }
+  .view-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--border-soft); margin-bottom: 20px; overflow-x: auto; }
   .view-tabs button { display: flex; align-items: center; gap: 8px; white-space: nowrap; background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--text-dim); padding: 12px 0; font-size: 13px; }
   .view-tabs button.active { color: var(--text); border-bottom-color: var(--text); }
   .view-tabs span { font-size: 11px; background: var(--bg-raised); padding: 0 6px; border-radius: 4px; }
-  .view-intro { margin-bottom: 24px; }
+  .view-intro { margin-bottom: 18px; }
   .view-intro h2 { font-size: 17px; margin: 0 0 6px; font-weight: 550; letter-spacing: -.02em; }
   .view-intro p { font-size: 13px; color: var(--text-dim); margin: 0; max-width: 660px; }
-  .surface { padding: 24px; border-radius: calc(10px * var(--rf)); background: var(--bg); }
+  .surface { padding: 20px; border-radius: calc(10px * var(--rf)); background: var(--bg); }
   .phead { gap: 14px; }
   .picon { width: 40px; height: 40px; }
   .pname { font-size: 17px; letter-spacing: -.02em; }
@@ -887,6 +890,12 @@
   .prow { padding-top: 16px; margin-top: 16px; }
   .ct { min-width: 134px; }
   .cachetog { flex-wrap: wrap; }
+  .catalog-open { display:inline-flex; align-items:center; gap:8px; min-height:38px; margin:4px 0 0 54px; padding:0 12px; border:1px solid var(--border-soft); border-radius:8px; background:var(--bg-raised); color:var(--text); font-size:12.5px; }
+  .catalog-open:hover { border-color:var(--accent-dim); }
+  .provider-details { margin:18px 0 0; border-top:1px solid var(--border-soft); }
+  .provider-details summary { cursor:pointer; padding:16px 0 0; color:var(--text-dim); font-size:12.5px; font-weight:600; }
+  .provider-details summary span { display:block; margin:5px 0 0 16px; color:var(--text-faint); font-size:11.5px; font-weight:400; line-height:1.4; }
+  .provider-details .prow:first-of-type { border-top:0; margin-top:4px; }
   .form { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .form label { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-dim); min-width: 0; }
   .form label:nth-child(2), .formbtns, .testok, .testerr { grid-column: 1 / -1; }
@@ -903,6 +912,8 @@
     .view-tabs { gap: 20px; margin-bottom: 24px; }
     .surface { padding: 18px; }
     .pmeta { margin-left: 0; }
+    .catalog-open { margin-left:0; }
+    .provider-details summary span { display:block; margin:4px 0 0 16px; line-height:1.4; }
     .form { grid-template-columns: 1fr; }
     .form label:nth-child(2) { grid-row: auto; }
     .pbtns { width: 100%; }

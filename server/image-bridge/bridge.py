@@ -30,9 +30,10 @@ import tempfile
 import threading
 import time
 import traceback
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 import torch
 import numpy as np
@@ -59,8 +60,13 @@ GEN_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 STATE = {"tag": None, "active": False, "phase": None, "step": None, "steps": None,
          "image": None, "n": None, "enhanced_prompt": None,
-         "started_at": None, "eta_seconds": None, "elapsed": None}
+         "started_at": None, "eta_seconds": None, "elapsed": None,
+         "preview_b64": None, "preview_seq": 0}
 CANCEL_TAGS = set()  # tags a client has asked to stop — checked between denoise steps
+PENDING_TAGS = set()  # requests admitted by HTTP but waiting for GEN_LOCK
+RESULT_DIR = Path(os.environ.get("IMAGE_BRIDGE_RESULT_DIR", str(HF_HOME / "duckpond-bridge-results")))
+RESULT_TAG = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+MODEL_OPERATION = None
 STALL_LIMIT_SECONDS = 300.0
 STALL_EXIT_SECONDS = float(os.environ.get("IMAGE_STALL_EXIT_SECONDS", "600"))
 CPU_MODELS = set(filter(None, os.environ.get("IMAGE_CPU_MODELS", "").split(",")))
@@ -103,6 +109,41 @@ _loaded = {"id": None, "pipe": None, "kind": None}
 
 class JobCancelled(Exception):
     pass
+
+
+def _result_path(tag):
+    if not isinstance(tag, str) or not RESULT_TAG.fullmatch(tag):
+        return None
+    return RESULT_DIR / f"{tag}.json"
+
+
+def _save_result(tag, result):
+    """Keep a finished result until Duckpond confirms it is in the library."""
+    path = _result_path(tag)
+    if path is None:
+        return
+    RESULT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = RESULT_DIR / f".{tag}.{threading.get_ident()}.partial"
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(result, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _prune_results():
+    if not RESULT_DIR.is_dir():
+        return
+    cutoff = time.time() - 7 * 86400
+    for path in RESULT_DIR.glob("*.json"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- discovery
@@ -305,7 +346,11 @@ def load_pipeline(model_id, info):
             )
             pipe.vae.enable_group_offload(**options)
             if hasattr(pipe.vae, 'enable_tiling'):
-                pipe.vae.enable_tiling()
+                # The stock 256px tiles leave visible vertical/horizontal
+                # bands even at 512px. Decode small edits as one tile and
+                # use wider tiles with overlap for larger canvases.
+                pipe.vae.enable_tiling(tile_sample_min_height=512, tile_sample_min_width=512,
+                                       tile_sample_stride_height=448, tile_sample_stride_width=448)
         else:
             pipe.enable_model_cpu_offload()
     else:
@@ -342,6 +387,8 @@ def decode_reference_images(body):
             scale = 2048 / widest
             image = image.resize((max(8, int(image.width * scale) // 8 * 8),
                                   max(8, int(image.height * scale) // 8 * 8)), Image.Resampling.LANCZOS)
+        from image_safety import require_safe_image
+        require_safe_image(image, label='reference photo')
         images.append(image)
     return images
 
@@ -634,6 +681,97 @@ def _callback_kwargs(pipe, on_step):
     return {}
 
 
+def _qwen_sample(pipe, latents, width, height):
+    sample = pipe._unpack_latents(latents.detach(), height, width, pipe.vae_scale_factor)
+    sample = sample.to(pipe.vae.dtype)
+    config = pipe.vae.config
+    if getattr(config, 'latents_mean', None) is not None:
+        mean = torch.as_tensor(config.latents_mean, device=sample.device, dtype=sample.dtype).view(1, -1, 1, 1, 1)
+        std = torch.as_tensor(config.latents_std, device=sample.device, dtype=sample.dtype).view(1, -1, 1, 1, 1)
+        sample = sample * std + mean
+    return sample
+
+
+def _decode_qwen_sample(pipe, sample):
+    picture = pipe.vae.decode(sample, return_dict=False)[0]
+    if picture.ndim == 5:
+        picture = picture[:, :, 0]
+    return pipe.image_processor.postprocess(picture, output_type='pil')[0].convert('RGB')
+
+
+def encode_step_preview(pipe, latents, width, height):
+    """Decode at native latent resolution; resize only the completed RGB image."""
+    if not hasattr(pipe, '_unpack_latents') or not hasattr(pipe, 'vae'):
+        return None
+    with torch.inference_mode():
+        image = _decode_qwen_sample(pipe, _qwen_sample(pipe, latents, width, height))
+        image.thumbnail((512, 512))
+        from image_safety import require_safe_image
+        require_safe_image(image, threshold=0.85)
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=82, optimize=False)
+        return base64.b64encode(buffer.getvalue()).decode('ascii')
+
+
+def _seam_weights(length, stride, tile):
+    """Select overlap bands from the primary tiled decode with soft edges."""
+    overlap = tile - stride
+    weights = np.zeros(length, dtype=np.float32)
+    if overlap <= 0:
+        return weights
+    feather = min(16, overlap // 4)
+    for edge in range(stride, length, stride):
+        lo = max(0, edge - feather)
+        hi = min(length, edge + overlap + feather)
+        pos = np.arange(lo, hi)
+        band = np.minimum((pos - (edge - feather)) / max(1, feather),
+                          ((edge + overlap + feather) - pos) / max(1, feather))
+        weights[lo:hi] = np.maximum(weights[lo:hi], np.clip(band, 0, 1))
+    return weights
+
+
+def _repair_qwen_seams(base, shifted, vae):
+    """Take color from a second tile alignment only where the first has seams."""
+    from PIL import Image
+    width, height = base.size
+    wx = _seam_weights(width, vae.tile_sample_stride_width, vae.tile_sample_min_width)
+    wy = _seam_weights(height, vae.tile_sample_stride_height, vae.tile_sample_min_height)
+    weight = np.maximum(wx[None, :], wy[:, None])[:, :, None]
+    if not np.any(weight):
+        return base
+    original = np.asarray(base.convert('YCbCr'), dtype=np.float32)
+    alternate = np.asarray(shifted.convert('YCbCr'), dtype=np.float32)
+    original[:, :, 1:] += weight * (alternate[:, :, 1:] - original[:, :, 1:])
+    corrected = Image.fromarray(np.clip(original, 0, 255).astype(np.uint8), 'YCbCr').convert('RGB')
+    rgb = np.asarray(base, dtype=np.float32)
+    rgb += weight * (np.asarray(corrected, dtype=np.float32) - rgb)
+    return Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), 'RGB')
+
+
+def decode_qwen_final(pipe, latents, width, height):
+    """Decode full resolution and soften color seams without blurring detail."""
+    with torch.inference_mode():
+        sample = _qwen_sample(pipe, latents, width, height)
+        base = _decode_qwen_sample(pipe, sample)
+        if (not getattr(pipe.vae, 'use_tiling', False)
+                or (width <= pipe.vae.tile_sample_min_width and height <= pipe.vae.tile_sample_min_height)
+                or max(width, height) > 1024):
+            return base
+        try:
+            # Six latent cells shift the tile grid by 96 output pixels. The
+            # second grid is clean across the first grid's 64px overlap bands.
+            shifted_sample = torch.nn.functional.pad(sample, (6, 2, 6, 2, 0, 0), mode='replicate')
+            shifted = _decode_qwen_sample(pipe, shifted_sample)
+            offset = 6 * pipe.vae_scale_factor
+            shifted = shifted.crop((offset, offset, offset + width, offset + height))
+            return _repair_qwen_seams(base, shifted, pipe.vae)
+        except Exception as exc:
+            print(f'[bridge] seam correction skipped: {exc}', flush=True)
+            if DEVICE == 'cuda':
+                torch.cuda.empty_cache()
+            return base
+
+
 def run_job(body, tag):
     from media_catalog import validate_request
     validate_request(body)
@@ -661,6 +799,12 @@ def run_job(body, tag):
     negative = body.get("negative_prompt") or None
     use_cfg = true_cfg > 1.0
     images = decode_reference_images(body)
+    preview_every = int(body.get('preview_every') or 0) if task == 'image' else 0
+    if preview_every not in (0, 1, 2, 4, 8):
+        raise ValueError('preview_every must be 0, 1, 2, 4, or 8')
+    output_format = str(body.get('output_format') or 'png').lower() if task == 'image' else 'png'
+    if output_format not in ('png', 'webp'):
+        raise ValueError('output_format must be png or webp')
     if info.get("needs_image") and not images:
         raise ValueError("Add a reference photo for this model")
     if info.get("kind") == "comfy":
@@ -690,6 +834,18 @@ def run_job(body, tag):
 
     pipe = load_pipeline(model_id, info)
 
+    # Multiple Qwen variations run sequentially to fit 16 GB cards. Encode
+    # the same text once instead of streaming the large Qwen3-VL encoder from
+    # system RAM for every variation. Condition images need their own masks.
+    shared_embeds = None
+    if task == 'image' and n > 1 and not images and info.get('class') == 'QwenImage21Pipeline':
+        with torch.inference_mode():
+            positive, positive_mask, _ = pipe.encode_prompt(prompt=prompt)
+            shared_embeds = {'prompt_embeds': positive, 'prompt_embeds_mask': positive_mask}
+            if use_cfg and negative:
+                neg, neg_mask, _ = pipe.encode_prompt(prompt=negative)
+                shared_embeds.update(negative_prompt_embeds=neg, negative_prompt_embeds_mask=neg_mask)
+
     generator = None
     if seed is not None:
         generator = seed_generator(seed)
@@ -701,17 +857,35 @@ def run_job(body, tag):
             raise JobCancelled(tag)
         step = args[1] if len(args) == 4 else args[0]
         touch_progress(phase="denoising", step=step + 1, steps=steps)
+        if task == 'image' and preview_every and len(args) == 4 and ((step + 1) % preview_every == 0 or step + 1 == steps):
+            latents = args[-1].get('latents') if isinstance(args[-1], dict) else None
+            if latents is not None:
+                try:
+                    preview = encode_step_preview(pipe, latents, w, h)
+                    if preview:
+                        with STATE_LOCK:
+                            STATE['preview_b64'] = preview
+                            STATE['preview_seq'] += 1
+                except ValueError as exc:
+                    raise exc
+                except Exception as exc:
+                    print(f'[bridge] preview decode skipped: {exc}', flush=True)
         return args[-1] if len(args) == 4 else None
 
     results_b64 = []
     for i in range(n):
         if tag in CANCEL_TAGS:
             raise JobCancelled(tag)
-        touch_progress(phase="generating", image=i + 1, n=n, step=0, steps=steps)
+        touch_progress(phase="generating", image=i + 1, n=n, step=0, steps=steps, preview_b64=None)
 
         kwargs = dict(prompt=prompt, num_inference_steps=steps,
                       generator=generator, **_callback_kwargs(pipe, on_step))
-        if use_cfg and negative:
+        if shared_embeds:
+            kwargs['prompt'] = None
+            kwargs.update(shared_embeds)
+        if preview_every and 'callback_on_step_end' in kwargs:
+            kwargs['callback_on_step_end_tensor_inputs'] = ['latents']
+        if use_cfg and negative and not shared_embeds:
             kwargs["negative_prompt"] = negative
         if task == "image":
             try:
@@ -720,8 +894,17 @@ def run_job(body, tag):
                 _params = {}
             if "true_cfg_scale" in _params:
                 kwargs["true_cfg_scale"] = true_cfg
+            if info.get('class') == 'QwenImage21Pipeline':
+                kwargs['output_type'] = 'latent'
         if images:
             kwargs["image"] = images if len(images) > 1 else images[0]
+            if info.get('class') == 'QwenImage21Pipeline':
+                # Qwen uses this for both its vision encoder and reference VAE.
+                # 512 loses details needed for faithful photo edits; match the
+                # chosen canvas up to the pipeline's 1024px default instead.
+                reference_budget = 1024 if len(images) == 1 else 768 if len(images) == 2 else 512
+                kwargs['output_resolution'] = min(reference_budget, max(w, h))
+                touch_progress(phase='encoding_reference', image=i + 1, n=n)
         if task == "audio":
             params = inspect.signature(pipe.__call__).parameters
             duration_key = "audio_end_in_s" if "audio_end_in_s" in params else "audio_length_in_s"
@@ -737,7 +920,10 @@ def run_job(body, tag):
         else:
             result = call_pipeline(pipe, dict(kwargs, width=w, height=h))
             buf = io.BytesIO()
-            result.images[0].save(buf, format="PNG")
+            image = decode_qwen_final(pipe, result.images, w, h) if info.get('class') == 'QwenImage21Pipeline' else result.images[0]
+            from image_safety import require_safe_image
+            require_safe_image(image)
+            image.save(buf, format=output_format.upper(), **({'quality': 95, 'method': 4} if output_format == 'webp' else {}))
             results_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
         if tag in CANCEL_TAGS:
             raise JobCancelled(tag)
@@ -752,6 +938,7 @@ def run_job(body, tag):
         "steps_requested": steps,
         "steps_capped": False,
         "task": task,
+        "output_format": output_format if task == 'image' else None,
     }
 
 
@@ -826,13 +1013,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/v1/results":
+            tag = parse_qs(parsed.query).get("tag", [None])[0]
+            path = _result_path(tag)
+            if path is None:
+                return self._json(400, {"error": "valid tag required"})
+            try:
+                return self._json(200, json.loads(path.read_text(encoding="utf-8")))
+            except FileNotFoundError:
+                with STATE_LOCK:
+                    active = (STATE.get("active") and STATE.get("tag") == tag) or tag in PENDING_TAGS
+                return self._json(202 if active else 404, {"active": bool(active)})
+            except (OSError, ValueError) as exc:
+                return self._json(500, {"error": f"Could not read saved result: {exc}"})
         if parsed.path == "/health":
             models = discover_models()
             for model_id, info in models.items():
                 info["loaded"] = model_id == _loaded["id"] or model_id == getattr(_tts.get("backend"), "active_model_name", None)
                 info["device"] = "cpu" if model_id in CPU_MODELS else DEVICE
-            return self._json(200, {"ok": True, "models": models, "default_model": DEFAULT_MODEL or "auto"})
+            operation = MODEL_OPERATION
+            if operation and operation.get("type") == "error" and models.get(operation.get("model"), {}).get("loaded"):
+                operation = None
+            return self._json(200, {"ok": True, "models": models, "default_model": DEFAULT_MODEL or "auto",
+                                    "model_operation": operation})
         if parsed.path == "/v1/progress":
+            try:
+                since = int(parse_qs(parsed.query).get('since', ['0'])[0])
+            except (ValueError, TypeError):
+                since = 0
             if STATE.get("active"):
                 touch_progress()
             with STATE_LOCK:
@@ -855,6 +1063,8 @@ class Handler(BaseHTTPRequestHandler):
                 "elapsed": snap.get("elapsed"),
                 "stalled": snap.get("stalled", False),
                 "stall_seconds": stall_seconds,
+                "preview_seq": snap.get('preview_seq', 0),
+                "preview_b64": snap.get('preview_b64') if snap.get('preview_seq', 0) > since else None,
             })
         self._json(404, {"error": "not found"})
 
@@ -869,6 +1079,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "bad json"})
         if not isinstance(body, dict):
             return self._json(400, {"error": "JSON object required"})
+
+        if parsed.path == "/v1/results/ack":
+            path = _result_path(body.get("tag"))
+            if path is None:
+                return self._json(400, {"error": "valid tag required"})
+            path.unlink(missing_ok=True)
+            return self._json(200, {"ok": True})
 
         if parsed.path == "/v1/models/unload":
             if not GEN_LOCK.acquire(blocking=False):
@@ -892,6 +1109,25 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 GEN_LOCK.release()
 
+        if parsed.path == "/v1/models/warm":
+            global MODEL_OPERATION
+            try:
+                model_id, info = resolve_model(body.get("model") or "auto", task="image")
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            if info.get("class") != "QwenImage21Pipeline":
+                return self._json(400, {"error": "Image prewarming currently supports Qwen-Image 2.1"})
+            with GEN_LOCK:
+                try:
+                    MODEL_OPERATION = {"type": "loading", "model": model_id}
+                    load_pipeline(model_id, info)
+                    MODEL_OPERATION = {"type": "ready", "model": model_id}
+                    return self._json(200, {"ok": True, "model": model_id})
+                except Exception as exc:
+                    traceback.print_exc()
+                    MODEL_OPERATION = {"type": "error", "model": model_id, "message": str(exc)}
+                    return self._json(500, {"error": str(exc)})
+
         if parsed.path in {f"{path}/cancel" for path in ("/v1/images/generations", "/v1/videos/generations", "/v1/audio/generations", "/v1/audio/speech")}:
             tag = body.get("tag")
             if tag:
@@ -909,7 +1145,11 @@ class Handler(BaseHTTPRequestHandler):
         }
         body["task"] = task_map.get(parsed.path, "image")
 
-        tag = body.get("tag") or str(time.time())
+        tag = body.get("tag") or os.urandom(16).hex()
+        if not isinstance(tag, str) or not RESULT_TAG.fullmatch(tag):
+            return self._json(400, {"error": "valid tag required"})
+        with STATE_LOCK:
+            PENDING_TAGS.add(tag)
 
         def _stall_watchdog(stop_event):
             # Per-job self-exit guard: if the job holds GEN_LOCK but progress
@@ -932,12 +1172,18 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=_stall_watchdog, args=(stall_stop,), name="stall-watchdog", daemon=True).start()
             try:
                 touch_progress(tag=tag, active=True, phase="starting", step=None, steps=None,
+                               preview_b64=None, preview_seq=0,
                                image=None, n=None, started_at=time.time())
                 result = run_job(body, tag)
+                _save_result(tag, result)
+                _prune_results()
                 return self._json(200, result)
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
             except JobCancelled:
+                # Cancellation should release the Qwen weights and ROCm cache,
+                # rather than leaving the entire engine resident until restart.
+                release_models()
                 return self._json(499, {"error": "cancelled"})
             except Exception as e:
                 traceback.print_exc()
@@ -946,6 +1192,8 @@ class Handler(BaseHTTPRequestHandler):
                 stall_stop.set()
                 CANCEL_TAGS.discard(tag)
                 _STALL_LOGGED.discard(tag)
+                with STATE_LOCK:
+                    PENDING_TAGS.discard(tag)
                 touch_progress(active=False)
 
     def log_message(self, fmt, *args):

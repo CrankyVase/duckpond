@@ -5,30 +5,25 @@
   // Lewis's school network. Search is open to any logged-in user; actually
   // pulling bytes onto shared disk is owner-only, same gate as Providers.
   //
-  // The layout, vocabulary and math deliberately mirror Unsloth Studio's
-  // Hub (AGPL-3.0, github.com/unslothai/unsloth — studied from source):
-  // endless scroll via a cursor'd server proxy, result cards with 52px
-  // avatars + status dots, and the quant picker with their exact fit-badge
-  // labels/tooltips and downloaded-first fit/size sort. All data flows
-  // through /api/hf/* — the browser only renders it.
+  // The server owns search and downloads. This component renders three
+  // simple views: installed files, model discovery, and download activity.
+  // On phones, selecting a result opens its file choices as a separate step.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { downloads, failDownload, getJob, jobKey, optimisticallyAdd, cancelJob, clearFinished, startPolling, stopPolling } from '../lib/downloads.svelte.js';
   import { prefs } from '../lib/prefs.svelte.js';
-  import { app, loadModels } from '../lib/state.svelte.js';
+  import { app, loadModels, switchMode } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
-  import { resolveHubLogo, cardGlow } from '../lib/hubLogos.js';
+  import { resolveHubLogo } from '../lib/hubLogos.js';
   import { renderHubReadme } from '../lib/hubReadme.js';
   import { localModelKey, modelReadiness } from '../lib/modelReadiness.js';
-  import { imgFade, reveal, scrollFade, smoothScrollTo } from '../lib/motion.js';
+  import { reveal, scrollFade, smoothScrollTo } from '../lib/motion.js';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Copy from '@lucide/svelte/icons/copy';
-  import Cpu from '@lucide/svelte/icons/cpu';
   import ExternalLink from '@lucide/svelte/icons/external-link';
-  import HardDrive from '@lucide/svelte/icons/hard-drive';
   import Info from '@lucide/svelte/icons/info';
   import MemoryStick from '@lucide/svelte/icons/memory-stick';
   import Package from '@lucide/svelte/icons/package';
@@ -64,7 +59,6 @@
   void refreshRuntime();
   function openStudio(id) { sessionStorage.setItem('dp:media-selection', id); app.view = 'media'; }
   let recModels = $state([]);
-  let recLoading = $state(false);
   let readme = $state(new Map()); // repoId -> { loading, text, error }
   let registering = $state(null);
   let showPaste = $state(false);
@@ -73,14 +67,20 @@
     try { hw = await api('/api/hf/hardware'); } catch { /* pills stay empty */ }
   }
   async function loadRecommended() {
-    recLoading = true;
     try {
       const r = await api('/api/hf/recommend');
       recModels = r.models ?? [];
     } catch { recModels = []; }
-    recLoading = false;
   }
-  onMount(() => { void loadHardware(); void loadLocal(); });
+  onMount(() => {
+    void loadHardware();
+    void loadLocal();
+    startPolling();
+    return () => {
+      stopPolling();
+      if (searchTimer) clearTimeout(searchTimer);
+    };
+  });
 
   function readmeHtml(text) {
     if (!text) return '';
@@ -233,16 +233,6 @@
     return true;
   }
 
-  const TYPE_FILTERS = [
-    ['all', 'All types'],
-    ['chat', 'Text / Chat'],
-    ['image', 'Image'],
-    ['audio', 'Audio / Speech'],
-    ['video', 'Video'],
-    ['embed', 'Embeddings'],
-  ];
-  let typeFilter = $state('all');
-
   const SORTS = [
     ['relevance', 'Relevance'],
     ['downloads', 'Most downloads'],
@@ -261,32 +251,38 @@
   // Discover (search/browse — everything below) vs My Models (what's already
   // on disk, independent of the router's preset ini). The split LM Studio and
   // Unsloth Studio both make; see notes/HUB-3.md.
-  let mode = $state('discover');
+  let mode = $state('my-models');
+  let discoverLoaded = false;
   let localModels = $state([]);
   let localTotalBytes = $state(0);
   let localLoading = $state(false);
   let localDeleting = $state(null); // `${repoDir}::${include}` mid-delete
+  let usingInstalled = $state(null); // `${repoId}::${include}` mid-register/select
   let localQuery = $state('');
   let localFilter = $state('all');
   let localError = $state('');
+  let detailEl = $state(null);
+  let mobileViewingDetail = $state(false);
   const installedRows = $derived(localModels.filter(row => {
     const info = modelReadiness(row, mediaModels, mediaAvailable);
     const text = [row.repoId, ...(row.variants || []).map(v => v.name)].join(' ').toLowerCase();
     return text.includes(localQuery.toLowerCase().trim()) && (localFilter === 'all'
       || (localFilter === 'attention' && ['setup','incomplete'].includes(info.state))
-      || (localFilter === 'ready' && info.state === 'ready'));
+      || (localFilter === 'ready' && info.state === 'ready')
+      || (localFilter === 'chat' && row.task === 'chat' && !row.broken)
+      || (localFilter === 'media' && ['image', 'audio', 'video'].includes(row.task)));
   }));
 
   async function inspectInstalled(row) {
-    if (!row.repoId) return;
+    if (!row.repoId || !row.source.startsWith('hf-cache')) return;
     const runtime = mediaModels.find(m => m.id === row.repoId);
     activeTab = runtime?.task === 'video' ? 'video' : runtime?.task === 'image' ? 'image'
       : ['audio','tts'].includes(runtime?.task) ? 'audio' : 'llm';
-    taskFilter = ''; sizeFilter = ''; formatFilter = ''; typeFilter = 'all';
+    taskFilter = ''; sizeFilter = ''; formatFilter = '';
     mode = 'discover'; q = row.repoId;
     results = [{ id: row.repoId, kind: activeTab === 'llm' ? 'chat' : activeTab }];
     searched = true; hasMore = false;
-    await select(row.repoId);
+    select(row.repoId, true);
   }
 
   async function loadLocal() {
@@ -300,9 +296,49 @@
     localLoading = false;
   }
 
+  function chatVariants(row) {
+    if (!['hf-cache', 'local-dir'].includes(row.source) || row.task !== 'chat') return [];
+    return row.variants.filter((v) => v.chatCompatible === true && v.include &&
+      !/(?:^|[-_.\/])(mmproj|mtp|eagle|draft)(?:[-_.\/]|$)/i.test(v.name));
+  }
+
+  async function useInstalledInChat(row, variant) {
+    const key = `${row.repoId}::${variant.include}`;
+    usingInstalled = key;
+    try {
+      const registered = await api('/api/hf/register', {
+        method: 'POST', body: { source: row.source, repoId: row.repoId, include: variant.include, load: false },
+      });
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await loadModels();
+        if (app.models.some((m) => m.id === registered.alias)) break;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+      if (!app.models.some((m) => m.id === registered.alias)) {
+        throw new Error('The files are on disk, but the chat engine has not listed this model yet. Check its status and try again.');
+      }
+      await switchMode('chat');
+      if (!app.conv?.id) throw new Error('Could not open a chat');
+      await api(`/api/conversations/${app.conv.id}`, { method: 'PATCH', body: { model_id: registered.alias } });
+      app.conv.model_id = registered.alias;
+      app.view = 'chat';
+      toast(`${registered.alias} is ready for this chat`, 'ok');
+    } catch (e) {
+      toast(e.error ?? e.message ?? 'Could not use this model in chat', 'error');
+    } finally {
+      usingInstalled = null;
+    }
+  }
+
   function setMode(m) {
     mode = m;
+    if (m === 'discover') mobileViewingDetail = false;
     if (m === 'my-models') { void loadLocal(); void refreshRuntime(); }
+    if (m === 'discover' && !discoverLoaded) {
+      discoverLoaded = true;
+      void loadRecommended();
+      void loadTab(activeTab);
+    }
   }
 
   // Downloads tab — every job the server knows about (running, queued,
@@ -318,6 +354,9 @@
   const activeDownloadCount = $derived(
     [...downloads.values()].filter((j) => j.state === 'running' || j.state === 'cancelling').length,
   );
+  const completedDownloadCount = $derived(allDownloads.filter((j) => j.state === 'done').length);
+  const installedReadyCount = $derived(localModels.filter((row) => modelReadiness(row, mediaModels, mediaAvailable).state === 'ready').length);
+  const installedAttentionCount = $derived(localModels.filter((row) => ['setup', 'incomplete'].includes(modelReadiness(row, mediaModels, mediaAvailable).state)).length);
 
   async function deleteLocalVariant(row, variant) {
     const ok = await confirmDialog({
@@ -359,7 +398,6 @@
   let searched = $state(false);
   // Downloads now live in the shared store — every variant button and the
   // manager panel read from the same place. startPolling on mount.
-  startPolling();
 
   let selected = $state(null); // repoId of the model shown in the detail pane
   let variants = $state(new Map()); // repoId -> { loading, kind, total, variants, pick, recommended, error }
@@ -388,7 +426,7 @@
 
   const isOwner = $derived(app.user?.role === 'owner');
   const displayedResults = $derived.by(() => {
-    let list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
+    let list = results;
     if (activeTab === 'llm' && !q.trim() && !formatFilter) {
       list = list.filter((m) => /-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id));
     }
@@ -443,7 +481,6 @@
 
   // The current query as a fetch function — tab browse or text search — so
   // fetchMore() can re-run it with the cursor for endless scroll.
-  let queryUrl = $state(null);
   function currentQueryUrl(cursor) {
     if (q.trim()) {
       if (activeTab === 'llm') {
@@ -486,19 +523,20 @@
   }
 
   async function loadTab(tab) {
+    mobileViewingDetail = false;
     activeTab = tab;
     q = '';
     await runQuery(() => api(tabEndpoint(tab)));
   }
 
   async function doSearch() {
+    mobileViewingDetail = false;
     const query = q.trim();
     if (!query) { await loadTab(activeTab); return; }
     await runQuery(() => api(currentQueryUrl()));
   }
   // Wait for the "fits this GPU" strip before the Unsloth tab so landing
   // can open LFM2-700M instead of the newest 80GB drop.
-  onMount(() => { void (async () => { await loadRecommended(); await loadTab(activeTab); })(); });
 
   // Reinstated 2026-09-02 after notes/HUB-2.md's "no free-text inputs"
   // removal (password managers were autofilling into search fields) — user
@@ -518,6 +556,7 @@
     void doSearch();
   }
   function clearSearch() {
+    mobileViewingDetail = false;
     if (searchTimer) clearTimeout(searchTimer);
     q = '';
     void loadTab(activeTab);
@@ -575,7 +614,7 @@
     return () => io.disconnect();
   });
 
-  function select(repoId) {
+  function select(repoId, jumpToDetail = false) {
     selected = repoId;
     if (!results.some((m) => m.id === repoId)) {
       const extra = recModels.find((m) => m.id === repoId);
@@ -589,6 +628,10 @@
       void loadQuantizers(repoId);
     }
     void loadReadme(repoId);
+    if (jumpToDetail && window.matchMedia('(max-width: 900px)').matches) {
+      mobileViewingDetail = true;
+      requestAnimationFrame(() => detailEl?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
   }
 
   async function loadQuantizers(repoId) {
@@ -708,14 +751,24 @@
     await download(j.repoId, j.include, j.variant);
   }
 
-  /** Paste any `owner/repo` into the hub — validates and opens it directly. */
+  /** Resolve a repository URL or ID and show the exact model. */
   async function addRepo() {
-    const id = pasteId.trim().replace(/^https?:\/\/huggingface\.co\//, '').replace(/\/$/, '');
-    if (!id || !id.includes('/')) { toast('Paste a repo id like unsloth/Qwen3-8B-GGUF', 'error'); return; }
+    const id = pasteId.trim().replace(/^https?:\/\/(?:www\.)?huggingface\.co\//i, '')
+      .split(/[?#]/, 1)[0].split('/').slice(0, 2).join('/');
+    if (!/^[^/\s]+\/[^/\s]+$/.test(id)) { toast('Enter a repository URL or ID like unsloth/Qwen3-8B-GGUF', 'error'); return; }
     try {
-      await api(`/api/hf/models/${id}`);
+      const model = await api(`/api/hf/models/${id}`);
+      activeTab = model.kind === 'image' ? 'image' : model.kind === 'audio' ? 'audio'
+        : model.kind === 'video' ? 'video' : 'llm';
+      taskFilter = '';
+      sizeFilter = '';
+      formatFilter = '';
       q = id;
-      await doSearch();
+      results = [model];
+      searched = true;
+      hasMore = false;
+      nextCursor = null;
+      select(id, true);
       pasteId = '';
     } catch (e) {
       toast(e.message ?? 'repo not found', 'error');
@@ -789,10 +842,6 @@
     }
   }
 
-  $effect(() => {
-    return () => { stopPolling(); if (searchTimer) clearTimeout(searchTimer); };
-  });
-
   function fmtN(n) {
     if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
     if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
@@ -862,6 +911,15 @@
     });
   }
   const pickedVariant = (v) => v?.variants?.find((x) => x.include === v.pick) ?? null;
+  function quantDescription(row) {
+    const code = String(row?.quant ?? row?.name ?? '').toUpperCase();
+    if (/\b(?:F16|BF16|FP16)\b/.test(code)) return 'Full precision. Largest download and memory use.';
+    if (/\b(?:Q8|IQ8)/.test(code)) return 'Higher precision. Larger download and memory use.';
+    if (/\b(?:Q6|IQ6|Q5|IQ5)/.test(code)) return 'More detail, with a larger download than Q4.';
+    if (/\b(?:Q4|IQ4)/.test(code)) return 'A common balance of size and output quality.';
+    if (/\b(?:Q3|IQ3|Q2|IQ2|Q1|IQ1)/.test(code)) return 'Smaller download, with a greater quality tradeoff.';
+    return 'The file size and memory fit below help you choose.';
+  }
 
   function fmtAgo(iso) {
     if (!iso) return null;
@@ -873,89 +931,92 @@
   }
 </script>
 
-<div class="hub">
+<div class="hub" class:mobile-detail={mobileViewingDetail && mode === 'discover'}>
   <div class="head">
     <div class="title">
-      <h1>Model Hub</h1>
-      <p>Discover, download, and manage your local models.</p>
+      <span class="eyebrow">DUCKPOND / MODEL LIBRARY</span>
+      <h1>Models</h1>
+      <p>Find, install, and manage models for your workspace.</p>
     </div>
-    <div class="pills">
-      {#if localModels.length}
-        <span class="pill" title="Models on disk"><HardDrive size={13} /> {localModels.length} Local</span>
-      {/if}
-      {#if hw?.gpuLabel}
-        <span class="pill" title="Total GPU VRAM"><MemoryStick size={13} /> {hw.gpuLabel} VRAM</span>
-      {/if}
-      {#if hw?.ramLabel}
-        <span class="pill" title="System RAM"><HardDrive size={13} /> {hw.ramLabel} RAM</span>
-      {/if}
-      {#if vramLabel}<span class="pill live"><span class="dot live"></span> {vramLabel} free</span>{/if}
-    </div>
+    <details class="device-info">
+      <summary><MemoryStick size={15} /> This device{#if hw?.gpuLabel}<span>{hw.gpuLabel} VRAM</span>{/if}<ChevronDown size={14} /></summary>
+      <div class="device-details">
+        {#if hw?.gpuLabel}<span>Graphics memory <strong>{hw.gpuLabel}</strong></span>{/if}
+        {#if hw?.ramLabel}<span>System memory <strong>{hw.ramLabel}</strong></span>{/if}
+        {#if vramLabel}<span>Available graphics memory <strong>{vramLabel}</strong></span>{/if}
+        {#if localModels.length}<span>On disk <strong>{localModels.length} models · {fmtBytes(localTotalBytes)}</strong></span>{/if}
+        {#if !hw && !localModels.length}<span>Device details are loading.</span>{/if}
+      </div>
+    </details>
   </div>
 
-  <div class="modebar" aria-label="Model library views">
-      <button class="modebtn" class:on={mode === 'my-models'} aria-pressed={mode === 'my-models'} onclick={() => setMode('my-models')}>Installed</button>
-      <button class="modebtn" class:on={mode === 'discover'} aria-pressed={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
-      <button class="modebtn" class:on={mode === 'downloads'} onclick={() => setMode('downloads')}>
-        Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
-      </button>
-  </div>
-  <div class="toolbar">
-    {#if mode === 'discover'}
-      <div class="tabs">
+  <nav class="modebar" aria-label="Model library views">
+    <button class="modebtn" class:on={mode === 'my-models'} aria-pressed={mode === 'my-models'} onclick={() => setMode('my-models')}><Package size={15} /> Installed</button>
+    <button class="modebtn" class:on={mode === 'discover'} aria-pressed={mode === 'discover'} onclick={() => setMode('discover')}><SearchIcon size={15} /> Discover</button>
+    <button class="modebtn" class:on={mode === 'downloads'} aria-pressed={mode === 'downloads'} onclick={() => setMode('downloads')}>
+      <Download size={15} /> Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
+    </button>
+  </nav>
+  {#if mode === 'discover'}
+    <div class="discover-controls">
+      <div class="section-intro"><div><span class="section-kicker">EXPLORE</span><h2>Discover models</h2><p>Browse models by task, then choose a file that fits your device.</p></div></div>
+      <div class="discover-search">
+        <div class="searchbox">
+          <SearchIcon size={16} />
+          <input aria-label="Search models" type="search" inputmode="search" placeholder="Search model names or creators"
+            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+            data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
+            name={searchInputName}
+            bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
+          {#if q}<button class="ghost searchclear" onclick={clearSearch} aria-label="Clear search" title="Clear search"><X size={15} /></button>{/if}
+        </div>
+        <label class="fselect">
+          <select aria-label="Sort models" bind:value={sortBy}>
+            {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
+          </select>
+        </label>
+        <button class="repo-btn" onclick={() => (showPaste = !showPaste)} aria-expanded={showPaste} title="Open a Hugging Face repository">
+          <Plus size={15} /><span>Add by URL or ID</span>
+        </button>
+      </div>
+      <div class="tabs" aria-label="Model types">
         {#each TABS as [val, label] (val)}
-          <button class="tab" class:active={activeTab === val && !q.trim()}
+          <button class="tab" class:active={activeTab === val && !q.trim()} aria-pressed={activeTab === val && !q.trim()}
             onclick={() => loadTab(val)}>{label}</button>
         {/each}
       </div>
-      <div class="searchbox">
-        <SearchIcon size={14} />
-        <input aria-label="Search models" type="search" inputmode="search" placeholder="Search {activeTab === 'llm' ? 'LLMs' : activeTab + ' models'}"
-          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
-          name={searchInputName}
-          bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
-        {#if q}<button class="ghost searchclear" onclick={clearSearch} title="Clear"><X size={13} /></button>{/if}
-      </div>
-      <label class="fselect">
-        <select aria-label="Sort models" bind:value={sortBy}>
-          {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
-        </select>
-      </label>
-      <button class="ghost addbtn" onclick={() => (showPaste = !showPaste)} title="Paste a repo id">
-        <Plus size={14} />
-      </button>
-    {/if}
-  </div>
+    </div>
+  {/if}
   {#if mode === 'discover' && showPaste}
     <div class="pasterow">
-      <input class="paste" placeholder="Paste owner/repo to add…" bind:value={pasteId}
+      <input class="paste" aria-label="Hugging Face repository URL or ID" placeholder="Paste a Hugging Face URL or owner/repo" bind:value={pasteId}
         onkeydown={(e) => { if (e.key === 'Enter') addRepo(); }} />
       <button class="ghost" onclick={addRepo} title="Open repo">Add</button>
     </div>
   {/if}
 
   {#if mode === 'discover'}
-    <details class="filters-shell"><summary>Filter models{#if taskFilter || sizeFilter || formatFilter}<span class="filter-dot"></span>{/if}</summary>
+    <details class="filters-shell"><summary>More filters{#if taskFilter || sizeFilter || formatFilter}<span class="filter-dot"></span>{/if}</summary>
     <div class="filters">
-      <div class="fg">
+      <div class="filter-group"><span class="filter-label">Capability</span><div class="fg">
         {#each TASK_FILTERS as [val, label] (val)}
           <button type="button" class="fchip" class:on={taskFilter === val}
             onclick={() => toggleChip('task', val)}>{label}</button>
         {/each}
-      </div>
-      <div class="fg">
+      </div></div>
+      <div class="filter-group"><span class="filter-label">Parameters</span><div class="fg">
         {#each SIZE_FILTERS as [val, label] (val)}
           <button type="button" class="fchip" class:on={sizeFilter === val}
             onclick={() => toggleChip('size', val)}>{label}</button>
         {/each}
-      </div>
-      <div class="fg">
+      </div></div>
+      <div class="filter-group"><span class="filter-label">Format</span><div class="fg">
         {#each FORMAT_FILTERS as [val, label] (val)}
           <button type="button" class="fchip" class:on={formatFilter === val}
             onclick={() => toggleChip('format', val)}>{label}</button>
         {/each}
-      </div>
+      </div></div>
+      {#if taskFilter || sizeFilter || formatFilter}<button class="clear-filters" onclick={() => { taskFilter = ''; sizeFilter = ''; formatFilter = ''; }}>Clear filters</button>{/if}
     </div>
     </details>
   {/if}
@@ -972,13 +1033,13 @@
 
   {#if mode === 'discover'}
   {#if activeTab === 'llm' && !q.trim() && recModels.length}
-    <details class="recstrip">
-      <summary>Recommended for this machine</summary>
+    <details class="recstrip" open>
+      <summary><span class="rec-title">Suggested for your device</span><span>Memory fit is checked when you choose a file.</span></summary>
       <div class="carousel">
         {#each recModels as m (m.id)}
           {@const logo = logoFor(m.id)}
-          <button class="mcard" class:on={selected === m.id} style="--glow:{cardGlow(m.id)}"
-            onclick={() => select(m.id)}>
+          <button class="mcard" class:on={selected === m.id}
+            onclick={() => select(m.id, true)}>
             <span class="avatar" class:logo={!!logo}
               style={!logo && avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
               {#if logo}
@@ -990,7 +1051,7 @@
               <span class="initial">{ownerOf(m.id)[0]?.toUpperCase()}</span>
             </span>
             <span class="mcname">{displayName(m.id)}</span>
-            <span class="mcowner">{ownerOf(m.id)}</span>
+            <span class="mcowner">{ownerOf(m.id)}{#if paramsBOf(m)} · {paramsBOf(m)}B parameters{/if}</span>
           </button>
         {/each}
       </div>
@@ -1005,19 +1066,19 @@
     </div>
   {:else if searched && !displayedResults.length}
     <div class="empty nodetail">
-      {#if results.length}No {TYPE_FILTERS.find(([v]) => v === typeFilter)?.[1].toLowerCase()} models in this view — try All types.
+      {#if results.length}No models match these filters. Try clearing a filter.
       {:else}No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}{/if}
     </div>
   {/if}
 
   {#if displayedResults.length || (!searching && searched)}
-    <div class="split">
+    <div class="split" class:show-detail={mobileViewingDetail}>
       <div class="list" bind:this={listEl} use:scrollFade>
-        <div class="lhead">{q.trim() ? 'Search results' : (LIST_HEADING[activeTab] ?? 'Models')}</div>
+        <div class="lhead"><span>{q.trim() ? 'Search results' : (LIST_HEADING[activeTab] ?? 'Models')}</span><span>{displayedResults.length}{hasMore ? '+' : ''}</span></div>
         {#each displayedResults as m, i (m.id)}
           {@const badge = taskBadge(m.pipelineTag, m.kind)}
           {@const logo = logoFor(m.id)}
-          <button class="rrow" class:active={selected === m.id} use:reveal={{ delay: Math.min(i, 8) * 26 }} onclick={() => select(m.id)}>
+          <button class="rrow" class:active={selected === m.id} use:reveal={{ delay: Math.min(i, 8) * 26 }} onclick={() => select(m.id, true)}>
             <span class="avatar" class:logo={!!logo}
               style={!logo && avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
               {#if logo}
@@ -1029,16 +1090,8 @@
               <span class="initial">{ownerOf(m.id)[0]?.toUpperCase()}</span>
             </span>
             <span class="rinfo">
-              <span class="rname">
-                <span class="rnametext">{displayName(m.id)}</span>
-                <span class="dots">
-                  {#if m.curated}<span class="staffpick" title="Staff Pick"><Sparkles size={11} /></span>{/if}
-                  {#if badge}<span class="dot task {badge[1]}" title={badge[0]}></span>{/if}
-                  {#if m.id.toLowerCase().includes('gguf')}<span class="dot gguf" title="GGUF"></span>{/if}
-                  {#if m.gated}<span class="dot warn" title="Gated repo — access request needed"></span>{/if}
-                </span>
-              </span>
-              <span class="rowner">{ownerOf(m.id)}{#if ownerOf(m.id).toLowerCase() === 'unsloth'}<span class="verified" title="Verified Unsloth">✓</span>{/if}</span>
+              <span class="rname"><span class="rnametext">{displayName(m.id)}</span>{#if m.curated}<Sparkles size={13} class="curated-mark" />{/if}</span>
+              <span class="rowner">{ownerOf(m.id)}{#if badge}<span class="row-type">· {badge[0]}</span>{/if}{#if m.gated}<span class="row-gated">· Access required</span>{/if}</span>
             </span>
             <span class="rstats">
               <span><Heart size={11} /> {fmtN(m.likes)}</span>
@@ -1064,10 +1117,12 @@
         <div bind:this={sentinelEl} class="sentinel"></div>
       </div>
 
-      <div class="detail" use:scrollFade>
+      <div class="detail" bind:this={detailEl} use:scrollFade>
+        <button class="back-results" onclick={() => { mobileViewingDetail = false; requestAnimationFrame(() => listEl?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }}><ChevronRight size={14} /> Browse results</button>
         {#if selectedModel}
           {@const v = selectedVariants}
           {@const dlogo = logoFor(selectedModel.id)}
+          <div class="detail-eyebrow">MODEL DETAILS</div>
           <div class="dhead">
             <span class="avatar big" class:logo={!!dlogo}
               style={!dlogo && avatarFail.has(ownerOf(selectedModel.id)) ? avatarStyle(ownerOf(selectedModel.id)) : ''}>
@@ -1108,7 +1163,7 @@
             <div class="qmrow"><span class="qmhint">Loading available quantizations…</span></div>
           {:else if qz?.list?.length}
             <div class="qmrow">
-              <span class="qmlabel">Quant maker</span>
+              <span class="qmlabel">File source</span>
               <div class="qmchips">
                 {#if GGUF_REPO_RE.test(selectedModel.id)}
                   <button class="qmchip" class:active={activeRepo === selectedModel.id}
@@ -1127,7 +1182,7 @@
           {:else if qz?.error}
             <div class="qmrow"><span class="qmhint err">{qz.error}</span></div>
           {:else if qz && !qz.loading}
-            <div class="qmrow"><span class="qmhint">No community GGUF quantization found — browsing this repo's own files.</span></div>
+            <div class="qmrow"><span class="qmhint">Showing files from this repository.</span></div>
           {/if}
 
           {#if isMediaTab}
@@ -1141,6 +1196,7 @@
             {:else}<p class="media-hint">Compatibility depends on the model architecture and installed runtime. Media Studio checks downloaded models before use.</p>{/if}
           {/if}
           <div class="varbar">
+            <div class="choice-heading"><strong>{isMediaTab ? 'Model files' : 'Choose a version'}</strong><span>{isMediaTab ? 'Download the full model to use it in Media Studio.' : 'The suggested file is selected. Smaller files usually need less memory.'}</span></div>
             {#if !v}
               <span class="vhint">Click a model on the left to load its files…</span>
             {:else if v?.loading}
@@ -1202,6 +1258,7 @@
                       {#if v.recommended && picked.include === v.recommended}<span class="reclabel">Recommended</span>{/if}
                     </span>
                     {#if picked.downloaded}<span class="dottag success"><span class="dot"></span>On device</span>{/if}
+                    <span class="qsize mono">{fmtBytes(picked.size)}</span>
                     {#if picked.fit && FIT[picked.fit]}<span class="fitpill {picked.fit}" title={FIT[picked.fit].tip}>{FIT[picked.fit].label}</span>{/if}
                     {#if picked.tps}<span class="tps mono" title="Estimated decode speed on this GPU (9070 XT) at the current free VRAM — rough order-of-magnitude">~{picked.tps} t/s</span>{/if}
                   {:else}
@@ -1235,6 +1292,17 @@
                   {/if}
                 {/if}
               </div>
+              {/if}
+              {#if !isMediaTab && picked}
+                <p class="quant-help">{quantDescription(picked)} {v.recommended && picked.include === v.recommended ? 'Suggested for available memory; actual speed and quality can vary.' : ''}</p>
+                {#if isOwner && getJob(activeRepo, v.pick)?.state === 'running'}
+                  {@const job = getJob(activeRepo, v.pick)}
+                  <div class="selected-job">
+                    <div class="selected-job-copy"><span>{job.totalBytes ? `${fmtPct(job)}% · ` : ''}{fmtBytes(job.downloadedBytes)}{job.totalBytes ? ` / ${fmtBytes(job.totalBytes)}` : ''}</span><span>{job.speedBytesPerSec ? fmtSpeed(job.speedBytesPerSec) : 'Preparing download'}{job.etaSec != null ? ` · ${fmtEta(job.etaSec)} left` : ''}</span></div>
+                    <div class="jbar" class:indeterminate={!job.totalBytes}><div class="jfill" style="width:{job.totalBytes ? fmtPct(job) : 0}%"></div></div>
+                    <button class="ghost job-link" onclick={() => setMode('downloads')}>View download activity <ChevronRight size={12} /></button>
+                  </div>
+                {/if}
               {/if}
               {#if !isMediaTab && (quantOpen || showOom)}
               <div class="qlist">
@@ -1326,13 +1394,22 @@
   {/if}
   {:else if mode === 'my-models'}
     <div class="mymodels" use:scrollFade>
-      <div class="installed-toolbar">
+      <div class="section-intro installed-intro"><div><span class="section-kicker">YOUR LIBRARY</span><h2>Installed models</h2><p>Models and components stored on this device.</p></div><button class="section-action" onclick={() => setMode('discover')}><Plus size={15} /> Find models</button></div>
+      {#if localModels.length}
+        <div class="library-summary" aria-label="Installed model summary">
+          <div><strong>{localModels.length}</strong><span>Models on disk</span></div>
+          <div><strong>{fmtBytes(localTotalBytes)}</strong><span>Storage used</span></div>
+          <div><strong>{installedReadyCount}</strong><span>Runtime available</span></div>
+          {#if installedAttentionCount}<div class="summary-attention"><strong>{installedAttentionCount}</strong><span>Need attention</span></div>{/if}
+        </div>
+      {/if}
+      {#if localModels.length}<div class="installed-toolbar">
         <input type="search" aria-label="Search installed models" placeholder="Find an installed model…" bind:value={localQuery} />
         <select aria-label="Filter installed models" bind:value={localFilter}>
-          <option value="all">All models</option><option value="attention">Needs attention</option><option value="ready">Runtime available</option>
+          <option value="all">All files</option><option value="chat">Chat models</option><option value="media">Media models</option><option value="attention">Needs attention</option><option value="ready">Runtime available</option>
         </select>
         <button class="ghost" disabled={localLoading} onclick={() => { loadLocal(); refreshRuntime(); }}>Refresh</button>
-      </div>
+      </div>{/if}
       {#if localError}<p class="installed-error" role="alert">{localError} <button onclick={loadLocal}>Retry</button></p>{/if}
       {#if localLoading}
         <div class="skeleton-list">
@@ -1341,12 +1418,9 @@
           {/each}
         </div>
       {:else if !localModels.length}
-        <div class="empty nodetail">Nothing downloaded yet — switch to Discover to find a model.</div>
+        <div class="empty nodetail model-empty"><Package size={28} /><h2>Your models will appear here</h2><p>Explore models for chat and image creation, then download the ones you want to keep on this machine.</p><button class="ghost" onclick={() => setMode('discover')}>Discover models →</button></div>
       {:else}
-        <div class="mmhead">
-          <span>{localModels.length} model{localModels.length === 1 ? '' : 's'} on disk</span>
-          <span class="mono">{fmtBytes(localTotalBytes)} total</span>
-        </div>
+        <div class="mmhead"><span>ALL MODELS <span class="result-count">{installedRows.length}</span></span></div>
         <div class="mmlist">
           {#each installedRows as row (localModelKey(row))}
             {@const readiness = modelReadiness(row, mediaModels, mediaAvailable)}
@@ -1360,15 +1434,21 @@
               </span>
               <div class="mminfo">
                 <div class="mmtop">
-                  <span class="mmname">{row.repoId ?? row.variants[0]?.name}</span>
-                  <span class="mmwhen">{fmtAgo(row.updatedAt)}</span>
+                  <span class="mmname">{row.label ?? row.repoId ?? row.variants[0]?.name}</span>
                   <span class="mmsize mono">{fmtBytes(row.totalBytes)}</span>
                 </div>
-                <div class="installed-status"><span class:available={readiness.state === 'ready'}>{readiness.label}</span><p>{readiness.detail}</p></div>
+                <div class="installed-meta">{row.repoId ?? 'Local files'}{#if row.updatedAt} · Updated {fmtAgo(row.updatedAt)}{/if}</div>
+                <div class="installed-status" class:status-attention={['setup', 'incomplete'].includes(readiness.state)}><span class:available={readiness.state === 'ready'}>{readiness.label}</span>{#if row.source === 'media-components'}<span>ComfyUI media</span>{/if}<p>{readiness.detail}</p></div>
                 <div class="installed-actions">
                   {#if readiness.runtime?.ready}<button class="ghost" onclick={() => openStudio(readiness.runtime.id)}><Play size={12} /> Open Studio</button>{/if}
-                  {#if row.repoId}<button class="ghost" onclick={() => inspectInstalled(row)}>Files & setup <ChevronRight size={12} /></button>{/if}
+                  {#if isOwner && chatVariants(row).length === 1}
+                    {@const variant = chatVariants(row)[0]}
+                    <button class="installed-use" disabled={usingInstalled === `${row.repoId}::${variant.include}`} onclick={() => useInstalledInChat(row, variant)}><Play size={12} /> {usingInstalled === `${row.repoId}::${variant.include}` ? 'Adding…' : 'Use in chat'}</button>
+                  {/if}
+                  {#if row.repoId && row.source.startsWith('hf-cache')}<button class="ghost" onclick={() => inspectInstalled(row)}>Files & setup <ChevronRight size={12} /></button>{/if}
                 </div>
+                <details class="installed-files" open={row.broken}>
+                  <summary>{row.broken ? 'Incomplete files' : `${row.variants.length} file${row.variants.length === 1 ? '' : 's'} on disk`}<ChevronDown size={14} /></summary>
                 {#if row.broken}
                   <div class="qlist">
                     <div class="qrow mmvariant">
@@ -1392,11 +1472,15 @@
                     {#each row.variants as variant (variant.include ?? variant.name)}
                       <div class="qrow mmvariant">
                         <span class="qleft">
-                          <span class="mono qname">{variant.quant ?? variant.name}</span>
+                          <span class="mono qname" title={variant.name}>{variant.quant ?? variant.name}</span>
                         </span>
                         <span class="qright">
                           <span class="qsize mono">{fmtBytes(variant.size)}</span>
-                          {#if isOwner}
+                          {#if isOwner && chatVariants(row).length > 1 && chatVariants(row).includes(variant)}
+                            <button class="variant-use" disabled={usingInstalled === `${row.repoId}::${variant.include}`} onclick={() => useInstalledInChat(row, variant)}>{usingInstalled === `${row.repoId}::${variant.include}` ? 'Adding…' : 'Use in chat'}</button>
+                          {/if}
+                          {#if variant.containsGguf && variant.chatCompatible === false && row.task === 'chat'}<span class="vhint" title="The GGUF files for this version are incomplete">Incomplete</span>{/if}
+                          {#if isOwner && row.source !== 'media-components'}
                             <button class="qdel" disabled={localDeleting === `${row.repoDir}::${variant.include}`}
                               onclick={() => deleteLocalVariant(row, variant)} title="Delete from disk">
                               <Trash2 size={13} />
@@ -1407,6 +1491,7 @@
                     {/each}
                   </div>
                 {/if}
+                </details>
               </div>
             </div>
           {:else}<p class="empty">No installed models match these filters.</p>{/each}
@@ -1415,24 +1500,25 @@
     </div>
   {:else}
     <div class="downloadstab" use:scrollFade>
+      <div class="section-intro downloads-intro"><div><span class="section-kicker">ACTIVITY</span><h2>Downloads</h2><p>Track model transfers and review recent activity.</p></div></div>
       {#if !allDownloads.length}
-        <div class="empty nodetail">No downloads yet — grab a model from Discover.</div>
+        <div class="empty nodetail model-empty"><Download size={28} /><h2>No downloads yet</h2><p>Find a model in Discover. Downloads keep running and remain visible here when you leave this page.</p><button class="ghost" onclick={() => setMode('discover')}>Discover models →</button></div>
       {:else}
         <div class="mmhead">
-          <span>{activeDownloadCount} active · {allDownloads.length} total</span>
-          <button class="ghost" onclick={() => clearDownloadHistory()}>Clear finished</button>
+          <span>{activeDownloadCount} active · {completedDownloadCount} complete</span>
+          {#if allDownloads.length > activeDownloadCount}<button class="ghost clear-history" onclick={() => clearDownloadHistory()}>Clear finished</button>{/if}
         </div>
         <div class="mmlist">
-          {#each allDownloads as j (j.key)}
+          {#each allDownloads as j, i (j.key)}
+            {#if i === 0 || i === activeDownloadCount}<div class="job-group-label">{i === 0 && activeDownloadCount ? 'IN PROGRESS' : 'RECENT ACTIVITY'}</div>{/if}
             <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'} use:reveal>
               <div class="jtop">
-                <span class="jrepo mono">{j.repoId}</span>
-                {#if j.variant}<span class="jvariant mono">{j.variant}</span>{/if}
+                <div class="job-identity"><strong>{displayName(j.repoId)}</strong><span>{ownerOf(j.repoId)}{#if j.variant} · {j.variant}{/if}</span></div>
                 <span class="dltag {j.state}">{DL_STATE_LABEL[j.state] ?? j.state}</span>
                 {#if j.state === 'running' || j.state === 'cancelling'}
-                  <button class="ghost" onclick={() => cancel(j.repoId, j.include)} title="Cancel"><Square size={13} /></button>
+                  <button class="ghost job-action" onclick={() => cancel(j.repoId, j.include)} title="Cancel download"><Square size={13} /> Cancel</button>
                 {:else if j.state === 'error'}
-                  <button class="ghost" onclick={() => retryJob(j)} title="Try this download again">Retry</button>
+                  <button class="ghost job-action" onclick={() => retryJob(j)} title="Try this download again">Retry</button>
                 {/if}
               </div>
               <span class="jline mono" class:pending={!['error', 'done', 'cancelled'].includes(j.state) && !(j.state === 'running' && j.downloadedBytes > 0)}>
@@ -1449,7 +1535,7 @@
                 {/if}
               </span>
               {#if j.state === 'running' && j.totalBytes}
-                <div class="jbar"><div class="jfill" style="width:{fmtPct(j)}%"></div></div>
+                <div class="jbar" role="progressbar" aria-label="Download {j.repoId}" aria-valuenow={fmtPct(j)} aria-valuemin="0" aria-valuemax="100"><div class="jfill" style="width:{fmtPct(j)}%"></div></div>
               {:else if j.state === 'running'}
                 <div class="jbar indeterminate"></div>
               {/if}
@@ -1471,6 +1557,10 @@
   .installed-status p { flex:1; min-width:180px; margin:0; color:var(--text-dim); line-height:1.6; }
   .installed-actions { display:flex; gap:8px; margin-bottom:10px; }
   .installed-actions button { display:inline-flex; align-items:center; gap:6px; font-size:11px; }
+  .installed-actions .installed-use, .variant-use { border:1px solid var(--accent-deep); background:var(--accent-deep); color:var(--on-accent); border-radius:7px; padding:7px 10px; font-size:11px; font-weight:600; }
+  .installed-actions .installed-use:hover:not(:disabled), .variant-use:hover:not(:disabled) { background:var(--accent); }
+  .variant-use { flex-shrink:0; }
+  .installed-actions button:disabled, .variant-use:disabled { opacity:.55; cursor:default; }
   .installed-error { color:var(--red); }
   .download-summary { flex-shrink: 0; display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 12px 14px; margin: 0 0 12px; border: 1px solid var(--border-soft); background: var(--bg-card); border-radius: calc(10px * var(--rf)); text-align: left; color: var(--text-dim); }
   .download-summary:hover { background: var(--bg-hover); }
@@ -1480,8 +1570,7 @@
   .download-progress { font-size: 12px; font-variant-numeric: tabular-nums; }
   @media(max-width: 768px) { .download-copy { flex-direction: column; gap: 3px; } .download-copy span { max-width: 140px; } .download-progress { font-size: 11px; } }
 
-  /* Unsloth Hub layout: the panel is a fixed frame — header + toolbar stay
-     pinned, only the two columns scroll. No page-level scrolling at all. */
+  /* Keep navigation in view while the model list and detail scroll. */
   .hub {
     flex: 1; min-height: 0; display: flex; flex-direction: column;
     max-width: 1600px; width: 100%; margin: 0 auto;
@@ -1492,21 +1581,10 @@
 
   .head {
     display: flex; align-items: flex-start; justify-content: space-between;
-    gap: 16px; margin-bottom: 26px; flex-shrink: 0; flex-wrap: wrap;
+    gap: 16px; margin-bottom: 18px; flex-shrink: 0; flex-wrap: wrap;
   }
   h1 { margin: 6px 0; font-size:30px; font-weight:600; letter-spacing:-1.1px; }
   .title p { margin: 4px 0 0; font-size: 13px; color: var(--text-dim); max-width: 560px; }
-  .pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 11.5px; font-weight: 600; color: var(--text-dim);
-    padding: 5px 11px; border-radius: 999px;
-    border: 1px solid var(--border-soft); background: var(--bg-card);
-    white-space: nowrap;
-  }
-  .pill.live { color: var(--text); }
-  .pill .dot.live { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-
   /* Discover / My Models — same segmented-pill look as .tabs */
   .modebar {
     display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 9px;
@@ -1534,15 +1612,16 @@
 
   .recstrip { flex-shrink: 0; margin: 0 0 16px; }
   .recstrip summary { cursor: pointer;
-    margin: 0 0 10px; font-size: 15px; font-weight: 650; letter-spacing: -0.02em;
-    display: list-item; line-height: 1.4; color: var(--text-dim); font-size: 12px; font-weight: 500;
+    margin: 0 0 10px; font-size: 13px; font-weight: 650; letter-spacing: -0.01em;
+    display: list-item; line-height: 1.45; color: var(--text);
   }
+  .recstrip summary span { font-size: 11.5px; font-weight: 400; letter-spacing: 0; color: var(--text-dim); margin-left: 6px; }
   .carousel {
     display: flex; gap: 12px; overflow-x: auto; padding: 0 0 4px;
     scrollbar-width: thin;
   }
   .mcard {
-    flex: 0 0 196px; height: 118px; border-radius: 16px; padding: 12px 14px;
+    flex: 0 0 196px; min-height: 128px; border-radius: 16px; padding: 12px 14px;
     display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
     text-align: left; border: 1px solid transparent; box-sizing: border-box;
     background: var(--bg-raised); border-color:var(--border-soft);
@@ -1894,6 +1973,11 @@
   .fromrepo { font-size: 10.5px; color: var(--text-faint); margin: -6px 0 14px; }
 
   .varbar { margin-bottom: 14px; }
+  .quant-help { margin: 0 0 12px; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+  .selected-job { margin: 0 0 16px; padding: 12px; background: var(--bg-raised); border: 1px solid var(--border-soft); border-radius: 10px; }
+  .selected-job-copy { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 8px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  .selected-job .jbar { margin-bottom: 6px; }
+  .job-link { display: inline-flex; align-items: center; gap: 3px; color: var(--accent); font-size: 11px; padding: 3px 0; }
   .vhint { font-size: 12.5px; color: var(--text-faint); }
   .vhint.err { color: var(--red); }
   .qskeleton { display: flex; flex-direction: column; gap: 6px; }
@@ -1996,6 +2080,11 @@
   .mono { font-family: var(--mono); }
 
   .empty.nodetail { flex: 1; display: flex; align-items: center; justify-content: center; }
+  .empty.model-empty { flex-direction:column; gap:10px; padding:56px 20px; }
+  .model-empty :global(svg) { color:var(--accent); }
+  .model-empty h2 { margin:3px 0 0; color:var(--text); font-size:18px; font-weight:600; }
+  .model-empty p { max-width:390px; margin:0 0 10px; color:var(--text-dim); font-size:13px; line-height:1.6; }
+  .model-empty button { min-height:40px; padding:0 15px; border:1px solid var(--border-soft); border-radius:9px; }
 
   @media (max-width: 900px) {
     .hub { padding: 14px 14px 10px; }
@@ -2003,6 +2092,7 @@
     .list { flex: 0 0 auto; max-height: 46vh; width: 100%; }
     .detail { overflow-y: visible; min-height: 0; }
     .head { flex-direction: column; gap: 8px; }
+    .recstrip summary span { display: block; margin-left: 0; }
   }
   .filters-shell { margin:0 0 18px; flex-shrink:0; }
   .filters-shell summary { cursor:pointer; font-size:11px; color:var(--text-dim); }
@@ -2013,4 +2103,319 @@
   .runtime-note.ready strong { color:var(--green); }
   .runtime-note .dlbtn { flex-shrink:0; }
   @media(max-width:760px) { .hub { padding:20px 16px 12px; }.runtime-note { flex-wrap:wrap; } }
+
+  /* A single path through discovery: search, category, model, file. */
+  .head { align-items: center; margin-bottom: 22px; }
+  .head h1 { margin: 0; font-size: clamp(24px, 2.3vw, 30px); }
+  .title p { margin-top: 7px; line-height: 1.45; }
+  .device-info { position: relative; flex-shrink: 0; z-index: 5; }
+  .device-info summary {
+    list-style: none; display: flex; align-items: center; gap: 8px; cursor: pointer;
+    min-height: 36px; padding: 0 11px; border-radius: 9px; border: 1px solid var(--border-soft);
+    color: var(--text-dim); background: var(--bg-card); font-size: 12px; font-weight: 600;
+  }
+  .device-info summary::-webkit-details-marker { display: none; }
+  .device-info summary span { color: var(--text-faint); font-weight: 500; }
+  .device-info[open] summary { border-color: var(--border); color: var(--text); }
+  .device-info[open] summary :global(svg:last-child) { transform: rotate(180deg); }
+  .device-details {
+    position: absolute; right: 0; top: calc(100% + 7px); min-width: 260px;
+    display: grid; gap: 10px; padding: 15px; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--bg-card); box-shadow: 0 14px 35px rgba(0,0,0,.2);
+    font-size: 12px; color: var(--text-dim);
+  }
+  .device-details span { display: flex; justify-content: space-between; gap: 20px; }
+  .device-details strong { color: var(--text); font-weight: 600; text-align: right; }
+  .modebar {
+    width: 100%; height: auto; gap: 24px; padding: 0; margin-bottom: 22px;
+    border-radius: 0; border-bottom: 1px solid var(--border-soft); background: transparent;
+  }
+  .modebtn {
+    height: 40px; padding: 0 2px; border-radius: 0; border-bottom: 2px solid transparent;
+    font-size: 13px; color: var(--text-dim);
+  }
+  .modebtn.on { background: transparent; box-shadow: none; border-bottom-color: var(--accent); color: var(--text); }
+  .modebadge { margin-left: 7px; }
+  .discover-controls { display: grid; gap: 16px; margin-bottom: 12px; flex-shrink: 0; }
+  .discover-search { display: flex; align-items: center; gap: 10px; width: 100%; }
+  .discover-search .searchbox {
+    flex: 1 1 auto; max-width: none; min-width: 0; height: 43px;
+    border-radius: 10px; padding: 0 14px; background: var(--bg-card);
+  }
+  .discover-search .searchbox input { font-size: 13px; }
+  .discover-search .fselect, .discover-search .fselect select { height: 43px; }
+  .discover-search .fselect select { min-width: 138px; border-radius: 10px; background: var(--bg-card); }
+  .repo-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    height: 43px; padding: 0 13px; white-space: nowrap; border: 1px solid var(--border-soft);
+    border-radius: 10px; background: var(--bg-card); color: var(--text-dim); font-size: 12px; font-weight: 600;
+  }
+  .repo-btn:hover, .repo-btn[aria-expanded="true"] { color: var(--text); background: var(--bg-hover); }
+  .discover-controls .tabs {
+    width: fit-content; height: auto; gap: 5px; padding: 0; border-radius: 0;
+    background: transparent; max-width: 100%; overflow-x: auto;
+  }
+  .discover-controls .tab {
+    flex-shrink: 0; height: 34px; padding: 0 15px; border: 1px solid var(--border-soft);
+    border-radius: 8px; background: transparent; color: var(--text-dim);
+  }
+  .discover-controls .tab.active { color: var(--text); background: var(--bg-card); border-color: var(--accent-dim); box-shadow: none; }
+  .pasterow { margin: 0 0 10px; }
+  .pasterow .paste { width: min(480px, 100%); height: 40px; border-radius: 9px; box-sizing: border-box; }
+  .filters-shell { margin-bottom: 18px; }
+  .filters-shell summary { width: fit-content; padding: 3px 0; font-size: 12px; font-weight: 600; }
+  .filter-group { display: grid; gap: 8px; }
+  .filter-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); }
+  .filters-shell .filters { display: grid; gap: 16px; margin: 12px 0 0; padding: 16px; border: 1px solid var(--border-soft); border-radius: 12px; background: var(--bg-card); }
+  .filters-shell .fg { gap: 8px; }
+  .clear-filters { justify-self: start; border: 0; padding: 4px 0; background: transparent; color: var(--accent); font-size: 12px; }
+  .recstrip { margin-bottom: 16px; }
+  .recstrip summary { margin-bottom: 8px; color: var(--text-dim); }
+  .recstrip[open] summary { color: var(--text); }
+  .split { gap: 22px; }
+  .list { flex-basis: clamp(300px, 32%, 390px); }
+  .rrow { grid-template-columns: 40px minmax(0, 1fr) auto; min-height: 64px; padding: 10px; }
+  .rstats span:first-child, .rstats .rago { display: none; }
+  .detail { padding: 24px; scroll-margin-top: 12px; }
+  .choice-heading { display: grid; gap: 3px; margin: 0 0 13px; }
+  .choice-heading strong { color: var(--text); font-size: 13px; font-weight: 650; }
+  .choice-heading span { color: var(--text-faint); font-size: 11px; line-height: 1.45; }
+  .back-results { display: none; }
+  .installed-toolbar { max-width: 1100px; margin-bottom: 20px; }
+  .installed-toolbar input, .installed-toolbar select { min-height: 40px; border-radius: 9px; }
+  .mymodels .mmlist, .downloadstab .mmlist { max-width: 1100px; gap: 12px; }
+  .mmrow { padding: 18px; gap: 16px; border-radius: 13px; }
+  .mminfo { gap: 9px; }
+  .mmname { font-size: 14px; }
+  .installed-status { margin: 0; font-size: 12px; }
+  .installed-status p { line-height: 1.5; }
+  .installed-actions { margin: 0; flex-wrap: wrap; }
+  .installed-actions button { min-height: 32px; }
+  .installed-files { margin-top: 5px; border-top: 1px solid var(--border-soft); }
+  .installed-files summary {
+    display: flex; align-items: center; gap: 5px; width: fit-content; padding: 11px 0 2px;
+    list-style: none; cursor: pointer; color: var(--text-dim); font-size: 12px; font-weight: 600;
+  }
+  .installed-files summary::-webkit-details-marker { display: none; }
+  .installed-files[open] summary :global(svg) { transform: rotate(180deg); }
+  .installed-files .qlist { margin-top: 8px; }
+  .jobbar { max-width: 1100px; padding: 17px 19px; margin: 0; gap: 12px; border-radius: 13px; }
+  .job-identity { display: grid; gap: 4px; flex: 1; min-width: 0; }
+  .job-identity strong { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-identity span { font-size: 11px; color: var(--text-faint); overflow-wrap: anywhere; }
+  .jobbar .jline { font-family: inherit; font-size: 12px; white-space: normal; line-height: 1.4; }
+  .jobbar .jbar { height: 6px; }
+  .downloadstab .mmhead, .mymodels .mmhead { max-width: 1100px; }
+  @media (max-width: 900px) {
+    .hub { padding: 18px 18px 16px; }
+    .head { flex-direction: row; align-items: flex-start; gap: 10px; }
+    .list { max-height: min(38vh, 340px); padding-bottom: 8px; }
+    .detail { scroll-margin-top: 8px; }
+    .split:not(.show-detail) .detail, .split.show-detail .list { display: none; }
+    .split.show-detail .detail { display: block; flex: 1; }
+    .hub.mobile-detail .discover-controls, .hub.mobile-detail .filters-shell,
+    .hub.mobile-detail .recstrip, .hub.mobile-detail .download-summary { display: none; }
+    .back-results { display: inline-flex; align-items: center; gap: 5px; margin: 0 0 16px; padding: 0; border: 0; background: transparent; color: var(--accent); font-size: 12px; font-weight: 600; }
+    .back-results :global(svg) { transform: rotate(180deg); }
+  }
+  @media (max-width: 600px) {
+    .hub { padding: 16px 14px max(16px, env(safe-area-inset-bottom)); }
+    .head { flex-wrap: wrap; margin-bottom: 16px; }
+    .head h1 { font-size: 24px; }
+    .title p { font-size: 12px; }
+    .device-info { width: 100%; }
+    .device-info summary { width: fit-content; box-sizing: border-box; }
+    .device-details { left: 0; right: auto; max-width: calc(100vw - 28px); min-width: min(280px, calc(100vw - 28px)); box-sizing: border-box; }
+    .modebar { gap: 0; justify-content: space-between; margin-bottom: 16px; }
+    .modebtn { padding: 0 5px; font-size: 12px; }
+    .discover-controls { gap: 12px; }
+    .discover-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .discover-search .searchbox { grid-column: 1 / -1; width: 100%; }
+    .discover-search .fselect { min-width: 0; }
+    .discover-search .fselect select { width: 100%; min-width: 0; }
+    .repo-btn { padding: 0 11px; }
+    .discover-controls .tabs { width: 100%; }
+    .discover-controls .tab { padding: 0 12px; font-size: 11px; }
+    .mmrow { padding: 14px; gap: 10px; }
+    .mmrow .avatar { width: 34px; height: 34px; border-radius: 9px; }
+    .mmtop { flex-wrap: wrap; }
+    .mmname { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+    .mmwhen { display: none; }
+    .mmsize { margin-left: 0; }
+    .installed-status { gap: 6px; }
+    .installed-status p { flex-basis: 100%; min-width: 0; }
+    .installed-actions { gap: 5px; }
+    .mmvariant { flex-wrap: wrap; }
+    .mmvariant .qleft { flex-basis: 100%; }
+    .mmvariant .qright { width: 100%; justify-content: flex-end; }
+    .download-summary { gap: 8px; }
+    .download-progress { max-width: 90px; text-align: right; }
+    .detail { padding: 18px; }
+    .dhead { flex-wrap: wrap; }
+    .dacts { margin-left: auto; }
+    .jobbar { padding: 14px; }
+  }
+
+  /* Library surface: calm hierarchy, explicit states, and clear actions. */
+  .hub { max-width: 1480px; padding: 32px clamp(20px, 3.2vw, 48px) 24px; }
+  .head { align-items: end; margin-bottom: 24px; }
+  .eyebrow, .section-kicker, .detail-eyebrow, .job-group-label {
+    display: block; color: var(--text-faint); font-size: 10px; font-weight: 700;
+    letter-spacing: .12em; line-height: 1.4;
+  }
+  .head h1 { margin: 7px 0 4px; font-size: clamp(30px, 3vw, 38px); font-weight: 650; letter-spacing: -.045em; }
+  .title p { font-size: 13px; }
+  .device-info summary { border-radius: 12px; min-height: 40px; padding: 0 14px; }
+  .device-details { border-radius: 14px; }
+  .modebar { gap: 30px; margin-bottom: 24px; }
+  .modebtn { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 2px; font-weight: 550; }
+  .modebtn :global(svg) { opacity: .75; }
+  .modebtn.on :global(svg) { opacity: 1; color: var(--accent); }
+  .modebadge { margin-left: 2px; background: var(--accent-glow); color: var(--accent); }
+  .section-intro { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
+  .section-intro h2 { margin: 4px 0; font-size: 21px; font-weight: 650; letter-spacing: -.025em; }
+  .section-intro p { margin: 0; font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+  .section-action { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex-shrink: 0;
+    min-height: 39px; padding: 0 14px; border: 1px solid var(--accent-deep); border-radius: 10px;
+    background: var(--accent-deep); color: var(--on-accent); font-size: 12px; font-weight: 650; }
+  .section-action:hover { background: var(--accent); border-color: var(--accent); }
+  .discover-controls { gap: 14px; margin-bottom: 12px; }
+  .discover-search { gap: 8px; }
+  .discover-search .searchbox { background: var(--bg-card); border: 1px solid var(--border); border-radius: 11px; }
+  .discover-search .searchbox:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .discover-search .fselect select, .repo-btn { border-color: var(--border); border-radius: 11px; }
+  .discover-controls .tabs { width: 100%; border-bottom: 1px solid var(--border-soft); gap: 22px; }
+  .discover-controls .tab { height: 38px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent;
+    border-radius: 0; background: transparent; font-size: 12px; font-weight: 550; }
+  .discover-controls .tab.active { border-color: var(--accent); background: transparent; color: var(--text); }
+  .pasterow { margin: 0 0 14px; }
+  .pasterow .paste { flex: 1; width: min(500px, 100%); border-radius: 10px; }
+  .filters-shell { margin-bottom: 14px; }
+  .filters-shell summary { color: var(--text-dim); }
+  .recstrip { margin-bottom: 18px; }
+  .recstrip summary { display: flex; align-items: baseline; gap: 8px; margin-bottom: 11px; list-style: none; }
+  .recstrip summary::-webkit-details-marker { display: none; }
+  .recstrip summary::after { content: '⌄'; margin-left: auto; color: var(--text-faint); font-size: 16px; line-height: 1; }
+  .recstrip[open] summary::after { transform: rotate(180deg); }
+  .recstrip summary .rec-title { margin: 0; color: var(--text); font-size: 13px; font-weight: 650; }
+  .recstrip .carousel { padding-bottom: 5px; }
+  .mcard { min-height: 108px; flex-basis: 180px; gap: 6px; padding: 12px; border-color: var(--border-soft); border-radius: 13px; }
+  .mcard.on { border-color: var(--accent-dim); outline: 0; }
+  .mcard .avatar { width: 35px; height: 35px; }
+  .mcname { min-height: 0; max-height: 2.5em; font-size: 12px; }
+  .mcowner { font-size: 10.5px; }
+  .split { gap: 16px; }
+  .list { flex-basis: clamp(285px, 31%, 370px); gap: 5px; padding-right: 4px; }
+  .lhead { display: flex; justify-content: space-between; padding: 5px 9px 10px; background: var(--bg); }
+  .rrow { min-height: 66px; padding: 10px; border: 1px solid var(--border-soft); border-radius: 11px;
+    background: var(--bg-card); }
+  .rrow:hover { border-color: var(--border); }
+  .rrow.active { border-color: var(--accent-dim); background: color-mix(in srgb, var(--accent) 7%, var(--bg-card));
+    box-shadow: inset 2px 0 var(--accent); }
+  .rname { gap: 4px; font-size: 12.5px; }
+  .rname :global(.curated-mark) { color: var(--accent); flex-shrink: 0; }
+  .rowner { gap: 0; font-size: 11px; }
+  .row-type, .row-gated { color: var(--text-dim); }
+  .row-gated { color: var(--yellow); }
+  .rstats { color: var(--text-faint); }
+  .detail { padding: 25px 27px; border-color: var(--border); border-radius: 15px; background: var(--bg-card); }
+  .detail-eyebrow { margin-bottom: 16px; }
+  .dhead { margin-bottom: 16px; }
+  .dtitle h2 { font-size: 20px; }
+  .badges { margin-bottom: 22px; }
+  .badge { padding: 5px 10px; border: 1px solid var(--border-soft); }
+  .varbar { border-top: 1px solid var(--border-soft); padding-top: 18px; }
+  .choice-heading strong { font-size: 14px; }
+  .choice-heading span { font-size: 12px; }
+  .vhead { padding: 12px; border: 1px solid var(--border-soft); border-radius: 11px; background: var(--bg-raised); }
+  .vhead.mediahead { flex-wrap: wrap; }
+  .qrow { border-bottom: 1px solid var(--border-soft); border-radius: 7px; }
+  .qrow:last-child { border-bottom-color: transparent; }
+  .dlbtn { border-radius: 9px; }
+  .stats { padding: 14px 0; border-top: 1px solid var(--border-soft); }
+  .readme { max-width: 780px; }
+  .installed-intro, .downloads-intro { margin-bottom: 20px; }
+  .library-summary { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 20px; border: 1px solid var(--border);
+    border-radius: 14px; background: var(--bg-card); }
+  .library-summary > div { min-width: 145px; flex: 1; display: flex; flex-direction: column; gap: 4px;
+    padding: 17px 21px; border-right: 1px solid var(--border-soft); }
+  .library-summary > div:last-child { border-right: 0; }
+  .library-summary strong { color: var(--text); font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
+  .library-summary span { color: var(--text-faint); font-size: 11px; }
+  .library-summary .summary-attention strong { color: var(--yellow); }
+  .installed-toolbar { gap: 8px; margin-bottom: 18px; }
+  .installed-toolbar input { max-width: 470px; border-radius: 10px; background: var(--bg-card); }
+  .installed-toolbar select { border-radius: 10px; background: var(--bg-card); }
+  .mymodels .mmhead, .downloadstab .mmhead { max-width: 100%; padding: 0 0 11px; font-size: 10px; font-weight: 700; letter-spacing: .1em; }
+  .result-count { display: inline-block; padding: 2px 6px; margin-left: 4px; border-radius: 5px;
+    background: var(--bg-hover); color: var(--text-dim); font-size: 10px; letter-spacing: 0; }
+  .mymodels .mmlist, .downloadstab .mmlist { max-width: 100%; gap: 9px; }
+  .mmrow { align-items: start; padding: 17px; border: 1px solid var(--border); border-radius: 13px; background: var(--bg-card); }
+  .mmrow .avatar { width: 38px; height: 38px; }
+  .mminfo { gap: 0; }
+  .mmtop { align-items: start; gap: 12px; }
+  .mmname { color: var(--text); font-size: 14px; font-weight: 650; }
+  .installed-meta { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 3px 0 11px;
+    color: var(--text-faint); font-size: 11px; }
+  .mmsize { margin-left: auto; color: var(--text-faint); }
+  .installed-status { display: flex; align-items: center; gap: 7px; margin: 0 0 14px; font-size: 11px; }
+  .installed-status > span { border-radius: 999px; padding: 4px 9px; background: var(--bg-hover); border-color: var(--border-soft); }
+  .installed-status > span.available { color: var(--green); background: color-mix(in srgb, var(--green) 8%, var(--bg-card));
+    border-color: color-mix(in srgb, var(--green) 25%, var(--border-soft)); }
+  .installed-status.status-attention > span:first-child { color: var(--yellow); }
+  .installed-status p { flex-basis: 100%; margin-top: 2px; color: var(--text-faint); }
+  .installed-actions { gap: 7px; margin-bottom: 3px; }
+  .installed-actions button { min-height: 34px; font-size: 11px; border-radius: 8px; }
+  .installed-actions .installed-use, .variant-use { border-radius: 8px; }
+  .installed-files { margin-top: 10px; }
+  .installed-files summary { font-size: 11px; }
+  .job-group-label { margin: 4px 0 2px; }
+  .downloadstab .mmhead { letter-spacing: 0; font-size: 11px; font-weight: 500; }
+  .clear-history { font-size: 11px; }
+  .jobbar { padding: 17px 18px; margin: 0; border-color: var(--border); background: var(--bg-card); }
+  .jobbar.err { border-color: color-mix(in srgb, var(--red) 30%, var(--border)); color: var(--text); }
+  .jobbar.done { border-color: var(--border); }
+  .job-identity strong { font-size: 13px; }
+  .dltag { text-transform: none; letter-spacing: 0; font-size: 11px; padding: 4px 9px; }
+  .job-action { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; }
+  .jobbar .jbar { height: 7px; }
+  .download-summary { border-color: var(--border); border-radius: 10px; }
+  .empty.model-empty { margin: auto; border: 1px dashed var(--border); border-radius: 14px; background: var(--bg-card); }
+  @media (max-width: 900px) {
+    .hub { padding: 22px 20px 18px; }
+    .split { min-height: 0; }
+    .split:not(.show-detail) .list { flex: 1 1 auto; width: 100%; max-height: 100%; }
+    .detail { padding: 22px; }
+  }
+  @media (max-width: 600px) {
+    .hub { padding: 18px 14px max(18px, env(safe-area-inset-bottom)); }
+    .head { gap: 14px; }
+    .head h1 { font-size: 29px; }
+    .modebar { gap: 0; justify-content: space-between; margin-bottom: 18px; }
+    .modebtn { gap: 5px; height: 42px; padding: 0 3px; font-size: 11px; }
+    .modebtn :global(svg) { width: 13px; height: 13px; }
+    .section-intro { align-items: start; }
+    .section-intro h2 { font-size: 19px; }
+    .section-action { padding: 0 10px; font-size: 11px; }
+    .discover-search { grid-template-columns: minmax(0, 1fr) auto; }
+    .repo-btn span { display: none; }
+    .repo-btn { width: 43px; padding: 0; }
+    .discover-controls .tabs { gap: 17px; }
+    .discover-controls .tab { font-size: 11px; }
+    .recstrip summary { display: block; }
+    .recstrip summary span { display: block; }
+    .recstrip .carousel { gap: 8px; }
+    .mcard { flex-basis: 150px; }
+    .library-summary > div { min-width: 50%; flex: 0 0 50%; box-sizing: border-box; padding: 13px; }
+    .library-summary > div:nth-child(2n) { border-right: 0; }
+    .library-summary > div:nth-child(n+3) { border-top: 1px solid var(--border-soft); }
+    .mmrow { padding: 14px; }
+    .mmrow .avatar { width: 34px; height: 34px; }
+    .installed-status { align-items: start; }
+    .installed-status p { margin-top: 4px; }
+    .detail { padding: 18px; }
+    .vhead { gap: 8px; }
+    .vpicklabel { width: 100%; }
+    .jobbar { padding: 14px; }
+  }
 </style>

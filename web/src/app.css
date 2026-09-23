@@ -10,8 +10,8 @@
   --border: #2c2925;
   --border-soft: #221f1c;
   --text: #ede8dc;
-  --text-dim: #a59d8e;
-  --text-faint: #6f695e;
+  --text-dim: #b2a99b;
+  --text-faint: #8e8579;
   --accent: #c89968;
   --accent-deep: #a67c52;
   --accent-dim: #7d5f3e;
@@ -369,7 +369,7 @@ html[data-fontsize='large'] .md, html[data-fontsize='large'] .ububble { font-siz
    Everything here dies instantly under data-anim='off' and reduced-motion. */
 
 /* messages, queued turns and follow-up chips settle in instead of popping */
-.urow, .arow, .qmsg, .followups {
+.urow, .arow, .qmsg {
   animation: fadeIn 160ms ease-out;
 }
 /* interactive cards get a soft lift + real shadow instead of a flat tint
@@ -422,20 +422,6 @@ html[data-anim='full'] :is(.fup, .chip, .recent):nth-child(5) { animation-delay:
 body { zoom: var(--ui-scale); }
 @media (max-width: 768px) {
   body { zoom: 1 !important; }
-}
-
-/* ---- background: gradient / animated ---- */
-html[data-bg='gradient'] body,
-html[data-bg='animated'] body {
-  background: linear-gradient(var(--bg-angle), var(--bg-grad-a), var(--bg-grad-b)) fixed;
-}
-html[data-bg='animated'] body {
-  background-size: 240% 240%;
-  animation: dpBgDrift 38s ease-in-out infinite alternate;
-}
-@keyframes dpBgDrift {
-  from { background-position: 0% 0%; }
-  to { background-position: 100% 100%; }
 }
 
 /* ---- glass: frosted / liquid on the app's chrome surfaces ----
@@ -491,23 +477,6 @@ html[data-anim='full'] button:not(:disabled):active { transform: translateY(0) s
 html[data-anim='full'] .md a { transition: color 120ms ease; }
 html[data-anim='full'] .md a:hover { color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
 
-/* ---- background: aurora — slow pond lights drifting over the theme bg ---- */
-html[data-bg='aurora'] body {
-  background-color: var(--bg);
-  background-image:
-    radial-gradient(58% 46% at 22% 8%, color-mix(in srgb, var(--bg-grad-a) 26%, transparent), transparent 72%),
-    radial-gradient(48% 42% at 86% 22%, color-mix(in srgb, var(--bg-grad-b) 20%, transparent), transparent 70%),
-    radial-gradient(72% 58% at 50% 112%, color-mix(in srgb, var(--accent-dim) 15%, transparent), transparent 74%);
-  background-size: 190% 190%, 170% 170%, 210% 210%;
-  background-attachment: fixed;
-  animation: dpAurora 52s ease-in-out infinite alternate;
-}
-@keyframes dpAurora {
-  from { background-position: 0% 0%, 100% 0%, 50% 100%; }
-  50% { background-position: 38% 22%, 62% 38%, 42% 86%; }
-  to { background-position: 66% 8%, 30% 55%, 58% 94%; }
-}
-
 /* =====================================================================
    Experimental (Theme Studio → Effects → Experimental). Premium motion:
    quiet entrances, soft lifts, gentle crossfades. Nothing bounces, nothing
@@ -521,7 +490,6 @@ html[data-lab='on'] .view-panel { animation: labPanelIn 260ms cubic-bezier(0.2, 
 html[data-lab='on'] .urow,
 html[data-lab='on'] .arow,
 html[data-lab='on'] .qmsg,
-html[data-lab='on'] .followups { animation: labRise 300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
 @keyframes labRise {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }
@@ -618,18 +586,6 @@ html[data-caret='dot'] .dp-caret {
 .rv.rv-in { opacity: 1; }
 .imgload { opacity: 0; transition: opacity 360ms ease; }
 .imgload.imgdone { opacity: 1; }
-.sf-top {
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px);
-  mask-image: linear-gradient(180deg, transparent 0, #000 14px);
-}
-.sf-bot {
-  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
-  mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
-}
-.sf-top.sf-bot {
-  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent);
-  mask-image: linear-gradient(180deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent);
-}
 html[data-anim='off'] .rv,
 html[data-anim='off'] .imgload {
   opacity: 1 !important;

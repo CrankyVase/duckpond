@@ -8,7 +8,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "test:workspace": "node test/agentContext.test.mjs && node test/workspaceReliability.test.mjs && node test/projectFiles.test.mjs && node test/mediaPause.test.mjs",
-    "test": "node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs && node test/hfassets.test.mjs && node test/livejobs.test.mjs && node test/deployment.test.mjs && node test/deploy-script.test.mjs && node test/modelKind.test.mjs && node test/streamProgress.test.mjs && node test/workspacePreview.test.mjs && node test/downloadRate.test.mjs && node test/mediaJobs.test.mjs && node test/mediaEta.test.mjs",
+    "test": "node test/chatHarness.test.mjs && node test/routerPreset.test.mjs && node test/localInventory.test.mjs && node test/installedChatModel.test.mjs && node test/contextsaver.test.mjs && node test/reasoning.test.mjs && node test/hfhub.test.mjs && node test/hfassets.test.mjs && node test/livejobs.test.mjs && node test/chatJobDelivery.test.mjs && node test/deployment.test.mjs && node test/deploy-script.test.mjs && node test/modelKind.test.mjs && node test/streamProgress.test.mjs && node test/streamReliability.test.mjs && node test/workspacePreview.test.mjs && node test/downloadRate.test.mjs && node test/downloadRecovery.test.mjs && node test/mediaJobs.test.mjs && node test/mediaEta.test.mjs",
     "test:media": "python3 -m unittest discover -s image-bridge/test -p \"*_test.py\""
   },
   "dependencies": {

@@ -116,6 +116,12 @@ export async function cancelMediaJob(id) {
   await refreshMediaJobs();
 }
 
+export async function deleteMediaJob(id) {
+  await api(`/api/media/jobs/${id}`, { method: 'DELETE' });
+  mediaJobs.jobs = mediaJobs.jobs.filter((job) => job.id !== id);
+  void refreshMediaJobs().catch(() => {});
+}
+
 // Retry a finished/failed/cancelled job with the same prompt + params.
 export async function retryMediaJob(job) {
   const { job: next } = await api(`/api/media/jobs/${job.id}/retry`, {

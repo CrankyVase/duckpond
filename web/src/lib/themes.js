@@ -60,51 +60,13 @@ export const DARK_SHADOW = '0 16px 48px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 
 export const LIGHT_SHADOW = '0 16px 48px rgba(70, 55, 30, 0.16), 0 4px 12px rgba(70, 55, 30, 0.10)';
 
 
-// ---- signature scene CSS, baked into showcase presets (picking the preset
-// adopts these into Custom CSS where the user can read/tweak/delete them) ----
-
-export const SCENE_SYNTHWAVE = `/* — dusk bloom: one soft magenta horizon light, nothing else — */
-#app::before {
-  content: ''; position: fixed; left: 0; right: 0; bottom: 0; height: 55vh;
-  z-index: -1; pointer-events: none;
-  background:
-    radial-gradient(85% 70% at 50% 112%, rgba(255, 94, 196, 0.14), transparent 68%),
-    radial-gradient(120% 55% at 50% 118%, rgba(177, 74, 237, 0.10), transparent 72%);
-}`;
-
-export const SCENE_ABYSS = `/* — depth: cold light falling from the surface — */
-#app::before {
-  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  background:
-    radial-gradient(120% 60% at 68% -18%, rgba(120, 200, 235, 0.10), transparent 60%),
-    linear-gradient(172deg, transparent 60%, rgba(1, 5, 10, 0.5));
-}`;
-
-export const SCENE_EMBER = `/* — banked coals: faint warmth from below — */
-#app::before {
-  content: ''; position: fixed; left: 0; right: 0; bottom: 0; height: 44vh;
-  z-index: -1; pointer-events: none;
-  background: radial-gradient(75% 100% at 50% 112%, rgba(224, 138, 78, 0.13), transparent 70%);
-}`;
-
-export const SCENE_NIGHTSHADE = `/* — night bloom: two still, barely-there washes — */
-#app::before {
-  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  background:
-    radial-gradient(60% 45% at 20% -8%, rgba(180, 138, 224, 0.10), transparent 65%),
-    radial-gradient(55% 50% at 85% 108%, rgba(90, 60, 150, 0.10), transparent 70%);
-}`;
-
-export const SCENE_PHOSPHOR = `/* — CRT: fine scanlines, soft vignette — */
-body::after {
-  content: ''; position: fixed; inset: 0; z-index: 2147483001; pointer-events: none;
-  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
-}
-#app::before {
-  content: ''; position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;
-  background: radial-gradient(130% 100% at 50% 45%, transparent 68%, rgba(0, 0, 0, 0.28));
-}
-.md, .ububble { text-shadow: 0 0 6px rgba(79, 220, 123, 0.18); }`;
+// Showcase presets rely on their palette and flat surfaces. Keep these exports
+// so older saved preset IDs still resolve without injecting decorative layers.
+export const SCENE_SYNTHWAVE = '';
+export const SCENE_ABYSS = '';
+export const SCENE_EMBER = '';
+export const SCENE_NIGHTSHADE = '';
+export const SCENE_PHOSPHOR = '';
 
 // Built-in handcrafted presets. `pond` is the default/featured original.
 // Everything else is browsable under Dark/Light → color group.
@@ -121,7 +83,7 @@ export const PRESETS = [
       'bg': '#0e0d0c', 'bg-sidebar': '#141312', 'bg-raised': '#1b1917', 'bg-card': '#1d1b19',
       'bg-hover': '#262320', 'bg-input': '#191817', 'bg-code': '#11100e', 'bg-code-inline': '#201d1a',
       'border': '#2c2925', 'border-soft': '#221f1c',
-      'text': '#ede8dc', 'text-dim': '#a59d8e', 'text-faint': '#6f695e',
+      'text': '#ede8dc', 'text-dim': '#b2a99b', 'text-faint': '#8e8579',
       'accent': '#c89968', 'accent-deep': '#a67c52', 'accent-dim': '#7d5f3e', 'on-accent': '#16110a',
       'green': '#6b9e5a', 'yellow': '#cfa74f', 'red': '#c0604f',
       'scrollbar': '#35312c',
@@ -129,7 +91,7 @@ export const PRESETS = [
   },
   {
     id: 'mallard',
-    effects: { glass: 'frosted', glassBlur: 12, glassOpacity: 0.62, bg: 'gradient', bgA: '#08100c', bgB: '#123326', bgAngle: 168 },
+    effects: { glass: 'frosted', glassBlur: 12, glassOpacity: 0.62, bg: 'solid' },
     name: 'Mallard',
     dark: true,
     group: 'green',
@@ -147,7 +109,7 @@ export const PRESETS = [
   },
   {
     id: 'slate',
-    effects: { glass: 'frosted', glassBlur: 14, glassOpacity: 0.6, bg: 'gradient', bgA: '#0b0e14', bgB: '#1c2c45', bgAngle: 160 },
+    effects: { glass: 'frosted', glassBlur: 14, glassOpacity: 0.6, bg: 'solid' },
     name: 'Slate',
     dark: true,
     group: 'blue',
@@ -165,7 +127,7 @@ export const PRESETS = [
   },
   {
     id: 'nightshade',
-    effects: { glow: true, bg: 'gradient', bgA: '#0e0a16', bgB: '#251540', bgAngle: 150 },
+    effects: { glow: true, bg: 'solid' },
     css: SCENE_NIGHTSHADE,
     name: 'Nightshade',
     dark: true,
@@ -184,7 +146,7 @@ export const PRESETS = [
   },
   {
     id: 'ember',
-    effects: { bg: 'gradient', bgA: '#120b07', bgB: '#241108', bgAngle: 170 },
+    effects: { bg: 'solid' },
     css: SCENE_EMBER,
     name: 'Ember',
     dark: true,
@@ -203,7 +165,7 @@ export const PRESETS = [
   },
   {
     id: 'duckling',
-    effects: { bg: 'gradient', bgA: '#fbf7ef', bgB: '#f0e2c4', bgAngle: 160 },
+    effects: { bg: 'solid' },
     name: 'Duckling',
     dark: false,
     group: 'gold',
@@ -264,7 +226,7 @@ export const PRESETS = [
     group: 'pink',
     category: 'fun',
     blurb: 'plum dusk, a quiet magenta glow at the horizon',
-    effects: { glow: true, bg: 'gradient', bgA: '#191126', bgB: '#251333', bgAngle: 168 },
+    effects: { glow: true, bg: 'solid' },
     css: SCENE_SYNTHWAVE,
     colors: {
       'bg': '#161020', 'bg-sidebar': '#1a1326', 'bg-raised': '#251b35', 'bg-card': '#271d38',
@@ -283,7 +245,7 @@ export const PRESETS = [
     group: 'teal',
     category: 'fun',
     blurb: 'deep water — glass panels lit from the surface',
-    effects: { glass: 'liquid', glassBlur: 20, glassOpacity: 0.55, bg: 'gradient', bgA: '#04111c', bgB: '#0b2e42', bgAngle: 174 },
+    effects: { glass: 'liquid', glassBlur: 20, glassOpacity: 0.55, bg: 'solid' },
     css: SCENE_ABYSS,
     colors: {
       'bg': '#071420', 'bg-sidebar': '#0a1a28', 'bg-raised': '#122636', 'bg-card': '#132839',
@@ -365,9 +327,6 @@ export const ANIM_MODES = [
 ];
 export const BG_MODES = [
   ['solid', 'Solid', 'theme background'],
-  ['gradient', 'Gradient', 'two-color blend'],
-  ['animated', 'Animated', 'slow drifting blend'],
-  ['aurora', 'Aurora', 'soft pond lights, always moving'],
 ];
 export const FONT_OPTIONS = [
   ['default', 'Pond', "'Inter Variable', 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif"],
@@ -383,9 +342,7 @@ export const DEFAULT_EFFECTS = {
   glow: false,         // accent glow on primary controls
   anim: 'subtle',      // off | subtle | full
   lab: false,          // experimental premium motion pack
-  bg: 'solid',         // solid | gradient | animated | aurora
-  bgA: '', bgB: '',    // gradient stops ('' → derived from the theme)
-  bgAngle: 160,        // degrees
+  bg: 'solid',
   uiScale: 1,          // 0.85..1.25
   font: 'default',
 };

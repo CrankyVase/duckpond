@@ -175,7 +175,7 @@
   </div>
 {:else}
   <div class="arow fade-in" class:pinned={msg.pinned} class:live={streaming}>
-    <div class="avatar"><Duck px={0.8} mood={streaming ? mood : 'idle'} /></div>
+    <div class="avatar"><Duck px={0.8} mood={streaming ? mood : 'idle'} still={!streaming} interactive={streaming || last} /></div>
     <div class="abody">
       {#if search}
         <SearchTrace {search} />
@@ -258,8 +258,6 @@
           </button>
           <button class="ic danger" onclick={() => ondelete?.(msg)} title="Delete (and everything after it)"><Trash2 size={14} /></button>
           {#if modelLabel}<span class="stat model" title="Answered by {modelLabel}">{modelLabel}</span>{/if}
-          {#if msg.tok_per_sec}<span class="stat">{msg.tok_per_sec.toFixed(1)} tok/s</span>{/if}
-          {#if msg.tokens_out}<span class="stat">{msg.tokens_out} tok</span>{/if}
         </div>
       {/if}
     </div>
@@ -333,12 +331,10 @@
   }
   .tbody.live { max-height: 190px; }
   .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 1.6s linear infinite;
+    color: var(--text-dim);
+    animation: pulse 1.6s ease-in-out infinite;
   }
-  @keyframes shimmer { to { background-position: -200% 0; } }
+  @keyframes pulse { 50% { opacity: .55; } }
 
   .nocontent {
     font-size: 13px; color: var(--text-dim);

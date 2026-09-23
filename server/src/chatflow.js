@@ -11,6 +11,7 @@ import {
 import { checkUserContent } from './contentFilter.js';
 import { generateViaBridge, stepsForQuality } from './imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from './websearch.js';
+import { COMPACT_PROMPT, compactTranscript } from './compaction.js';
 import { corePrompt } from './settings.js';
 import { diffusionModelFile, generateDiffusion } from './diffusiongen.js';
 import { costFor, modelRowForRemoteId, recordEvent } from './costs.js';
@@ -182,6 +183,8 @@ export async function runInlineSearch({
   const steps = [];          // [{ query, sites:[{title,url,domain,read}] }]
   const sources = [];        // pages actually read → citation list
   const seen = new Set();
+  const searched = new Set();
+  const readPages = new Set();
   let reads = 0, searches = 0;
   const reasons = [];        // reasoning from every round → full think→search→think chain
   let timings = firstResult.timings, usage = firstResult.usage;
@@ -208,7 +211,7 @@ export async function runInlineSearch({
   let res = firstResult;
   let finalText = '';
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    if (abort.signal.aborted) break;
+    abort.signal.throwIfAborted();
     const calls = res.toolCalls ?? [];
     if (res.reasoning) reasons.push(res.reasoning);
     if (!calls.length) { finalText = res.content ?? ''; break; }
@@ -224,34 +227,42 @@ export async function runInlineSearch({
       if (args === null) {
         result = 'ERROR: tool arguments were not valid JSON (maybe truncated). Retry with complete JSON.';
       } else if (name === 'web_search') {
-        if (searches >= MAX_SEARCHES) {
+        const query = String(args.query ?? '').trim().slice(0, 300);
+        const queryKey = query.toLowerCase().replace(/\s+/g, ' ');
+        if (searched.has(queryKey)) {
+          result = 'You already ran this search in this turn. Use the results above or try a meaningfully different query.';
+        } else if (searches >= MAX_SEARCHES) {
           result = 'Search limit reached — answer now with what you have, citing the pages you read.';
         } else {
           searches += 1;
-          const query = String(args.query ?? '').slice(0, 300);
+          searched.add(queryKey);
           steps.push({ query, sites: [] });
           send({ type: 'search', phase: 'query', query });
           try {
             const sp = spec?.take('web_search', query);
             const early = sp ? await sp : null;
             if (early?.ok) log?.info({ query }, 'speculative web_search hit');
-            const { results, text } = early?.ok ? early.r : await searchWebStructured(query);
+            const { results, text } = early?.ok ? early.r : await searchWebStructured(query, { signal: abort.signal });
             for (const r of results) { addSite(r.title, r.url, false, r.content); send({ type: 'search', phase: 'site', title: r.title, url: r.url, domain: sourceLabel(r.url), read: false, snippet: r.content }); }
             result = text;
           } catch (err) { result = `ERROR: search failed: ${err.message}`; log?.warn?.({ err }, 'web_search failed'); }
         }
       } else if (name === 'fetch_page') {
-        if (reads >= MAX_READS) {
+        const url = String(args.url ?? '').trim();
+        const pageKey = url.split('#')[0];
+        if (readPages.has(pageKey)) {
+          result = 'You already read this page in this turn. Use the page text above; do not fetch it again.';
+        } else if (reads >= MAX_READS) {
           result = `Page-read limit (${MAX_READS}) reached — stop reading and answer now, citing the pages you read.`;
         } else {
           reads += 1;
-          const url = String(args.url ?? '');
+          readPages.add(pageKey);
           send({ type: 'search', phase: 'reading', url, domain: sourceLabel(url) });
           try {
             const sp = spec?.take('fetch_page', url);
             const early = sp ? await sp : null;
             if (early?.ok) log?.info({ url }, 'speculative fetch_page hit');
-            const { title, text } = early?.ok ? early.r : await fetchPageStructured(url);
+            const { title, text } = early?.ok ? early.r : await fetchPageStructured(url, { signal: abort.signal });
             addSite(title, url, true);
             addSource(title, url);
             send({ type: 'search', phase: 'site', title, url, domain: sourceLabel(url), read: true });
@@ -306,6 +317,7 @@ export async function runInlineSearch({
     // so the model is forced to finalize.
     send({ type: 'reset_text' });
     spec?.newRound();
+    abort.signal.throwIfAborted();
     const capped = reads >= MAX_READS || round === MAX_ROUNDS - 1;
     res = await streamChat({
       model: conv.model_id, messages,
@@ -326,61 +338,6 @@ export async function runInlineSearch({
   return { text, reasoning: reasons.join('\n\n'), timings, usage, search: { steps, sources } };
 }
 
-// ---------- follow-up prompt chips (after a reply lands) ----------
-
-/** Ask the warm model for 3 short clickable next-messages. Non-fatal helper. */
-export async function generateFollowups({ model, userText, replyText, abortSignal }) {
-  const { content } = await streamChat({
-    model,
-    messages: [{
-      role: 'user',
-      content:
-        'You write short follow-up prompts the USER might click to continue this chat.\n'
-        + 'Output EXACTLY 3 lines. Nothing else — no numbers, no bullets, no quotes, no intro.\n'
-        + 'Each line is one complete message the user would send next (question or request).\n'
-        + 'Rules: under 70 characters each; specific to THIS exchange (not generic filler like '
-        + '"tell me more"); useful and distinct from each other; same language as the user.\n\n'
-        + `---\nUser: ${String(userText).slice(0, 900)}\n\nAssistant: ${String(replyText).slice(0, 1400)}\n---`,
-    }],
-    params: {
-      max_tokens: 220,
-      temperature: 0.55,
-      chat_template_kwargs: { enable_thinking: false },
-    },
-    abortSignal,
-  });
-  return parseFollowupLines(content);
-}
-
-function parseFollowupLines(raw) {
-  if (!raw) return [];
-  // drop thinking-style fences / leading labels if a model ignores instructions
-  let text = String(raw)
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/<\/?think>/gi, ' ');
-  const lines = text.split('\n')
-    .map((l) => l.trim())
-    .map((l) => l
-      .replace(/^[-*•]+\s+/, '')
-      .replace(/^\d+[\).:\-]\s*/, '')
-      .replace(/^["'“”]+|["'“”]+$/g, '')
-      .trim())
-    .filter((l) => l.length >= 8 && l.length <= 120)
-    .filter((l) => !/^(here|follow|suggestion|option|prompt)/i.test(l))
-    .filter((l) => !/^(none|n\/a)$/i.test(l));
-  // de-dupe case-insensitively, keep order
-  const seen = new Set();
-  const out = [];
-  for (const l of lines) {
-    const k = l.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(l);
-    if (out.length >= 3) break;
-  }
-  return out;
-}
-
 // ---------- auto-compaction (cost saver) ----------
 // In-memory twin of the manual /compact endpoint: when a remote prompt would
 // blow past the model's context budget, summarize everything but the last few
@@ -392,24 +349,14 @@ function parseFollowupLines(raw) {
 // the model the same instructions. Coding runs are the case that hurts: a
 // generic "goals/decisions" summary makes the model restart the task or ask
 // what to do — the brief must carry the build state so it RESUMES mid-code.
-export const COMPACT_PROMPT = 'Compress this chat history into a context brief for a language model '
-  + 'that must CONTINUE this conversation seamlessly, mid-task if a task is running. '
-  + 'Keep: the user\'s goals, decisions made, key facts (names, numbers, file paths, code identifiers), '
-  + 'and any work in progress — files created or edited (with paths), commands run and their outcomes, '
-  + 'errors hit and fixes applied. '
-  + 'Terse bullet points under the headings: Goal / Decisions / Facts / Work done / Open items. '
-  + 'End with the single NEXT ACTION if work is unfinished. '
-  + 'No preamble, no commentary.';
-
 export async function autoCompactMessages(messages, auxModel, abortSignal, log) {
   const KEEP = 8;
   const sys = messages[0]?.role === 'system' ? messages[0] : null;
   const rest = sys ? messages.slice(1) : [...messages];
-  const textOf = (m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''));
   const middle = rest.slice(0, Math.max(0, rest.length - KEEP))
     .filter((m) => m.role === 'user' || m.role === 'assistant');
   if (middle.length < 4) return null;
-  const transcript = middle.map((m) => `${m.role.toUpperCase()}: ${textOf(m)}`).join('\n\n').slice(0, 60_000);
+  const transcript = compactTranscript(middle);
   try {
     const { content: summary, usage } = await streamChat({
       model: auxModel,
@@ -444,6 +391,8 @@ export async function runAgentTurn({
 let loopMessages = promptMessages;
 let firstResult = res;
 let runId = null;
+const agentTools = filterTools(imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'), disabledTools);
+const agentToolNames = new Set(agentTools.map((t) => t.function.name));
 // gate call: start_project(name, plan) creates the workspace; the
 // rest of the gate step is recorded AFTER the subscription below so
 // the chips/diff show up live, not just in the replay
@@ -455,7 +404,7 @@ if (gateCall) {
   wsRow = createWorkspaceRow(req.user.id, slugify(gargs.name) || wsNameFrom(promptLeaf.content));
   db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(wsRow.id, conv.id);
 }
-const run = createRun(wsRow.id, req.user.id, conv.model_id, promptLeaf.content);
+const run = createRun(wsRow.id, req.user.id, conv.model_id, promptLeaf.content, conv.id);
 runId = run.id;
 bindRunAbort(run.id, abort);
 send({ type: 'agent_start', run, workspace: wsRow });
@@ -493,9 +442,9 @@ if (gateCall) {
   if (gargs.plan?.trim()) {
     await execTool(run, wsRow, 'write_file', { path: 'PLAN.md', content: gargs.plan.trim() + '\n' });
   }
-  const gateResult = `Project workspace "${wsRow.name}" created${gargs.plan?.trim() ? ' and your plan saved as PLAN.md' : ''}. You now have list_files, read_file, write_file and run_command — implement the plan, then verify it by running it.`;
+  const gateResult = `Project workspace "${wsRow.name}" created${gargs.plan?.trim() ? ' and your plan saved as PLAN.md' : ''}. Available tools: ${[...agentToolNames].join(', ') || 'none'}. Implement and verify the plan with the tools available.`;
   emitRunEvent(run.id, 'tool_result', { call_id: gateCall.id, name: 'start_project', step: -1, result: gateResult });
-  loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
+  loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed, userLoc, disabledTools, new Set(), agentToolNames);
   loopMessages.push({ role: 'assistant', content: res.content ?? '', tool_calls: [gateCall] });
   loopMessages.push({ role: 'tool', tool_call_id: gateCall.id, content: gateResult });
   firstResult = null; // the loop streams fresh with the full toolset
@@ -508,7 +457,7 @@ try {
   result = await agentLoop({
     run, ws: wsRow, messages: loopMessages, model: conv.model_id,
     genParams: params, abortSignal: abort.signal, firstResult,
-    tools: filterTools(imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'), disabledTools),
+    tools: agentTools,
     ctxBudget: Number(conv._settings.ctx_size) > 0 ? Number(conv._settings.ctx_size) : null,
   });
 } catch (err) {
@@ -536,6 +485,11 @@ if (result.status === 'aborted') {
 if (result.status === 'steplimit') {
   finishRun(run.id, 'error');
   return { text: 'I hit the step limit for this run — everything done so far is saved in the workspace.', reasoning, timings, usage, runId: run.id, messages: loopMessages };
+}
+if (result.status === 'blocked') {
+  finishRun(run.id, 'error');
+  return { text: `The run stopped: ${result.message ?? 'a blocker needs attention'}. Work completed so far is saved in the workspace.`,
+    reasoning, timings, usage, runId: run.id, messages: loopMessages };
 }
 finishRun(run.id, 'error');
 return {

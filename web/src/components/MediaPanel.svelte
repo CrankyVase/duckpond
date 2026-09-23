@@ -32,6 +32,8 @@
   let bridgeOk = $state(false);
   let loading = $state(true);
   let unloading = $state(false);
+  let loadingModel = $state(false);
+  let modelOperation = $state(null);
   let defaultModel = $state('');
   let model = $state('auto');
   let prompt = $state('');
@@ -193,6 +195,10 @@
     void shape; void count; void previewEvery; void enhance; void refs.length; void latestCompletedImage;
     loadEstimates();
   });
+  $effect(() => {
+    if (!latestCompletedImage) return;
+    void api('/api/images').then((saved) => { if (mounted) gallery = saved; }).catch(() => {});
+  });
   const voiceSpeakers = $derived(selected?.speakers?.length ? selected.speakers : Object.keys(SPEAKER_HINT));
   const voiceLanguages = $derived(selected?.languages?.length ? selected.languages : ['Auto', 'English', 'Chinese', 'Japanese', 'Korean', 'German', 'French', 'Spanish', 'Italian']);
   const maxRefs = $derived(task === 'video' ? 2 : task === 'image' ? Math.min(4, selected?.maxReferences || 4) : (selected?.maxReferences || 10));
@@ -239,6 +245,8 @@
       bridgeOk = m.available;
       models = m.models ?? [];
       defaultModel = m.default_model;
+      modelOperation = m.model_operation ?? null;
+      if (selected?.loaded || modelOperation?.type === 'error') loadingModel = false;
       gallery = saved;
       const pick = sessionStorage.getItem('dp:media-selection');
       if (pick) {
@@ -248,6 +256,26 @@
       }
     } catch (e) { error = e.message; }
     finally { if (mounted) loading = false; }
+  }
+  async function refreshModelStatus() {
+    try {
+      const m = await api('/api/images/models');
+      if (!mounted) return;
+      bridgeOk = m.available;
+      models = m.models ?? [];
+      defaultModel = m.default_model;
+      modelOperation = m.model_operation ?? null;
+      if (models.find((item) => item.id === selected?.id)?.loaded || modelOperation?.type === 'error') loadingModel = false;
+    } catch { bridgeOk = false; }
+  }
+  async function warmSelected() {
+    if (!selected || loadingModel || selected.loaded) return;
+    loadingModel = true;
+    try {
+      await api('/api/images/warm', { method: 'POST', body: { model: selected.id } });
+      await refreshModelStatus();
+      toast('Loading the image model in the background', 'ok');
+    } catch (e) { loadingModel = false; toast(e.message ?? 'Could not load the image model', 'error'); }
   }
   async function unloadSelected() {
     if (!selected || unloading) return;
@@ -262,8 +290,10 @@
   onMount(() => {
     load();
     loadEstimates();
-    refreshResources();
-    resourceTimer = setInterval(refreshResources, 3000);
+    resourceTimer = setInterval(() => {
+      if (app.user?.role === 'owner' && imageOptionsOpen && task === 'image') void refreshResources();
+      if (loadingModel || modelOperation?.type === 'loading') void refreshModelStatus();
+    }, 3000);
     jobsApi = useMediaJobs();
   });
   onDestroy(() => {
@@ -455,9 +485,10 @@
   else if (e.key === 'ArrowLeft') lightboxStep(-1);
 }} />
 <div class="media workspace-panel">
-  {#if task !== 'image'}<header class="studio-head">
-    <div><h1>Media Studio</h1><p>Create images, speech, music, and video in one workspace.</p></div>
+  <header class="studio-head">
+    <div><span class="studio-kicker">DUCKPOND STUDIO</span><h1>{task === 'image' ? 'Image Studio' : 'Media Studio'}</h1><p>{task === 'image' ? 'Create and edit with Qwen-Image 2.1. Your work keeps going when you leave.' : 'Create images, speech, music, and video in one workspace.'}</p></div>
     <div class="head-actions">
+      {#if task === 'image'}<span class="engine-badge" class:engine-offline={!bridgeOk || modelOperation?.type === 'error'} role="status"><span class="engine-dot"></span>{!bridgeOk ? 'Engine offline' : selected?.loaded ? 'Model ready' : modelOperation?.type === 'error' ? 'Load failed' : modelOperation?.type === 'loading' || loadingModel ? 'Loading model' : readyModels.length ? 'Ready on demand' : 'Model needed'}</span>{/if}
       <button class="subtle" onclick={load} disabled={loading} aria-label="Refresh models and gallery"><RefreshCw size={15} /><span>Refresh</span></button>
       {#if app.user?.role === 'owner'}
         <button class="subtle" aria-pressed={mediaJobs.paused}
@@ -467,7 +498,7 @@
         </button>
       {/if}
     </div>
-  </header>{/if}
+  </header>
   {#if mediaJobs.paused}<p role="status">Media queue paused. New jobs wait without loading a model. Existing running jobs are unchanged.</p>{/if}
   {#if mediaJobs.error}<p role="alert">{mediaJobs.error} <button onclick={refreshMediaJobs}>Retry job status</button></p>{/if}
   <nav class="tasktabs" bind:this={tabsEl} aria-label="Creation type">
@@ -480,6 +511,15 @@
     <section class="controls" use:scrollFade aria-label="Generation settings">
       {#if task === 'image'}
         <div class="image-intro"><h2>{refs.length ? 'Edit a photo' : 'Create an image'}</h2><p>{refs.length ? 'Tell Qwen exactly what to change. The first photo sets the canvas shape.' : 'Describe what you want to make. Choose a quality level, then create.'}</p></div>
+
+        {#if selected}<div class="image-engine" role="status">
+          <div class="image-engine-mark"><ImageIcon size={18} /></div>
+          <div class="image-engine-copy"><strong>{selected.id.split('/').pop()}</strong><span>{modelOperation?.model === selected.id && modelOperation.type === 'error' ? modelOperation.message : modelOperation?.model === selected.id && modelOperation.type === 'loading' || loadingModel ? 'Loading weights into memory. You can leave this page.' : selected.loaded ? 'Loaded and ready to create' : 'On disk · loads automatically when you create'}</span></div>
+          {#if app.user?.role === 'owner' && selected.kind !== 'comfy'}
+            {#if selected.loaded}<button class="engine-action" onclick={unloadSelected} disabled={unloading || generating} title="Free memory used by the image model">{unloading ? 'Unloading…' : 'Unload'}</button>
+            {:else}<button class="engine-action" onclick={warmSelected} disabled={loadingModel || modelOperation?.type === 'loading' || generating || !bridgeOk}>{loadingModel || modelOperation?.type === 'loading' ? 'Loading…' : 'Load model'}</button>{/if}
+          {/if}
+        </div>{/if}
 
         <div class="image-group prompt-group">
           <div class="image-group-head"><div><h3>{refs.length ? 'What should change?' : 'Describe your image'}</h3></div></div>
@@ -523,14 +563,9 @@
 
         <div class="image-generate-area">
           {#if error}<div class="error" role="alert">{error}</div>{/if}
-          <div class="resource-meters" aria-label="Live system resources">
-            <div class="resource-meter"><div><span>RAM</span><strong>{resources ? `${fmtBytes(resources.ram.usedBytes)} / ${fmtBytes(resources.ram.totalBytes)}` : '—'}</strong></div><div class="resource-track"><i style={`width:${resources?.ram?.totalBytes ? Math.min(100, resources.ram.usedBytes / resources.ram.totalBytes * 100) : 0}%`}></i></div></div>
-            <div class="resource-meter"><div><span>CPU</span><strong>{resources?.cpuPercent == null ? '—' : `${Math.round(resources.cpuPercent)}%`}</strong></div><div class="resource-track"><i style={`width:${resources?.cpuPercent ?? 0}%`}></i></div></div>
-            <div class="resource-meter"><div><span>GPU VRAM</span><strong>{resources?.vram?.totalBytes ? `${fmtBytes(resources.vram.usedBytes)} / ${fmtBytes(resources.vram.totalBytes)}` : '—'}</strong></div><div class="resource-track"><i style={`width:${resources?.vram?.totalBytes ? Math.min(100, resources.vram.usedBytes / resources.vram.totalBytes * 100) : 0}%`}></i></div></div>
-          </div>
           <div class="generate-summary">{preset === 'medium' ? 'Balanced' : preset === 'high' ? 'Quality' : preset === 'ultra' ? 'Ultra' : preset === 'fast' ? 'Fast' : 'Custom'} <span>·</span> {size.replace('x', ' × ')} <span>·</span> {count} {Number(count) === 1 ? 'image' : 'images'} <span>·</span> {outputFormat.toUpperCase()}</div>
           <button class="generate" onclick={generate} disabled={loading || !bridgeOk || !selected || !prompt.trim() || (selected?.needsImage && !refs.length)}><Sparkles size={18} /> {refs.length ? 'Edit photo' : 'Create image'} <span aria-hidden="true">↗</span></button>
-          <p>Runs locally · Jobs continue if you leave · Image safety stays on</p>
+          <p>Runs locally · Jobs continue if you close this page</p>
         </div>
 
         <details class="image-options" bind:open={imageOptionsOpen}>
@@ -554,9 +589,13 @@
             </div>
             <div class="option-section"><h4>Model</h4>
               <label class="field"><span>Image model</span><select bind:value={model} disabled={!readyModels.length}><option value="auto">{readyModels.length ? 'Automatic · Qwen-Image 2.1' : loading ? 'Checking models…' : 'No model ready'}</option>{#each readyModels as m}<option value={m.id}>{m.id.split('/').pop()}</option>{/each}</select></label>
-              {#if selected}<div class="runtime-status"><span>{selected.id.split('/').pop()} · {selected.loaded ? 'Loaded' : 'Loads when needed'}</span>{#if app.user?.role === 'owner' && selected.kind !== 'comfy'}<button class="btn" disabled={unloading} onclick={unloadSelected}>{unloading ? 'Unloading…' : 'Unload'}</button>{/if}</div>{/if}
               {#if taskModels.some((m) => !m.ready)}<details class="readiness"><summary>{taskModels.filter((m) => !m.ready).length} model(s) need attention</summary>{#each taskModels.filter((m) => !m.ready) as m}<div><strong>{m.id.split('/').pop()}</strong><p>{m.reason}</p></div>{/each}</details>{/if}
             </div>
+            {#if app.user?.role === 'owner'}<div class="option-section"><h4>System resources</h4><div class="resource-meters" aria-label="Live system resources">
+              <div class="resource-meter"><div><span>RAM</span><strong>{resources ? `${fmtBytes(resources.ram.usedBytes)} / ${fmtBytes(resources.ram.totalBytes)}` : '—'}</strong></div><div class="resource-track"><i style={`width:${resources?.ram?.totalBytes ? Math.min(100, resources.ram.usedBytes / resources.ram.totalBytes * 100) : 0}%`}></i></div></div>
+              <div class="resource-meter"><div><span>CPU</span><strong>{resources?.cpuPercent == null ? '—' : `${Math.round(resources.cpuPercent)}%`}</strong></div><div class="resource-track"><i style={`width:${resources?.cpuPercent ?? 0}%`}></i></div></div>
+              <div class="resource-meter"><div><span>GPU VRAM</span><strong>{resources?.vram?.totalBytes ? `${fmtBytes(resources.vram.usedBytes)} / ${fmtBytes(resources.vram.totalBytes)}` : '—'}</strong></div><div class="resource-track"><i style={`width:${resources?.vram?.totalBytes ? Math.min(100, resources.vram.usedBytes / resources.vram.totalBytes * 100) : 0}%`}></i></div></div>
+            </div></div>{/if}
             <div class="option-section"><h4>Workspace</h4><div class="workspace-actions"><button class="subtle" onclick={load} disabled={loading}><RefreshCw size={14} /> Refresh models and images</button>{#if app.user?.role === 'owner'}<button class="subtle" aria-pressed={mediaJobs.paused} onclick={async () => { try { await pauseMediaQueue(!mediaJobs.paused); } catch (e) { toast(e.message, 'error'); } }}>{mediaJobs.paused ? 'Resume queue' : 'Pause queue'}</button>{/if}</div></div>
           </div>
         </details>
@@ -718,6 +757,14 @@
   .eyebrow,.group-kicker { font-size:10px; font-weight:700; letter-spacing:.14em; color:var(--text-faint); }
   .image-intro h2 { font-size:27px; letter-spacing:-.7px; line-height:1.15; margin:0 0 5px; font-weight:600; }
   .image-intro p { font-size:13px; line-height:1.5; color:var(--text-dim); margin:0; }
+  .image-engine { display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid var(--border-soft); border-radius:12px; background:var(--bg-card); min-width:0; }
+  .image-engine-mark { flex:0 0 38px; height:38px; display:grid; place-items:center; color:var(--accent); border-radius:10px; background:color-mix(in srgb, var(--accent) 10%, var(--bg-raised)); }
+  .image-engine-copy { display:flex; flex:1; min-width:0; flex-direction:column; gap:3px; }
+  .image-engine-copy strong { font-size:12px; font-weight:650; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .image-engine-copy span { color:var(--text-faint); font-size:11px; line-height:1.4; overflow-wrap:anywhere; }
+  .engine-action { flex-shrink:0; padding:7px 10px; border:1px solid var(--border-soft); border-radius:8px; background:var(--bg-raised); color:var(--text-dim); font-size:11px; font-weight:600; }
+  .engine-action:hover:not(:disabled) { color:var(--text); border-color:var(--accent); }
+  .engine-action:disabled { opacity:.55; cursor:default; }
   .image-group { padding:0 2px 18px; border-bottom:1px solid var(--border-soft); }
   .image-group-head { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:10px; }
   .image-group-head h3 { font-size:15px; letter-spacing:-.15px; font-weight:600; margin:0; line-height:1.3; }
@@ -773,7 +820,7 @@
   .image-check span { display:flex; flex-direction:column; gap:4px; }.image-check strong { font-size:12px; font-weight:600; }.image-check small { color:var(--text-faint); font-size:11px; line-height:1.5; }
   .workspace-actions { display:flex; gap:8px; flex-wrap:wrap; }
   .image-generate-area { padding:14px 2px 4px; background:var(--bg); }.generate-summary { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:0 0 10px; color:var(--text-dim); font-size:11px; }.generate-summary span { color:var(--text-faint); }.image-generate-area .generate { min-height:49px; font-size:14px; border-radius:11px; }.image-generate-area p { margin:10px 0 0; font-size:11px; line-height:1.5; color:var(--text-faint); text-align:center; }
-  .resource-meters { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:0 0 15px; padding:12px; border:1px solid var(--border-soft); border-radius:10px; background:var(--bg-card); }
+  .resource-meters { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; padding:12px; border:1px solid var(--border-soft); border-radius:10px; background:var(--bg-raised); }
   .resource-meter { min-width:0; }
   .resource-meter>div:first-child { display:flex; justify-content:space-between; align-items:center; gap:5px; margin-bottom:7px; }
   .resource-meter span { color:var(--text-faint); font-size:10px; font-weight:600; letter-spacing:.05em; }
@@ -790,6 +837,10 @@
   .runtime-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
   .media { flex:1; min-height:0; width:100%; max-width:1600px; margin:0 auto; padding:16px 36px 24px; display:flex; flex-direction:column; overflow:auto; overscroll-behavior:contain; }
   .studio-head { display:flex; justify-content:space-between; align-items:center; gap:20px; margin-bottom:26px; background:transparent; }
+  .studio-kicker { color:var(--text-faint); font-size:10px; font-weight:700; letter-spacing:.17em; }
+  .engine-badge { display:inline-flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid var(--border-soft); border-radius:999px; background:var(--bg-card); color:var(--text-dim); font-size:11px; white-space:nowrap; }
+  .engine-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 14%, transparent); }
+  .engine-badge.engine-offline .engine-dot { background:var(--red); box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent); }
   .head-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-shrink:0; }
   h1 { font-size:30px; font-weight:600; letter-spacing:-1.1px; margin:6px 0; }
   .studio-head p { margin:0; color:var(--text-dim); font-size:13px; }
@@ -847,7 +898,7 @@
   @media(min-width:1600px) { .workbench.image-workbench { grid-template-columns:minmax(440px, 500px) minmax(0,1fr); gap:46px; } }
   @media(max-width:1000px) { .media { padding:24px 20px; }.workbench { grid-template-columns:280px minmax(0,1fr); gap:18px; }.blank h2 { font-size:21px; } }
   @media(max-width:1180px) { .workbench.image-workbench { display:flex; flex-direction:column; gap:26px; }.image-workbench .controls { width:100%; max-width:780px; margin:0 auto; padding-bottom:0; }.image-canvas { width:100%; } }
-  @media(max-width:760px) { .media { padding:14px 16px 20px; }.studio-head { margin-bottom:22px; }h1 { font-size:26px; }.subtle span { display:none; }.tasktabs { gap:20px; overflow:auto; }.tasktabs button { font-size:12px; }.workbench { display:flex; flex-direction:column; }.controls { overflow:visible; padding:0; }.canvas { flex-shrink:0; margin-top:8px; }.blank { min-height:300px; }.studio-head p { font-size:12px; }.gallery { grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); }.canvas-head { padding:15px; } }
+  @media(max-width:760px) { .media { padding:14px 16px 20px; }.studio-head { margin-bottom:22px; align-items:flex-start; }h1 { font-size:26px; }.subtle span { display:none; }.tasktabs { gap:20px; overflow:auto; }.tasktabs button { font-size:12px; }.workbench { display:flex; flex-direction:column; }.controls { overflow:visible; padding:0; }.canvas { flex-shrink:0; margin-top:8px; }.blank { min-height:300px; }.studio-head p { font-size:12px; }.gallery { grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); }.canvas-head { padding:15px; } }
   @media(max-width:760px) { .image-workbench .controls { gap:16px; }.image-canvas { min-height:390px; margin-top:0; }.image-canvas .blank { min-height:350px; }.image-canvas .gallery { padding:14px; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; } }
-  @media(max-width:480px) { .prompt-group { padding:14px; }.image-presets,.shape-row { gap:7px; }.image-choice { min-height:80px; padding:9px; }.image-choice small,.image-choice>span { font-size:10px; }.shape-row button { min-height:64px; font-size:11px; }.image-options-body { padding:4px 16px 16px; }.option-grid { grid-template-columns:1fr; }.image-group-head h3 { font-size:15px; }.image-canvas .canvas-head { padding:16px; }.resource-meters { gap:8px; padding:9px; }.resource-meter strong { font-size:9px; } }
+  @media(max-width:480px) { .studio-head { flex-wrap:wrap; }.head-actions { width:100%; justify-content:space-between; }.prompt-group { padding:14px; }.image-presets,.shape-row { gap:7px; }.image-choice { min-height:80px; padding:9px; }.image-choice small,.image-choice>span { font-size:10px; }.shape-row button { min-height:64px; font-size:11px; }.image-options-body { padding:4px 16px 16px; }.option-grid { grid-template-columns:1fr; }.image-group-head h3 { font-size:15px; }.image-canvas .canvas-head { padding:16px; }.resource-meters { gap:8px; padding:9px; grid-template-columns:1fr; }.resource-meter strong { font-size:9px; } }
 </style>

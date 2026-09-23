@@ -19,12 +19,13 @@ const SPEC_ARG = {
 };
 const SPEC_MAX_INFLIGHT = 6;
 
-export function makeSpeculator(log) {
+export function makeSpeculator(log, signal) {
   const buf = new Map();    // stream index → { name, args, fired }
   const cache = new Map();  // "name\0arg" → promise of the tool result
   return {
     // wire into onDelta: watch fragments accumulate, fire when the arg closes
     onFrag(frag) {
+      if (signal?.aborted) return;
       let b = buf.get(frag.index);
       if (!b) { b = { name: '', args: '', fired: false }; buf.set(frag.index, b); }
       if (frag.name) b.name = frag.name;
@@ -40,8 +41,8 @@ export function makeSpeculator(log) {
       if (cache.has(key)) return;
       log?.info({ tool: b.name, arg: val.slice(0, 120) }, 'speculative tool start');
       cache.set(key, (b.name === 'web_search'
-        ? searchWebStructured(val.slice(0, 300))
-        : fetchPageStructured(val)
+        ? searchWebStructured(val.slice(0, 300), { signal })
+        : fetchPageStructured(val, { signal })
       ).then((r) => ({ ok: true, r }), (err) => ({ ok: false, err })));
     },
     // stream indexes restart at 0 every round — reset the buffers, keep the cache
@@ -57,106 +58,64 @@ export function makeSpeculator(log) {
 
 // [tool name, one-line description] — data-driven so a disabled tool both
 // drops out of the offered `tools` array AND stops being described here.
+// Keep old widget builders for saved conversations, but offer only output forms
+// that add something a normal sourced answer cannot. This keeps the tool list
+// short enough for local models to choose well.
 const WIDGET_LINES = [
-  ['show_weather', "live weather card for a place (or the user's location)."],
-  ['show_map', '3D map with a pin for a place, address, or business.'],
-  ['show_github_repo', 'a GitHub repo card (stars, language, description).'],
-  ['show_wikipedia', 'a Wikipedia summary card (title, extract, image).'],
-  ['show_youtube', 'embed a playable YouTube video.'],
-  ['show_images', 'a grid of real photos for a query.'],
-  ['show_chart', 'an interactive chart (bar/line/area/pie/donut/scatter) from data you provide.'],
-  ['show_crypto', 'a coin price card with a 7-day sparkline.'],
-  ['show_dictionary', "a word's pronunciation, definitions, and examples."],
-  ['show_link_preview', 'a rich preview card for any web page URL.'],
-  ['show_diagram', 'render a Mermaid diagram (flowchart, sequence, mind map, etc.).'],
-  ['show_currency', 'convert between two currencies at the latest rate.'],
-  ['show_npm', 'an npm package card (version, downloads, description).'],
-  ['show_hackernews', 'the top Hacker News story for a topic.'],
-  ['show_table', 'a clean data table from columns and rows you provide.'],
-  ['show_news', 'recent news headlines for a topic.'],
-  ['show_countdown', 'a live countdown to a date/time.'],
-  ['show_color_palette', 'copyable hex color swatches.'],
-  ['show_qr', 'a scannable QR code for a URL or text.'],
-  ['show_math_plot', 'graph a function y = f(x) over a range.'],
-  ['show_dashboard', 'compose 2-8 of the widgets above into ONE titled grid — prefer it over separate calls when the cards belong together (a trip: weather + map + currency; a project: repo + npm + chart).'],
-  ['generate_slides', 'build a real downloadable PowerPoint deck from an outline you write.'],
-  ['export_csv', 'save tabular data as a downloadable CSV file.'],
+  ['show_chart', 'an interactive chart from data you provide.'],
+  ['show_diagram', 'a Mermaid diagram.'],
+  ['show_table', 'a structured data table.'],
+  ['generate_slides', 'a downloadable PowerPoint deck.'],
+  ['export_csv', 'a downloadable CSV file.'],
 ];
 
 const EMPTY_DISABLED = new Set();
 
-function widgetPolicyFor(disabled) {
-  const lines = WIDGET_LINES.filter(([name]) => !disabled.has(name)).map(([name, desc]) => `- ${name} — ${desc}`);
-  if (!lines.length) return null;
-  return `## Widgets\nYou can drop interactive cards right into the chat:\n${lines.join('\n')}\nBe proactive with these — don't wait to be asked for "the widget". The moment you're about to state a fact one of these covers, call the tool instead of just typing the number: a temperature or forecast → show_weather; a coin price → show_crypto; an exchange rate → show_currency; a package version/downloads → show_npm; a repo's stars/language → show_github_repo; a word's definition → show_dictionary; a place, address, or business → show_map; a date you're counting down to → show_countdown; a set of hex colors → show_color_palette; a small table of numbers or comparisons → show_table; a y=f(x) relationship → show_math_plot. Recommending a restaurant, landmark, or repo also earns its card the same way. The card renders for the user automatically, so don't paste a link, id, or coordinates in your text — just call the tool, then add one short sentence around it. You may use more than one in a reply, and it's fine to lead with the tool call before you've written anything.`;
+export function selectTurnWidgets(message = '') {
+  const text = String(message).toLowerCase();
+  const asksForVisual = /\b(show|make|create|draw|plot|embed|display|build|give me|export|want|need)\b/.test(text);
+  if (!asksForVisual) return new Set();
+  const intents = [
+    [/\b(chart|graph)\b/, 'show_chart'],
+    [/\b(table)\b/, 'show_table'],
+    [/\b(diagram|flowchart|mind map|sequence diagram)\b/, 'show_diagram'],
+    [/\b(slides|powerpoint|presentation deck)\b/, 'generate_slides'],
+    [/\b(csv|spreadsheet file)\b/, 'export_csv'],
+  ];
+  return new Set(intents.filter(([re]) => re.test(text)).map(([, name]) => name));
 }
 
-const GATE_POLICY = `## Project mode
-You can build real software in this chat. To do it, call the start_project tool — it creates a sandboxed Linux workspace (Debian, Node 24 + npm, Python 3.13 + pip, git), saves your plan as PLAN.md, and unlocks file and shell tools.
+function widgetPolicyFor(available) {
+  const lines = WIDGET_LINES.filter(([name]) => available.has(name)).map(([name, desc]) => `- ${name} — ${desc}`);
+  if (!lines.length) return null;
+  return `## Requested visual output\nThe user asked for a visual or downloadable result. Available tools:\n${lines.join('\n')}\nUse the relevant tool when it helps fulfill this request. Explain the result briefly; the card or file renders automatically.`;
+}
 
-### Which one is this? (decide before you write any code)
-Two completely different outputs, and picking the wrong one is the most common
-way to get this wrong:
+const GATE_POLICY = `## Project work
+Answer in chat for questions, examples, snippets, and single-file fixes. Call start_project when the user wants a runnable or persistent multi-file app, site, game, or repository. Start with a short plan, then build and verify it in the workspace. Do not turn a small answer into a project.`;
 
-**Answer in chat with a markdown code block** — the default. Opening a workspace
-puts a file panel on screen and turns a two-line answer into a project, which is
-worse for the user, not better. Stay in chat when:
-- it is one file, or a fragment of one file
-- it is an example, a fix to paste in, a config snippet, a command, a function
-- the user asked "how do I…", "what's wrong with…", "show me…"
-- they are still deciding what to build
-
-**Call start_project** — only when the work is genuinely a project:
-- it needs SEVERAL files that reference each other (an app, a game, a site)
-- it needs to be run, built, tested, or installed to be worth anything
-- the user wants to keep it, iterate on it, or download it
-- they said so: "build me…", "make a project…", "set up a repo…"
-
-Rule of thumb: if you would finish in one code block, you do not need a
-workspace. If you catch yourself about to write "file 1 of 4" in chat, you do.
-When it is genuinely ambiguous, ask in one short sentence rather than guessing —
-starting a project the user did not want is the more annoying mistake.
-
-Use the project's existing stack. Managed development servers and a live preview are available through start_server and server_status once the workspace is active.
-
-If you do call start_project, briefly tell the user what you're about to build first, then call the tool with a short kebab-case name and a concise plan.`;
-
-const ACTIVE_POLICY = `## Project mode (active)
-This conversation has a persistent sandboxed workspace at /workspace (Debian, Node 24 + npm, Python 3.13 + pip, git). You have tools to list/read/write files and run shell commands.
-
-Rules:
-- Use tools when the user wants project work done (build, change, fix, run). For pure questions or discussion, just answer in chat — no tools.
-- AGENTIC MEANS TOOLS, NOT TEXT: never deliver project code as chat markdown or draft it in your reasoning. Code belongs in files via write_file/edit_file — the chat bubble is only for brief progress notes and the final summary. If you notice you have written more than a few lines of project code in your reply text or thinking, STOP and put it in the workspace instead.
-- Keep PLAN.md current: check items off as you finish them; update it when the plan changes.
-- Look before you leap: list or read files before editing them.
-- write_file replaces the whole file — always write complete content, never fragments or placeholders.
-- Search filenames and source text with search_files before guessing where code lives. Read AGENTS.md and the project manifest before changing an existing project. Follow its conventions and preserve unrelated changes.
-- Create and edit real project files. Keep the existing framework; use package installs, builds and tests as needed. Use start_server for a managed development server, then server_status to check readiness and logs. Vite needs --host 0.0.0.0 --port 3000 --base "$DUCKPOND_PREVIEW_BASE". Other frameworks must serve assets under that preview base path.
-- Read AGENTS.md and .todo/.todos/TODO.md, honor nested instructions, and check off work only after verifying it.
-- Use browser to inspect a public site, LAN IP, or project dev server. Navigate, click and fill controls, inspect the returned page structure, screenshots and console errors. Fix problems and repeat the checks. Browser sessions are isolated from the user’s personal browser.
-- Verify the requested behavior before reporting completion. Inspect errors and iterate. Report what was actually tested and any remaining limits.
-- Package installs pause for the user's approval and may be denied; if denied, adapt.
-- After tool work, finish with a short plain-text summary: what you built, how you verified it, what could come next. No tool calls in that final message.`;
+const ACTIVE_POLICY = `## Active project
+The workspace is at /workspace. Use file and shell tools for requested project work; answer pure questions in chat. Read AGENTS.md, project manifests, and relevant files before editing. Keep PLAN.md accurate. Put code in files, not in the reply. Use the existing stack, test the change, and inspect browser output when visual behavior matters. Managed dev servers use start_server and server_status. Report what you actually verified and any remaining limitation.`;
 
 const SEARCH_POLICY = `## Web search
 You can search the web with web_search and read pages with fetch_page. Use them for current events, prices, versions, library docs, or any fact you are not confident about — never guess when you can check.
 Use today's actual date (given above) when it matters: for anything about "latest", "current", "this year", recent releases, or news, search with the real current year — do not default to a year from your training data, and do not assume something is out of date just because it's after your training cutoff.
-Work in small batches: run a search, then read up to about 3 of the most promising results with fetch_page. If that is not enough, refine your query and read another batch. Most questions need only a handful of pages — stop as soon as you are confident. You may read many more if a question truly demands deep research (a hard limit of 200 pages), but reaching for a lot of pages should be rare, not the default.
+Work in small batches: run a search, then read up to about 3 promising results with fetch_page. Refine the query only when the evidence is insufficient. Stop when you can answer confidently; normal mode allows at most 18 page reads and deep research allows more.
 Cite as you write: right after any sentence or bullet that rests on something you read, add a markdown link to the exact page it came from, like [OpenAI pricing](https://example.com/pricing). Use the real page URL, never a bare URL on its own line, and never invent a link. If two pages back the same point, add both links next to each other. These links render as small source tags, so keep the link text to a couple of words. Skip searching for things you already know well.`;
 
 // Search depth tiers. Caps flow into the inline-search loop; ultra also raises
 // the thinking budget, turns up reasoning, and injects a deep-research directive.
 export const RESEARCH_MODES = {
-  quick: { reads: 8, searches: 6, rounds: 12, thinkMs: 60 * 60_000, ultra: false },
-  normal: { reads: 200, searches: 40, rounds: 80, thinkMs: 60 * 60_000, ultra: false },
-  ultra: { reads: 400, searches: 80, rounds: 160, thinkMs: 60 * 60_000, ultra: true },
+  quick: { reads: 6, searches: 3, rounds: 8, thinkMs: 60 * 60_000, ultra: false },
+  normal: { reads: 18, searches: 8, rounds: 22, thinkMs: 60 * 60_000, ultra: false },
+  ultra: { reads: 80, searches: 30, rounds: 90, thinkMs: 60 * 60_000, ultra: true },
 };
 export const ULTRA_DIRECTIVE = `## Deep research mode (active)
 The user wants the most thorough, concrete answer you can produce. Do real research:
 1. Break the question into sub-questions.
 2. Search each, and read widely — open many sources with fetch_page, not just snippets.
 3. Cross-check facts across independent sources; prefer primary/authoritative ones; note disagreements.
-4. Keep going until you can answer with specifics and confidence (you may read up to 400 pages).
+4. Keep going until you can answer with specifics and confidence (you may read up to 80 pages).
 5. Then synthesize a well-structured, richly cited answer — cite the pages you used inline.
 Do not stop early or hand-wave; be exhaustive, then conclude clearly.`;
 
@@ -180,19 +139,18 @@ export function slugify(name) {
     .replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-export function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, userLoc = null, disabled = EMPTY_DISABLED) {
-  const locPolicy = userLoc
-    ? `## User location\nAn approximate location is available for the user (lat ${userLoc.lat}, lon ${userLoc.lon}, near ${userLoc.label ?? 'their area'}). You may omit place/query in show_weather or show_map to use it — do not ask them where they are.`
-    : `## User location\nNo location is available for the user right now. Never omit place/query in show_weather or show_map expecting it to fall back to "where they are" — it will fail. Ask what place they mean.`;
-  const showGate = !wsRow && !disabled.has('start_project');
-  const showImage = imageAllowed && !disabled.has('generate_image');
-  const showSearch = !disabled.has('web_search');
+export function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, userLoc = null, disabled = EMPTY_DISABLED, offered = EMPTY_DISABLED, available = null) {
+  const hasTool = (name) => available ? available.has(name) : !disabled.has(name);
+  const activeWidgets = available ? new Set([...offered].filter((name) => available.has(name))) : offered;
+  const showGate = !wsRow && hasTool('start_project');
+  const showImage = imageAllowed && hasTool('generate_image');
+  const showSearch = hasTool('web_search') && hasTool('fetch_page');
   const parts = [
-    wsRow ? ACTIVE_POLICY : (showGate ? GATE_POLICY : null),
+    wsRow && (!available || ['read_file', 'write_file', 'edit_file', 'run_command'].some(hasTool))
+      ? ACTIVE_POLICY : (showGate ? GATE_POLICY : null),
     showImage ? IMAGE_POLICY : null,
     showSearch ? SEARCH_POLICY : null,
-    widgetPolicyFor(disabled),
-    locPolicy,
+    widgetPolicyFor(activeWidgets),
   ].filter(Boolean);
   if (wsRow) {
     const files = listTree(wsRow).slice(0, 60)
@@ -201,6 +159,7 @@ export function withToolsPolicy(promptMessages, wsRow, imageAllowed = true, user
     if (wsRow.host_path) parts.push(`This workspace is linked to an existing host project at ${wsRow.host_path}. Edits in /workspace change its real source files. A deployment may watch these files; follow the user's requested scope.`);
   }
   const policy = parts.join('\n\n');
+  if (!policy) return promptMessages;
   if (promptMessages[0]?.role === 'system') {
     return [{ role: 'system', content: promptMessages[0].content + '\n\n' + policy }, ...promptMessages.slice(1)];
   }

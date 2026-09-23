@@ -11,9 +11,10 @@
 // throttled to ~1 row-write/second (SQLite WAL handles far more, but there is
 // no reason to).
 import { db, nowSec } from './db.js';
-import { generateViaBridge, getUserImagePrefs } from './imagegen.js';
-import { presetForQuality } from './mediaEta.js';
+import { acknowledgeBridgeResult, bridgeResult, generateViaBridge, getUserImagePrefs, saveBridgeOutput, warmImageModel } from './imagegen.js';
+import { presetForQuality, recordImageJobTiming } from './mediaEta.js';
 import { enhanceMediaPrompt } from './promptEnhancer.js';
+import { checkUserContent } from './contentFilter.js';
 import { acquireGpu } from './gpuqueue.js';
 
 const PROGRESS_WRITE_MS = 1000;
@@ -23,6 +24,7 @@ const HISTORY_KEEP = 300; // rows per user kept in listJobs
 const running = new Map();
 const queue = []; // job ids
 let draining = false;
+let recoveryPending = 0;
 
 export function mediaQueuePaused() {
   return db.prepare("SELECT value FROM app_settings WHERE key = 'media_queue_paused'").get()?.value === '1';
@@ -57,6 +59,9 @@ export function jobView(row, position = 0) {
   const params = safeJson(row.params);
   delete params.imagesB64;
   delete params.refAudioB64;
+  const preview = row.task === 'image'
+    ? db.prepare('SELECT seq FROM media_job_previews WHERE job_id = ?').get(row.id)
+    : null;
   return {
     id: row.id,
     task: row.task,
@@ -65,6 +70,7 @@ export function jobView(row, position = 0) {
     model: row.model ?? 'auto',
     model_used: row.model_used ?? null,
     params,
+    preview_url: preview ? `/api/media/jobs/${row.id}/preview?v=${preview.seq}` : null,
     status: row.status,
     cancel_requested: !!row.cancel_requested,
     needs_reconciliation: row.phase === 'needs_reconciliation',
@@ -105,17 +111,17 @@ export function listJobs(userId, { limit = 50, activeOnly = false } = {}) {
     ? db.prepare(`SELECT * FROM media_jobs WHERE user_id = ? AND status IN ('queued','running') ORDER BY id ASC`).all(userId)
     : db.prepare(`SELECT * FROM media_jobs WHERE user_id = ? ORDER BY id DESC LIMIT ?`).all(userId, Math.min(Number(limit) || 50, HISTORY_KEEP));
   const views = all.map((row) => jobView(row, queue.indexOf(row.id) + 1));
-  return activeOnly ? views : views.filter((v) => v.status !== 'done' || v.results.length || v.enhanced_prompt);
+  return activeOnly ? views : views.filter((v) => v.status !== 'done' || v.results.length);
 }
 
 // FIFO pump: one job at a time (GPU + GEN_LOCK make it one anyway). Each
 // turn of the loop fully settles a job before the next starts, so a crash of
 // the bridge in one job can never wedge the others.
 async function pump() {
-  if (draining) return;
+  if (draining || recoveryPending) return;
   draining = true;
   try {
-    while (queue.length && !mediaQueuePaused()) {
+    while (queue.length && !mediaQueuePaused() && !recoveryPending) {
       const id = queue[0];
       const row = getJob(id);
       if (!row || row.status !== 'queued') { queue.shift(); continue; }
@@ -132,18 +138,68 @@ function enqueue(id) {
   void pump();
 }
 
-// The current bridge's synchronous POST cannot recover a lost response. Keep
-// the unknown outcome explicit; never claim cancellation or automatically retry.
+function markUnknown(id, reason) {
+  patchJob(id, { status: 'error', phase: 'needs_reconciliation', finished_at: nowSec(), error: reason });
+}
+
+async function reconcileRecoveredJob(row) {
+  const tag = row.bridge_tag;
+  if (!tag) {
+    // The tag is written before the bridge POST. No tag means the job never
+    // reached the engine, so this attempt is safe to put back in the queue.
+    patchJob(row.id, { status: 'queued', phase: 'queued', started_at: null });
+    enqueue(row.id);
+    return;
+  }
+  patchJob(row.id, { phase: 'reconciling' });
+  const deadline = Date.now() + 50 * 60_000;
+  const availabilityDeadline = Date.now() + 2 * 60_000;
+  try {
+    while (Date.now() < deadline) {
+      let receipt;
+      try { receipt = await bridgeResult(tag); }
+      catch (error) {
+        if (Date.now() >= availabilityDeadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
+      if (receipt.state === 'active') {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
+      if (receipt.state === 'missing') {
+        markUnknown(row.id, 'The media engine has no saved result for this job. Check your library before retrying.');
+        return;
+      }
+      const params = safeJson(row.params);
+      const saved = saveBridgeOutput({ userId: row.user_id, prompt: row.enhanced_prompt ?? row.prompt,
+        task: row.task, body: { size: params.size, steps: params.steps },
+        resolvedModel: row.model, tag, result: receipt.result });
+      patchJob(row.id, { status: 'done', phase: 'done', result_ids: JSON.stringify(saved.images.map((im) => im.id)),
+        model_used: saved.model_used ?? row.model, step: saved.steps_used, steps: saved.steps_used,
+        error: null, finished_at: nowSec() });
+      void acknowledgeBridgeResult(tag).catch(() => {});
+      return;
+    }
+    markUnknown(row.id, 'The media engine did not settle this job within 50 minutes. Check the engine and library before retrying.');
+  } catch (error) {
+    markUnknown(row.id, `Could not recover this job from the media engine: ${error.message}. Check the library before retrying.`);
+  }
+}
+
 export function recoverMediaJobs() {
   const alive = db.prepare(`SELECT id FROM media_jobs WHERE status IN ('queued','running')`).all();
+  recoveryPending = alive.filter(({ id }) => getJob(id)?.status === 'running' && !running.has(Number(id))).length;
   let requeued = 0;
   for (const { id } of alive) {
     const row = getJob(id);
     if (!row) continue;
     if (row.status === 'running') {
       if (running.has(Number(id))) continue;
-      patchJob(id, { status: 'error', phase: 'needs_reconciliation', finished_at: nowSec(),
-        error: 'The server restarted before the result was recorded. The engine may still be working. Check the engine and library before generating again.' });
+      void reconcileRecoveredJob(row).finally(() => {
+        recoveryPending = Math.max(0, recoveryPending - 1);
+        if (!recoveryPending) void pump();
+      });
     } else {
       enqueue(id);
       requeued += 1;
@@ -153,11 +209,12 @@ export function recoverMediaJobs() {
 }
 
 export function activeMediaJobCount() {
-  return queue.length + (draining ? 1 : 0);
+  return queue.length + (draining ? 1 : 0) + recoveryPending;
 }
 
 async function runJob(row) {
   const id = row.id;
+  const jobStartedAt = Date.now();
   const params = safeJson(row.params);
   const abort = new AbortController();
   const entry = { abort, cancelRequested: false };
@@ -174,16 +231,27 @@ async function runJob(row) {
     const trueCfg = params.trueCfg ?? preset.trueCfg;
     const negative = (params.negative ?? '') || (trueCfg > 1 ? (preset.negative ?? '') : '');
     let enhanced = row.enhanced_prompt;
-    if (params.enhance && row.status !== 'cancelled') {
-      patchJob(id, { phase: 'enhancing' });
-      const r = await enhanceMediaPrompt({ prompt: row.prompt, task: row.task, modelId: row.model });
+    // The small text-only improver describes a new scene. It cannot inspect a
+    // reference photo, so using it for edits can replace the requested change.
+    const photoEdit = row.task === 'image' && Array.isArray(params.imagesB64) && params.imagesB64.length > 0;
+    if (params.enhance && !photoEdit && row.status !== 'cancelled') {
+      const imageWarmup = row.task === 'image';
+      patchJob(id, { phase: imageWarmup ? 'preparing' : 'enhancing' });
+      const polish = enhanceMediaPrompt({ prompt: row.prompt, task: row.task, modelId: row.model });
+      const r = imageWarmup
+        ? (await Promise.all([polish, warmImageModel(row.model).catch(() => null)]))[0]
+        : await polish;
       if (r) {
+        const polishedSafety = checkUserContent(row.user_id, r.text, 'image');
+        if (!polishedSafety.ok) throw Object.assign(new Error(polishedSafety.reason), { code: 'UNSAFE_PROMPT' });
         enhanced = r.text;
         patchJob(id, { enhanced_prompt: enhanced });
       }
     }
     if (entry.cancelRequested) throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
     const effectivePrompt = enhanced ?? row.prompt;
+    const safety = checkUserContent(row.user_id, effectivePrompt, 'image');
+    if (!safety.ok) throw Object.assign(new Error(safety.reason), { code: 'UNSAFE_PROMPT' });
     const result = await generateViaBridge({
       userId: row.user_id,
       prompt: effectivePrompt,
@@ -194,6 +262,8 @@ async function runJob(row) {
       steps,
       quality: params.quality ?? null,
       trueCfg,
+      previewEvery: params.previewEvery ?? 1,
+      outputFormat: params.outputFormat ?? 'png',
       negative,
       seed: params.seed ?? null,
       numFrames: params.numFrames ?? null,
@@ -208,6 +278,15 @@ async function runJob(row) {
       language: params.language ?? null,
       instruct: params.instruct ?? null,
       onProgress: (ev) => {
+        if (ev.type === 'preview' && row.task === 'image' && ev.b64) {
+          const jpeg = Buffer.from(ev.b64, 'base64');
+          if (jpeg.length > 0 && jpeg.length < 2_000_000) {
+            db.prepare(`INSERT INTO media_job_previews (job_id, seq, jpeg) VALUES (?, ?, ?)
+              ON CONFLICT(job_id) DO UPDATE SET seq = excluded.seq, jpeg = excluded.jpeg`)
+              .run(id, ev.seq, jpeg);
+          }
+          return;
+        }
         if (ev.type !== 'progress') return;
         const now = Date.now();
         const fields = {};
@@ -224,6 +303,7 @@ async function runJob(row) {
       },
       signal: abort.signal,
       onSubmission: ({ tag }) => patchJob(id, { bridge_tag: tag }),
+      retainBridgeResult: true,
     });
     if (result.cancelled) {
       // Caller (us) cancelled, or the bridge job was already reaped. The
@@ -237,10 +317,24 @@ async function runJob(row) {
       // actually used, so the card can still show "your idea" verbatim.
       patchJob(id, { status: 'done', phase: 'done', step: result.steps_used ?? null, steps: result.steps_used ?? null,
         model_used: modelUsed, result_ids: JSON.stringify(ids), finished_at: nowSec() });
+      if (getJob(id)?.bridge_tag) void acknowledgeBridgeResult(getJob(id).bridge_tag).catch(() => {});
+      if (row.task === 'image') recordImageJobTiming({
+        quality: params.quality ?? 'medium', size: params.size ?? '1024x1024',
+        steps: result.steps_used ?? steps, n: params.n ?? 1, trueCfg,
+        previewEvery: params.previewEvery ?? 1,
+        refCount: params.imagesB64?.length ?? 0, enhance: !!params.enhance,
+        wallMs: Date.now() - jobStartedAt,
+      });
     }
   } catch (e) {
+    if (e?.code === 'UNSAFE_PROMPT' || /Image safety check/.test(String(e?.message))) {
+      db.prepare('DELETE FROM media_job_previews WHERE job_id = ?').run(id);
+    }
     if (e?.code === 'CANCELLED' || abort.signal.aborted || entry.cancelRequested) {
       patchJob(id, { status: 'cancelled', phase: null, finished_at: nowSec() });
+    } else if (!e?.status && getJob(id)?.bridge_tag) {
+      // The reply may have been lost after the bridge saved its result.
+      await reconcileRecoveredJob(getJob(id));
     } else {
       patchJob(id, { status: 'error', phase: null, error: String(e.message ?? e), finished_at: nowSec() });
     }
@@ -258,6 +352,22 @@ export function createMediaJob(userId, body) {
   }
   const prompt = String(body.prompt ?? '').trim();
   if (!prompt) throw Object.assign(new Error('prompt required'), { code: 400 });
+  if (task === 'image') {
+    const count = Number(body.n ?? 1);
+    const steps = Number(body.steps ?? 40);
+    if (!Number.isInteger(count) || count < 1 || count > 4) {
+      throw Object.assign(new Error('Choose 1 to 4 image variations.'), { code: 400 });
+    }
+    if (!Number.isInteger(steps) || steps < 1 || steps > 80) {
+      throw Object.assign(new Error('Choose 1 to 80 image steps.'), { code: 400 });
+    }
+    if (body.size === '2048x2048' && (count > 1 || steps > 40)) {
+      throw Object.assign(new Error('At 2048 × 2048, use one variation and up to 40 steps.'), { code: 400 });
+    }
+    if (Array.isArray(body.imagesB64) && body.imagesB64.length > 4) {
+      throw Object.assign(new Error('Use up to 4 reference photos.'), { code: 400 });
+    }
+  }
   // TTS scripts must stay VERBATIM — the improver never rewrites speech.
   const enhance = task === 'tts' ? 0 : (body.enhance === false ? 0 : 1);
   const params = {
@@ -267,6 +377,8 @@ export function createMediaJob(userId, body) {
     negative: body.negative ?? '',
     quality: body.quality ?? null,
     trueCfg: body.trueCfg ?? null,
+    previewEvery: body.previewEvery ?? 1,
+    outputFormat: body.outputFormat ?? 'png',
     seed: body.seed ?? null,
     numFrames: body.numFrames ?? null,
     fps: body.fps ?? null,
