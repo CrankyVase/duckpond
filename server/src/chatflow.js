@@ -6,8 +6,9 @@ import { db } from './db.js';
 import { listModels, streamChat } from './llama.js';
 import {
   AGENT_TOOLS, agentLoop, bindRunAbort, createRun, createWorkspaceRow,
-  emit as emitRunEvent, execTool, finishRun, releaseRunAbort, subscribeRun,
+  emit as emitRunEvent, execTool, finishRun, releaseRunAbort, relayRunEvent, subscribeRun,
 } from './routes/agent.js';
+import { linkAgentChatJob } from './liveJobs.js';
 import { checkUserContent } from './contentFilter.js';
 import { generateViaBridge, stepsForQuality } from './imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from './websearch.js';
@@ -383,7 +384,7 @@ export async function autoCompactMessages(messages, auxModel, abortSignal, log) 
 // models out). Returns { text, reasoning, timings, usage, runId }.
 export async function runAgentTurn({
   conv, req, res, promptMessages, promptLeaf, wsRow, imgPrefs, disabledTools,
-  params, userLoc, send, abort, log,
+  params, userLoc, send, abort, log, chatJobId,
 }) {
   let { reasoning, timings, usage } = res;
 // the model reached for tools → this turn becomes an agent run
@@ -405,31 +406,16 @@ if (gateCall) {
   db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(wsRow.id, conv.id);
 }
 const run = createRun(wsRow.id, req.user.id, conv.model_id, promptLeaf.content, conv.id);
+try { linkAgentChatJob(run, chatJobId, promptLeaf.id, {
+  toolNames: [...agentToolNames], genParams: params,
+  ctxBudget: Number(conv._settings.ctx_size) > 0 ? Number(conv._settings.ctx_size) : null,
+}); }
+catch (err) { finishRun(run.id, 'error'); throw err; }
+run.chat_job_id = chatJobId;
 runId = run.id;
 bindRunAbort(run.id, abort);
 send({ type: 'agent_start', run, workspace: wsRow });
-  const unsub = subscribeRun(run.id, (e) => {
-    if (e.type === 'delta') {
-      if (e.text) send({ type: 'delta', text: e.text });
-      else if (e.reasoning) send({ type: 'thinking', text: e.reasoning });
-    } else if (e.type === 'tool_delta') {
-      send({ type: 'tool_delta', index: e.index, name: e.name, args: e.args });
-    } else if (e.type === 'tok_s') {
-      send({ type: 'tok_s', value: e.value, n: e.n, promptN: e.promptN, estimated: e.estimated });
-    } else if (e.type === 'context') {
-      // live context accounting straight from the agent loop (per step)
-      send({ type: 'context', used: e.used, budget: e.budget });
-    } else if (e.type === 'notice') {
-      send({ type: 'notice', message: e.message });
-    } else if (e.type === 'image_job' || e.type === 'image_progress'
-        || e.type === 'image_preview' || e.type === 'image_done') {
-      // live image progress from an agent-run generate_image → the same
-      // top-level events (and imgjob UI) a plain chat image turn uses
-      send({ type: e.type, prompt: e.prompt, phase: e.phase, step: e.step, steps: e.steps, b64: e.b64 });
-    } else {
-      send({ type: 'agent', event: e });
-    }
-  });
+  const unsub = subscribeRun(run.id, (e) => relayRunEvent(send, e));
 if (gateCall) {
   // record the gate step (now visible live), write PLAN.md, and
   // rebuild the transcript under the active-project policy
@@ -468,6 +454,13 @@ try {
   releaseRunAbort(run.id);
 }
 if (result.status === 'final') {
+  // Persist the final answer before the run becomes terminal. If the process
+  // dies before chatPost saves its assistant row, boot recovery can settle the
+  // original job from this event without asking the model to repeat the turn.
+  emitRunEvent(run.id, 'assistant', {
+    content: result.content, thinking: result.reasoning || null,
+    step: result.step, final: true,
+  });
   finishRun(run.id, 'done');
   return {
     text: result.content,

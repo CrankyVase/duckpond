@@ -719,7 +719,7 @@ export function registerChatPost(app) {
         // run (local models only — remote/paid models never drive the sandbox)
         const r = await runAgentTurn({
           conv, req, res, promptMessages, promptLeaf, wsRow, imgPrefs, disabledTools,
-          params, userLoc, send, abort, log: req.log,
+          params, userLoc, send, abort, log: req.log, chatJobId: job.id,
         });
         text = r.text;
         reasoning = r.reasoning ?? reasoning;

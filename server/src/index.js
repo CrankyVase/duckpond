@@ -121,15 +121,16 @@ setInterval(() => { try { pruneMemories(app.log); } catch { /* next sweep */ } }
 setTimeout(() => syncStaleProviders(app.log), 15_000).unref();
 setInterval(() => syncStaleProviders(app.log), 6 * 60 * 60_000).unref();
 
-// Free any orphan agent runs left by the previous process before accepting traffic
+// Restore safe Agent runs first so their original chat jobs remain live.
+// Other detached chat jobs are parked only after that decision is made.
+try {
+  const { resumed, reconciled, completed, stopped } = recoverAgentRuns(app.log);
+  if (resumed || reconciled || completed || stopped) app.log.info({ resumed, reconciled, completed, stopped }, 'recovered agent runs on boot');
+} catch (err) { app.log.warn({ err }, 'orphan run reclaim failed'); }
 try {
   const n = reconcileChatJobs();
   if (n) app.log.warn({ n }, 'reconciled chat jobs interrupted by restart');
 } catch (err) { app.log.warn({ err }, 'chat job reconciliation failed'); }
-try {
-  const { resumed, reconciled } = recoverAgentRuns(app.log);
-  if (resumed || reconciled) app.log.info({ resumed, reconciled }, 'recovered agent runs on boot');
-} catch (err) { app.log.warn({ err }, 'orphan run reclaim failed'); }
 
 // Recover interrupted HF transfers from their partial cache blobs.
 try {

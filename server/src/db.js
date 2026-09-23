@@ -349,6 +349,9 @@ try { db.exec('ALTER TABLE agent_runs ADD COLUMN source_conv_id INTEGER'); } cat
 try { db.exec('ALTER TABLE agent_runs ADD COLUMN idempotency_key TEXT'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE agent_runs ADD COLUMN request_hash TEXT'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE agent_runs ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE agent_runs ADD COLUMN chat_job_id TEXT REFERENCES chat_jobs(id) ON DELETE SET NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE agent_runs ADD COLUMN runtime_json TEXT'); } catch { /* exists */ }
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_chat_job ON agent_runs(chat_job_id) WHERE chat_job_id IS NOT NULL');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_idempotency ON agent_runs(user_id, workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL');
 // One durable plan per agent run. Chat prose and PLAN.md are not the source of truth.
 db.exec(`

@@ -116,7 +116,20 @@ function interruptedBody(state, aborted) {
   return text;
 }
 
-function findParkedAssistant(convId, promptId, partial) {
+function isParkedAssistant(content) {
+  const text = String(content ?? '');
+  return text.startsWith('_(no text yet)_')
+    || /(?:^|\n)> Interrupted: /m.test(text)
+    || /\n_Say \*\*continue\*\* to pick up from here/m.test(text)
+    || text === 'Stopped — everything done so far is saved in the workspace.';
+}
+
+function findParkedAssistant(convId, promptId, partial, runId = null) {
+  if (runId != null) {
+    const linked = db.prepare(`SELECT * FROM messages WHERE conv_id = ? AND parent_id = ?
+      AND role = 'assistant' AND run_id = ? ORDER BY id DESC LIMIT 1`).get(convId, promptId, runId);
+    if (linked) return linked;
+  }
   const needle = String(partial || '').slice(0, 80);
   return assistantChildren.all(convId, promptId).find((m) => {
     const content = String(m.content || '');
@@ -137,12 +150,12 @@ function shouldAdoptLeaf(convId, promptId, leafId) {
 
 // Write the in-flight reply into the message tree. Idempotent if that partial
 // was already parked (crash between insert and the job-status update).
-export function saveInterruptedSnapshot({ convId, promptId, modelId = null, state = {}, aborted = false } = {}) {
+export function saveInterruptedSnapshot({ convId, promptId, modelId = null, runId = null, state = {}, aborted = false } = {}) {
   if (!convId || !promptId) return null;
   const prompt = promptById.get(promptId, convId);
   if (!prompt || prompt.role !== 'user') return null;
   const partial = partialText(state);
-  const existing = findParkedAssistant(convId, prompt.id, partial);
+  const existing = findParkedAssistant(convId, prompt.id, partial, runId ?? state.run?.id ?? null);
   const conv = convLeaf.get(convId);
   if (existing) {
     if (shouldAdoptLeaf(convId, prompt.id, conv?.active_leaf_id ?? null)) setConvLeaf.run(existing.id, convId);
@@ -153,7 +166,7 @@ export function saveInterruptedSnapshot({ convId, promptId, modelId = null, stat
     convId, prompt.id, interruptedBody(state, aborted),
     state.thinking || null,
     modelId ?? conv?.model_id ?? null,
-    state.run?.id ?? null,
+    runId ?? state.run?.id ?? null,
     search ? JSON.stringify(search) : null,
   );
   const msg = messageById.get(info.lastInsertRowid, convId);
@@ -163,7 +176,10 @@ export function saveInterruptedSnapshot({ convId, promptId, modelId = null, stat
 
 export function reconcileChatJobs() {
   db.prepare("DELETE FROM chat_jobs WHERE status != 'running' AND updated_at < unixepoch() - 7 * 86400").run();
-  const rows = db.prepare("SELECT id, conv_id, prompt_msg_id, state_json, final_msg_json FROM chat_jobs WHERE status = 'running'").all();
+  const rows = db.prepare(`SELECT j.id, j.conv_id, j.prompt_msg_id, j.state_json, j.final_msg_json,
+    r.id AS linked_run_id, r.status AS linked_run_status FROM chat_jobs j
+    LEFT JOIN agent_runs r ON r.chat_job_id = j.id
+    WHERE j.status = 'running'`).all();
   const update = db.prepare(`UPDATE chat_jobs SET status = 'interrupted', state_json = ?, final_msg_json = ?,
     updated_at = unixepoch(), finished_at = unixepoch() WHERE id = ?`);
   const tx = db.transaction((row) => {
@@ -172,6 +188,7 @@ export function reconcileChatJobs() {
     if (!state.userMsg && row.prompt_msg_id) {
       state.userMsg = messageById.get(row.prompt_msg_id, row.conv_id) ?? null;
     }
+    if (row.linked_run_id != null && !state.run) state.run = { id: row.linked_run_id };
     if (!state.error) {
       state.error = 'The server restarted while this task was running. Its last progress was saved; inspect the result before continuing. Any in-flight tool outcome may need reconciliation.';
     }
@@ -186,6 +203,7 @@ export function reconcileChatJobs() {
       saved = saveInterruptedSnapshot({
         convId: row.conv_id,
         promptId: row.prompt_msg_id || state.userMsg?.id || null,
+        runId: row.linked_run_id,
         state,
       });
     }
@@ -195,10 +213,144 @@ export function reconcileChatJobs() {
   for (const row of rows) {
     // A job still running in this process will park its own partial on the way out.
     if (jobs.get(Number(row.conv_id))?.status === 'running') continue;
+    if (row.linked_run_id != null && ['done', 'stopped'].includes(row.linked_run_status)) {
+      const run = db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(row.linked_run_id);
+      if (run) {
+        if (run.status === 'stopped') {
+          settleAgentChatJob(run, { status: 'stopped', content: 'Stopped — everything done so far is saved in the workspace.' });
+          n += 1;
+          continue;
+        }
+        const finalEvents = db.prepare("SELECT json FROM agent_events WHERE run_id = ? AND type = 'assistant' ORDER BY id DESC LIMIT 10")
+          .all(run.id);
+        let final = null;
+        for (const event of finalEvents) {
+          try { const parsed = JSON.parse(event.json); if (parsed.final) { final = parsed; break; } }
+          catch { /* malformed historical event */ }
+        }
+        // A terminal run alone is not proof that its chat reply was delivered.
+        // A parked partial may also carry this run ID, so require the final event.
+        if (final) {
+          settleAgentChatJob(run, { status: 'done', content: final.content, reasoning: final.thinking ?? null });
+          n += 1;
+          continue;
+        }
+      }
+    }
     tx(row);
     n += 1;
   }
   return n;
+}
+
+/** Link the accepted chat job to its run before any Agent tool can execute. */
+export function linkAgentChatJob(run, jobId, promptId, resumeConfig) {
+  if (!Array.isArray(resumeConfig?.toolNames)) {
+    throw new Error('Agent recovery configuration is missing');
+  }
+  const runtimeJson = JSON.stringify(resumeConfig);
+  const tx = db.transaction(() => {
+    const job = db.prepare(`SELECT id FROM chat_jobs WHERE id = ? AND conv_id = ? AND user_id = ?
+      AND prompt_msg_id = ? AND status = 'running'`).get(jobId, run.source_conv_id, run.user_id, promptId);
+    if (!job) throw new Error('The original chat job is no longer active');
+    const changed = db.prepare(`UPDATE agent_runs SET chat_job_id = ?, runtime_json = ? WHERE id = ? AND user_id = ?
+      AND source_conv_id = ? AND chat_job_id IS NULL`).run(jobId, runtimeJson, run.id, run.user_id, run.source_conv_id);
+    if (changed.changes !== 1) throw new Error('Could not link the Agent run to its chat job');
+  });
+  tx();
+}
+
+/** Restore the same job ID and folded state so chat polling/SSE stay live. */
+export function reviveAgentChatJob(run) {
+  if (!run.chat_job_id || !run.source_conv_id) return null;
+  const row = db.prepare(`SELECT * FROM chat_jobs WHERE id = ? AND conv_id = ? AND user_id = ?
+    AND status = 'running'`).get(run.chat_job_id, run.source_conv_id, run.user_id);
+  if (!row || !row.prompt_msg_id) return null;
+  const prompt = promptById.get(row.prompt_msg_id, row.conv_id);
+  if (prompt?.role !== 'user') return null;
+  const existing = jobs.get(Number(row.conv_id));
+  if (existing?.status === 'running') return null;
+  let state = {};
+  try { state = JSON.parse(row.state_json || '{}'); } catch { /* start with the prompt below */ }
+  state.userMsg ??= messageById.get(row.prompt_msg_id, row.conv_id) ?? null;
+  state.run = { ...run, status: 'running' };
+  state.pendingApproval = null;
+  let resolveSettled;
+  const settled = new Promise((resolve) => { resolveSettled = resolve; });
+  const job = {
+    id: row.id, convId: Number(row.conv_id), userId: Number(row.user_id),
+    abort: new AbortController(), listeners: new Set(), state,
+    status: 'running', finalMsg: null, settled, resolveSettled,
+    seq: Number(state.seq) || 0, eventLog: [], persistedPartial: !!(state.text || state.thinking),
+  };
+  jobs.set(job.convId, job);
+  queuePersist(job, true);
+  return job;
+}
+
+/** Persist one assistant row and settle the original chat job atomically. */
+export function settleAgentChatJob(run, { status, content, reasoning = null, job = null } = {}) {
+  if (!run.chat_job_id) return null;
+  const tx = db.transaction(() => {
+    const row = db.prepare('SELECT * FROM chat_jobs WHERE id = ? AND conv_id = ? AND user_id = ?')
+      .get(run.chat_job_id, run.source_conv_id, run.user_id);
+    if (!row) return null;
+    let state = job ? storedState(job) : {};
+    if (!job) {
+      try { state = JSON.parse(row.state_json || '{}'); } catch { /* recover from row links */ }
+    }
+    const existingFinal = row.final_msg_json ? (() => {
+      try { return messageById.get(JSON.parse(row.final_msg_json).id, row.conv_id); } catch { return null; }
+    })() : null;
+    if (row.status !== 'running') return { msg: existingFinal, status: row.status, state };
+    const promptId = row.prompt_msg_id;
+    const prompt = promptId ? promptById.get(promptId, row.conv_id) : null;
+    let msg = prompt?.role === 'user'
+      ? db.prepare(`SELECT * FROM messages WHERE conv_id = ? AND parent_id = ? AND role = 'assistant'
+        AND run_id = ? ORDER BY id DESC LIMIT 1`).get(row.conv_id, promptId, run.id)
+      : null;
+    const finalStatus = status;
+    const existingComplete = msg && !isParkedAssistant(msg.content);
+    const fallback = finalStatus === 'done' ? 'Finished the run. Open Project files to review the result.'
+      : finalStatus === 'stopped' ? 'Stopped — everything done so far is saved in the workspace.'
+        : String(content || 'The run stopped. Inspect Project files before continuing.');
+    if (finalStatus !== 'done') state.error = finalStatus === 'stopped' ? 'Stopped by user.' : String(content || fallback);
+    const replyText = existingComplete ? msg.content
+      : finalStatus !== 'done' ? interruptedBody(state, finalStatus === 'stopped')
+        : String(content || '').trim() || fallback;
+    state.text = replyText;
+    state.loading = false;
+    state.pendingApproval = null;
+    state.run = { ...run, status: finalStatus };
+    state.error = finalStatus === 'done' ? null : finalStatus === 'stopped' ? 'Stopped by user.' : String(content || fallback);
+    if (prompt?.role === 'user') {
+      if (msg && !existingComplete) {
+        db.prepare('UPDATE messages SET content = ?, thinking = ? WHERE id = ?').run(replyText, reasoning, msg.id);
+        msg = messageById.get(msg.id, row.conv_id);
+      } else if (!msg) {
+        const inserted = insertPartial.run(row.conv_id, promptId, replyText, reasoning,
+          run.model_id ?? convLeaf.get(row.conv_id)?.model_id ?? null, run.id, null);
+        msg = messageById.get(inserted.lastInsertRowid, row.conv_id);
+      }
+      const leaf = convLeaf.get(row.conv_id)?.active_leaf_id ?? null;
+      if (msg && shouldAdoptLeaf(row.conv_id, promptId, leaf)) setConvLeaf.run(msg.id, row.conv_id);
+    }
+    db.prepare(`UPDATE chat_jobs SET status = ?, state_json = ?, final_msg_json = ?,
+      updated_at = unixepoch(), finished_at = unixepoch() WHERE id = ?`)
+      .run(finalStatus, JSON.stringify(state), msg ? JSON.stringify(msg) : null, row.id);
+    return { msg, status: finalStatus, state };
+  });
+  const settled = tx();
+  if (job && settled) {
+    job.state = settled.state;
+    if (settled.msg) broadcast(job, { type: 'done', msg: settled.msg });
+    finishLiveJob(job, settled.status);
+    for (const fn of [...job.listeners]) {
+      try { fn({ type: 'stream_end' }); } catch { /* disconnected */ }
+    }
+    job.listeners.clear();
+  }
+  return settled;
 }
 
 function flushRunningJobs() {

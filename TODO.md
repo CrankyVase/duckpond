@@ -40,7 +40,7 @@ Implementation staged: authenticated metrics endpoint and a movable, resizable, 
 - [x] Replace Agent's default 80-step terminal cap with renewable work windows. Add a completion recheck and repeated-tool loop guard.
 - [x] Add scoped document list/search/read tools and a default-off sequential analysis subagent capability. Keep subagent concurrency at zero by default on this machine.
 - [ ] Verify Chat and Agent submission idempotency after a lost POST response and after refresh. Client keys, database uniqueness, and duplicate responses are staged in the redesign branch.
-- [ ] Finish chat-tied Agent recovery after Node restart. Safe run checkpoints and Stop intent are staged, but a resumed run must also settle its original Chat job and final conversation message. Keep uncertain tool effects for manual reconciliation.
+- [ ] Verify chat-tied Agent recovery after Node restart. The redesign now persists the run-to-job link and runtime settings before tool work, revives the original Chat job for safe checkpoints, and settles one linked assistant row. Fault-inject model, tool, final-event and Stop boundaries before checking this box; uncertain tool effects and approval waits require manual reconciliation.
 - [ ] Make Chat and Agent event replay durable across restart, with ordered cursors, bounded retention, and a second-device timeline. Agent events persist; Chat has a process-local event ring and durable folded snapshot.
 - [ ] Complete the Agent plan state and UI. Objective, file changes, command evidence and failures are staged; constraints, checklist steps, current step and remaining work still need a reliable update path.
 - [ ] Audit timeouts across Fastify, local runtime, model router, provider, browser, media bridge and Cloudflare. Expose legitimate resource ceilings and recovery paths; make command cancellation reliable.
@@ -99,4 +99,4 @@ Implementation staged: repeatable background load/unload actions, bridge unload 
 ## Source control record
 
 - `origin/main` received documentation checkpoint `49dffe0` on 2026-09-23. It did not include redesign source or trigger a source deployment.
-- `origin/codex/production-redesign` last published checkpoint is `f67a936`; it includes the earlier hardware panel, Model Hub, Studio lifecycle and widget cleanup work. Current recovery and download edits need review and a new branch push before release.
+- `origin/codex/production-redesign` published checkpoint `df54a0d` after the earlier hardware panel, Model Hub, Studio lifecycle and widget cleanup work. It adds on-demand imported themes, stricter download completion and model-drive metrics. Subsequent branch work adds chat-tied recovery; restart checks remain before release.

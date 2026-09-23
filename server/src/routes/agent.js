@@ -17,6 +17,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmS
 import { dirname, extname, join, resolve } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
+import { broadcast, reviveAgentChatJob, settleAgentChatJob } from '../liveJobs.js';
 import { createAgentPlan, planView, recordToolResult } from '../agentPlan.js';
 import { submissionHash, submissionKey } from '../idempotency.js';
 import { docFullText, listDocs, retrieveChunks } from '../docs.js';
@@ -733,6 +734,26 @@ export function subscribeRun(runId, fn) {
   return () => { subs.delete(fn); if (!subs.size) runSubs.delete(runId); };
 }
 
+/** Present one Agent event in the chat job's existing event vocabulary. */
+export function relayRunEvent(send, e) {
+  if (e.type === 'delta') {
+    if (e.text) send({ type: 'delta', text: e.text });
+    else if (e.reasoning) send({ type: 'thinking', text: e.reasoning });
+  } else if (e.type === 'tool_delta') {
+    send({ type: 'tool_delta', index: e.index, name: e.name, args: e.args });
+  } else if (e.type === 'tok_s') {
+    send({ type: 'tok_s', value: e.value, n: e.n, promptN: e.promptN, estimated: e.estimated });
+  } else if (e.type === 'context') {
+    send({ type: 'context', used: e.used, budget: e.budget });
+  } else if (e.type === 'notice') {
+    send({ type: 'notice', message: e.message });
+  } else if (['image_job', 'image_progress', 'image_preview', 'image_done'].includes(e.type)) {
+    send({ type: e.type, prompt: e.prompt, phase: e.phase, step: e.step, steps: e.steps, b64: e.b64 });
+  } else {
+    send({ type: 'agent', event: e });
+  }
+}
+
 export function createWorkspaceRow(userId, name) {
   const r = db.prepare('INSERT INTO workspaces (user_id, name) VALUES (?, ?)').run(userId, name);
   const id = r.lastInsertRowid;
@@ -800,60 +821,118 @@ export function resumeDecision(run, { checkpoint = null, toolCount = null, unres
     && typeof seen === 'number' && Number.isFinite(seen)
     && recorded === seen;
   if (!cleanBoundary || (status !== 'running' && status !== 'waiting_approval')) return 'reconcile';
-  if (status === 'waiting_approval') return 'wait';
+  // The approval resolver is process-local. After restart the pending tool
+  // cannot receive a decision, so this run needs manual reconciliation.
+  if (status === 'waiting_approval') return 'reconcile';
   if (status === 'running') return 'resume';
   return 'reconcile';
 }
 
-/** Resume from a complete transcript checkpoint, including chat-tied runs.
- * Stop stays stopped. A clean approval wait stays waiting. Uncertain tool
- * boundaries are reconciled and are not replayed. */
+function lastFinalAssistant(runId) {
+  const events = db.prepare("SELECT json FROM agent_events WHERE run_id = ? AND type = 'assistant' ORDER BY id DESC LIMIT 10")
+    .all(runId);
+  for (const event of events) {
+    try { const value = JSON.parse(event.json); if (value.final) return value; }
+    catch { /* historical event may be malformed */ }
+  }
+  return null;
+}
+
+/** Resume complete checkpoints. Stop stays stopped; approval waits and
+ * uncertain tool boundaries are reconciled without replaying side effects. */
 export function recoverAgentRuns(log) {
   const rows = db.prepare("SELECT * FROM agent_runs WHERE status IN ('running','waiting_approval') ORDER BY id").all();
-  let resumed = 0, reconciled = 0, waited = 0, stopped = 0;
+  let resumed = 0, reconciled = 0, completed = 0, stopped = 0;
   for (const run of rows) {
     if (isRunLive(run.id)) continue;
+    const final = run.chat_job_id ? lastFinalAssistant(run.id) : null;
+    if (final && Number(run.stop_requested) === 0) {
+      setRunStatus(run.id, 'done', true);
+      settleAgentChatJob(run, { status: 'done', content: final.content, reasoning: final.thinking });
+      completed += 1;
+      continue;
+    }
     const checkpoint = db.prepare('SELECT * FROM agent_checkpoints WHERE run_id = ?').get(run.id);
     const toolCount = db.prepare('SELECT COUNT(*) AS n FROM agent_tool_invocations WHERE run_id = ?').get(run.id).n;
     const unresolved = db.prepare("SELECT COUNT(*) AS n FROM agent_tool_invocations WHERE run_id = ? AND status != 'complete'").get(run.id).n;
     const ws = db.prepare('SELECT * FROM workspaces WHERE id = ? AND user_id = ?').get(run.workspace_id, run.user_id);
     let decision = resumeDecision(run, { checkpoint, toolCount, unresolved });
-    if ((decision === 'resume' || decision === 'wait') && !ws) decision = 'reconcile';
+    if (decision === 'resume' && (!ws || (run.source_conv_id && !run.chat_job_id))) decision = 'reconcile';
+    let resumeConfig = null;
+    if (decision === 'resume' && run.source_conv_id) {
+      try {
+        resumeConfig = JSON.parse(run.runtime_json);
+        const available = new Set(AGENT_TOOLS.map((tool) => tool.function.name));
+        if (!Array.isArray(resumeConfig?.toolNames)
+          || !resumeConfig.toolNames.every((name) => available.has(name))) throw new Error('tool configuration changed');
+      } catch { decision = 'reconcile'; }
+    }
     if (decision === 'stop') {
       emit(run.id, 'notice', { message: 'You stopped this run. It was not resumed after the server restarted.' });
       setRunStatus(run.id, 'stopped', true);
+      settleAgentChatJob(run, { status: 'stopped', content: 'Stopped — everything done so far is saved in the workspace.' });
       log?.info?.({ run: run.id }, 'stopped agent run was not resumed');
       stopped += 1;
       continue;
     }
-    if (decision === 'wait') {
-      emit(run.id, 'notice', {
-        message: 'Server restarted while this run was waiting for approval. Approval is still required. The pending tool was not executed.',
-      });
-      log?.info?.({ run: run.id }, 'agent run still waiting for approval after restart');
-      waited += 1;
-      continue;
-    }
+    let recoveredChatJob = null;
     if (decision === 'resume') {
+      let unsub = null;
       try {
         const messages = JSON.parse(checkpoint.messages_json);
         if (!Array.isArray(messages)) throw new Error('invalid checkpoint');
+        recoveredChatJob = run.chat_job_id ? reviveAgentChatJob(run) : null;
+        if (run.source_conv_id && !recoveredChatJob) throw new Error('linked chat job is unavailable');
+        unsub = recoveredChatJob ? subscribeRun(run.id, (e) => relayRunEvent((event) => broadcast(recoveredChatJob, event), e)) : null;
         emit(run.id, 'notice', { message: 'Server restarted; resuming from the last complete model step.' });
-        // A resumed chat-tied agent run continues its own event log; the chat job snapshot remains the conversation worker’s record and is not replayed here.
-        void runAgent(run, ws, {}, { step: checkpoint.step, messages })
-          .catch((err) => log?.error?.({ err, run: run.id }, 'recovered agent run failed'));
+        void runAgent(run, ws, {
+          abort: recoveredChatJob?.abort,
+          resumeConfig,
+          onFinish: ({ status, content, reasoning }) => {
+            try {
+              if (recoveredChatJob) {
+                const reply = status === 'done' ? content
+                  : status === 'stopped' ? 'Stopped — everything done so far is saved in the workspace.'
+                    : `The run hit an error (${content ?? 'unknown'}) — everything done so far is saved in the workspace.`;
+                settleAgentChatJob(run, { status, content: reply, reasoning, job: recoveredChatJob });
+              }
+            } catch (err) { log?.error?.({ err, run: run.id }, 'could not settle recovered chat job'); }
+            finally { unsub?.(); }
+          },
+        }, { step: checkpoint.step, messages })
+          .catch((err) => {
+            unsub?.();
+            log?.error?.({ err, run: run.id }, 'recovered agent run failed');
+            if (recoveredChatJob) {
+              try {
+                settleAgentChatJob(run, {
+                  status: 'error', content: `The resumed run failed (${err.message ?? err}). Inspect Project files before continuing.`, job: recoveredChatJob,
+                });
+              } catch (settleErr) {
+                log?.error?.({ err: settleErr, run: run.id }, 'could not settle failed recovered chat job');
+              }
+            }
+          });
         resumed += 1;
         continue;
-      } catch (err) { log?.warn?.({ err, run: run.id }, 'checkpoint unreadable'); }
+      } catch (err) {
+        unsub?.();
+        log?.warn?.({ err, run: run.id }, 'Agent restart checkpoint could not be used');
+      }
+      // A restored chat job must be settled below if launch failed.
     }
     const changedTools = checkpoint && toolCount !== checkpoint.tool_count;
-    markInterruptedRun(run.id, changedTools
-      ? 'The server restarted after tool work that was not captured in a complete transcript checkpoint. Inspect project changes before continuing; this action will not replay automatically.'
-      : null, !!changedTools);
+    const reason = run.status === 'waiting_approval'
+      ? 'The server restarted while approval was pending. No live approval resolver remains, and the tool was not executed. Review the request and continue in a new turn.'
+      : changedTools
+        ? 'The server restarted after tool work that was not captured in a complete transcript checkpoint. Inspect project changes before continuing; this action will not replay automatically.'
+        : 'The server restarted before this run could be resumed safely. Inspect project changes before continuing.';
+    markInterruptedRun(run.id, reason, !!changedTools);
+    settleAgentChatJob(run, { status: 'interrupted', content: reason, job: recoveredChatJob });
     log?.warn?.({ run: run.id, sourceConvId: run.source_conv_id, changedTools, unresolved }, 'agent run needs reconciliation');
     reconciled += 1;
   }
-  return { resumed, reconciled, waited, stopped };
+  return { resumed, reconciled, completed, stopped };
 }
 
 export function createRun(workspaceId, userId, modelId, task, sourceConvId = null, idempotencyKey = null, requestHash = null) {
@@ -1111,11 +1190,11 @@ export async function agentLoop({
 }
 
 async function runAgent(run, ws, hooks = {}, checkpoint = null) {
-  const abort = new AbortController();
+  const abort = hooks.abort ?? new AbortController();
   runAborts.set(run.id, abort);
-  const finish = (status, content) => {
+  const finish = (status, content, reasoning = null) => {
     setRunStatus(run.id, status, true);
-    try { hooks.onFinish?.({ status, content }); } catch { /* observer only */ }
+    try { hooks.onFinish?.({ status, content, reasoning }); } catch { /* observer only */ }
   };
   const model = run.model_id ?? DEFAULT_AGENT_MODEL;
   const messages = checkpoint?.messages ?? [
@@ -1133,13 +1212,18 @@ async function runAgent(run, ws, hooks = {}, checkpoint = null) {
     });
     const r = await agentLoop({
       run, ws, messages, model,
-      genParams: { temperature: 0.7, top_p: 0.8, max_tokens: 8192, chat_template_kwargs: { enable_thinking: false } },
+      genParams: hooks.resumeConfig?.genParams ?? { temperature: 0.7, top_p: 0.8, max_tokens: 8192, chat_template_kwargs: { enable_thinking: false } },
       abortSignal: abort.signal,
       startStep: checkpoint?.step ?? 0,
+      tools: hooks.resumeConfig
+        ? AGENT_TOOLS.filter((tool) => hooks.resumeConfig.toolNames.includes(tool.function.name)) : AGENT_TOOLS,
+      ctxBudget: hooks.resumeConfig?.ctxBudget ?? null,
     });
-    if (r.status === 'final') {
+    if (abort.signal.aborted || db.prepare('SELECT stop_requested FROM agent_runs WHERE id = ?').get(run.id)?.stop_requested) {
+      finish('stopped');
+    } else if (r.status === 'final') {
       emit(run.id, 'assistant', { content: r.content, thinking: r.reasoning || null, step: r.step, final: true });
-      finish('done', r.content);
+      finish('done', r.content, r.reasoning || null);
     } else if (r.status === 'aborted') {
       finish('stopped');
     } else {
