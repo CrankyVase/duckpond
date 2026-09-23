@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS = {
   top_p: 0.95,
   top_k: 40,
   repeat_penalty: 1.1,
+  max_tokens: 0,    // 0 = automatic; local unbounded, remote defaults to 4096
   system_prompt: '',
   thinking: 'auto',   // auto | high | low | none — translated per provider dialect (reasoning.js)
   thinking_budget: 0, // explicit reasoning-token budget; 0 = derive from `thinking`
@@ -237,6 +238,12 @@ export default async function modelRoutes(app) {
       if (k === 'disabledTools') {
         const known = new Set(TOOL_CATALOG.map((t) => t.id));
         clean[k] = Array.isArray(req.body[k]) ? req.body[k].filter((id) => known.has(id)) : [];
+      } else if (k === 'max_tokens') {
+        const limit = Number(req.body[k]);
+        if (!Number.isInteger(limit) || limit < 0 || limit > 32768) {
+          return reply.code(400).send({ error: 'Maximum reply tokens must be 0 to 32768.' });
+        }
+        clean[k] = limit;
       } else {
         clean[k] = req.body[k];
       }

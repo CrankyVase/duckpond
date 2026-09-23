@@ -43,7 +43,7 @@ Implementation staged: authenticated metrics endpoint and a movable, resizable, 
 - [ ] Complete the Agent plan state and UI. Objective, file changes, command evidence and failures are staged; constraints, checklist steps, current step and remaining work still need a reliable update path.
 - [ ] Audit timeouts across Fastify, local runtime, model router, provider, browser, media bridge and Cloudflare. Expose legitimate resource ceilings and recovery paths; make command cancellation reliable.
 - [x] Resolve inconsistent remote output defaults in `llama.js` and `chatBackend.js`. Both paths now share a 4096-token default unless the caller sets `max_tokens`.
-- [ ] Expose that output reserve in Settings.
+- [ ] Verify per-model maximum reply tokens in Settings with local and remote models. The control and server validation are staged; 0 keeps the automatic default.
 - [ ] Reproduce history/tree disappearance and partial-answer behavior through model errors, refresh, tab close, process exit and reconnect. Recovery edits are staged; these scenarios have not been run.
 
 ## 4. Chat and coding quality

@@ -520,6 +520,14 @@
           </div>
           <div class="row">
             <div class="rlabel">
+              <div class="rt">Maximum reply tokens</div>
+              <div class="rd">0 uses the automatic limit. Local replies can continue until the context fills; remote replies default to 4096 tokens or the provider’s lower limit.</div>
+            </div>
+            <input type="number" min="0" max="32768" step="256" value={form.max_tokens ?? 0}
+              onchange={(event) => { form.max_tokens = Number(event.currentTarget.value); }} aria-label="Maximum reply tokens" />
+          </div>
+          <div class="row">
+            <div class="rlabel">
               <div class="rt">Mirostat</div>
               <div class="rd">entropy-target sampling — replaces Top P / Top K while on</div>
             </div>

@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from 'svelte';
   import { api } from '../lib/api.js';
   import { app } from '../lib/state.svelte.js';
   import Activity from '@lucide/svelte/icons/activity';
@@ -164,7 +165,7 @@
     let timer;
     const visibility = () => {
       clearInterval(timer);
-      if (!document.hidden) { void poll(); timer = setInterval(() => { currentTime = Date.now(); void poll(); }, refresh); }
+      if (!document.hidden) { untrack(() => { void poll(); }); timer = setInterval(() => { currentTime = Date.now(); void poll(); }, refresh); }
     };
     visibility();
     document.addEventListener('visibilitychange', visibility);

@@ -17,6 +17,8 @@ export function mapParamsForRemote(params = {}, modelRow = null) {
   const cap = Number.isFinite(advertised) && advertised > 0
     ? Math.min(advertised, DEFAULT_REMOTE_MAX_TOKENS)
     : DEFAULT_REMOTE_MAX_TOKENS;
-  if (out.max_tokens == null || Number(out.max_tokens) < 0) out.max_tokens = cap;
+  const requested = Number(out.max_tokens);
+  if (out.max_tokens == null || !Number.isInteger(requested) || requested <= 0) out.max_tokens = cap;
+  else if (Number.isFinite(advertised) && advertised > 0) out.max_tokens = Math.min(requested, advertised);
   return out;
 }

@@ -388,7 +388,8 @@ export function registerChatPost(app) {
       } catch (err) {
         req.log.warn({ err }, 'upload inject failed');
       }
-      const params = { max_tokens: -1 };
+      const outputLimit = Number(conv._settings.max_tokens);
+      const params = { max_tokens: Number.isInteger(outputLimit) && outputLimit > 0 ? outputLimit : -1 };
       for (const k of GEN_PARAM_KEYS) params[k] = conv._settings[k];
       // Mirostat (llama.cpp native): when on, the entropy controller replaces
       // top-k/top-p sampling. Passed straight through to llama-server.
