@@ -5,14 +5,24 @@
 // Everything here is best-effort: if the router is down, no small model is
 // found, or the rewrite times out, the job simply continues with the raw
 // prompt. Never let the improver block or kill a generation.
-import { listModels, loadModel, streamChat } from './llama.js';
+import { ensureLoadedModel, listModels, streamChat } from './llama.js';
 import { listLocalModels } from './localInventory.js';
 
 // explicit override > smallest loaded model > smallest model on disk
 const ENV_MODEL = process.env.DUCKPOND_ENHANCE_MODEL ?? '';
 const MAX_PARAMS_B = 2;       // "super light" — never autoload anything bigger
-const TIMEOUT_MS = 30_000;
-const MAX_TOKENS = 500;
+const TIMEOUT_MS = 15_000;
+const MAX_TOKENS = 180;
+const FAST_IMAGE_MODEL = 'lfm2-700m-q4-0';
+
+// The prompt-improver is the one router model allowed to share the GPU with
+// a loaded media-bridge model (it's ~1B, so both fit). Every other LLM load
+// force-unloads the bridge first, and every media run spares this model when
+// reclaiming VRAM — see routes/models.js and imagegen.js.
+export function isEnhancerModel(id) {
+  const s = String(id ?? '');
+  return s === FAST_IMAGE_MODEL || (!!ENV_MODEL && s === ENV_MODEL);
+}
 
 const cache = { id: null, at: 0, ok: false };
 const CACHE_MS = 10 * 60_000;
@@ -51,7 +61,7 @@ async function pickSmallestOnDisk() {
   const variant = best.variants?.[0];
   if (!variant?.include) return null;
   const id = variant.include; // router accepts full gguf paths for dynamic loads
-  try { await loadModel(id); return id; }
+  try { await ensureLoadedModel(id); return id; }
   catch { return null; }
 }
 
@@ -61,6 +71,14 @@ export async function enhancerModel() {
   if (cache.id && now - cache.at < CACHE_MS) return cache.ok ? cache.id : null;
   cache.at = now;
   try {
+    const models = await listModels();
+    const fast = models.find((m) => m.id === FAST_IMAGE_MODEL);
+    if (fast) {
+      if (fast.status !== 'loaded') await ensureLoadedModel(fast.id);
+      cache.id = fast.id;
+      cache.ok = true;
+      return fast.id;
+    }
     const loaded = await pickSmallestLoaded();
     if (loaded) { cache.id = loaded; cache.ok = true; return loaded; }
   } catch { /* router down — try disk */ }
@@ -73,14 +91,11 @@ export async function enhancerModel() {
 }
 
 const TASK_GUIDES = {
-  image: `Rewrite the idea as ONE long English paragraph (120-220 words) in third-person observer register ("The image is a ...", never "Create/make"):
-- Open with ONE ~20-word sentence: medium noun (mandatory: photograph / poster / illustration / logo / ...) + style + main subject + background/palette.
-- Preserve user content verbatim: literal text strings character-for-character in straight "double quotes" in their original script; keep named objects, counts, colors, positions exactly.
-- Walk the frame positionally: background first after the opener, then top band → left/center/right → bottom band (or subject-centric for single-subject). Use ~6-10 positional phrases (upper-left, across the lower third, behind..., in the foreground...). Hit corners/edges/center.
-- Name every legible string in reading order with location/weight/color/case. Distant/unreadable text → say it's blurred/too small to read, never invent letters.
-- Include exactly ONE dedicated lighting sentence (source, direction, quality, shadow behavior).
-- Close with exactly ONE summary sentence ("The overall composition / mood / palette ...").
-- Hard bans: no quality boosters ("4K", "8K", "masterpiece", "highly detailed", "sharp", "award-winning"), no job-instructions ("you should", "make sure"), no negative phrasing ("without", "no X") — describe what IS there, no resolution/ratio words inside the description.`,
+  image: `Rewrite the idea as one vivid English paragraph of 60-90 words for an image model.
+- Preserve every requested subject, color, count, position, and any quoted text exactly.
+- Describe the subject and setting first, then composition, lighting, and mood.
+- Add only visual details that support the original idea. Do not invent film grain or camera artifacts.
+- Return only the finished prompt; no instructions, quality slogans, or negative phrasing.`,
   video: `Rewrite the idea as ONE paragraph (under 80 words) a text-to-video model rewards:
 - Open with the subject and scene, then how things MOVE across the clip.
 - Describe camera behavior (slow push-in, pan, handheld…), pacing, and how light/atmosphere evolve.
@@ -94,7 +109,7 @@ const TASK_GUIDES = {
 };
 
 const FAMILY_HINTS = [
-  [/qwen[-_]?image/i, 'Qwen-Image-2.1: one flowing English paragraph, 120-220 words, third-person "The image is a ..." register; medium+style+subject opener; positional frame walk; one lighting sentence; one closing summary; quoted literal text preserved verbatim; no boosters, no negations, no ratio words.'],
+  [/qwen[-_]?image/i, 'Qwen-Image-2.1: flowing natural language; preserve exact requested details and quoted text; keep it concise.'],
   [/flux/i, 'FLUX: natural full sentences, rich descriptive prose; avoid keyword soup and avoid negations.'],
   [/music3|minimax[-_]?music/i, 'MiniMax Music: describe vocals (gender, texture, language) plus arrangement; keep it singable-style guidance.'],
   [/minimax[-_]?h3|h3/i, 'MiniMax H3 video: describe the scene, motion, and the ambient audio (sounds, ambience) — it generates sound too.'],

@@ -1,4 +1,5 @@
 import { trackStreamProgress } from './streamProgress.js';
+import { createStreamDeadline } from './streamDeadline.js';
 // Client for llama-server ROUTER mode (b9625) on 127.0.0.1:8081.
 // Endpoints verified against the running build: /v1/models (per-model status),
 // /models/load, /models/unload, /v1/chat/completions (+/input_tokens), /slots.
@@ -28,7 +29,7 @@ const REMOTE_MAX_TOKENS = 4096;
 // the wait and the chance of burning through a whole chain on a dead provider
 const REMOTE_FALLBACK_MAX = 3;
 
-async function remoteCall({ model, messages, params, onDelta, abortSignal, onEvent }) {
+async function remoteCall({ model, messages, params, onDelta, abortSignal, onEvent, startupTimeoutMs, idleTimeoutMs }) {
   const r = resolveRemote(model);
   if (!r) throw new Error(`remote model unavailable (provider deleted or disabled): ${model}`);
   if (r.model && !r.model.enabled) throw new Error(`model disabled in the Providers panel: ${r.modelId}`);
@@ -55,7 +56,7 @@ async function remoteCall({ model, messages, params, onDelta, abortSignal, onEve
     try {
       return await streamRemote({
         provider: r.provider, model: modelId, messages,
-        params: mapped, onDelta: trackDelta, abortSignal,
+        params: mapped, onDelta: trackDelta, abortSignal, startupTimeoutMs, idleTimeoutMs,
       });
     } catch (err) {
       lastErr = err;
@@ -142,6 +143,35 @@ export async function isModelLoaded(model) {
 
 export const loadModel = (model) =>
   jfetch('/models/load', { method: 'POST', body: JSON.stringify({ model }) });
+// Force-load a model: evict whatever else is resident first, then load.
+// The router runs with --models-max 1, so a plain /models/load for model B
+// while model A is resident fails with "model limit reached" — every
+// explicit load path (picker Load button, prompt enhancer, Hub register)
+// goes through here so one click always wins the GPU instead of erroring.
+// An in-flight chat auto-reloads its model on the next send (the router
+// queues inference and pulls the model in itself), so eviction self-heals.
+export async function ensureLoadedModel(model, log) {
+  const evicted = [];
+  try {
+    const models = await listModels();
+    for (const m of models) {
+      if (m.id === model) continue;
+      if (m.status !== 'loaded' && m.status !== 'loading' && m.status !== 'sleeping') continue;
+      await unloadModel(m.id).catch((err) => log?.warn({ err, model: m.id }, 'evict-before-load unload failed'));
+      evicted.push(m.id);
+    }
+  } catch (err) {
+    log?.warn({ err }, 'evict-before-load list failed — trying load anyway');
+  }
+  try {
+    await loadModel(model);
+  } catch (err) {
+    // lost a race with an in-flight load of the same model — that's success
+    if (/already running/i.test(String(err?.message ?? err))) return { evicted, already: true };
+    throw err;
+  }
+  return { evicted, already: false };
+}
 export const unloadModel = (model) =>
   jfetch('/models/unload', { method: 'POST', body: JSON.stringify({ model }) });
 // Drop a model from the RUNNING router's registry (DELETE /models?model=…).
@@ -174,7 +204,7 @@ export async function countInputTokens(model, messages) {
 function isRetryableLocalError(err) {
   const msg = String(err?.message ?? err);
   if (/^llama chat 503\b/.test(msg)) return true;
-  return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up/i.test(msg);
+  return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|stream ended before the model finished/i.test(msg);
 }
 const LOCAL_RETRY_MAX = 3;
 
@@ -197,8 +227,8 @@ const LOCAL_RETRY_BASE_MS = 500;
 // returns { content, timings, usage } when done. abortSignal cancels generation.
 // onEvent: optional side-channel ({type:'fallback'|'retry', ...}) so callers
 // can toast/log chain hops and reconnects; every caller gets both either way.
-export async function streamChat({ model, messages, params = {}, onDelta, abortSignal, onEvent }) {
-  if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal, onEvent });
+export async function streamChat({ model, messages, params = {}, onDelta, abortSignal, onEvent, startupTimeoutMs, idleTimeoutMs }) {
+  if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal, onEvent, startupTimeoutMs, idleTimeoutMs });
   const act = markUse(model);
   act.active++;
   try {
@@ -214,7 +244,7 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
         return onDelta?.(chunk, meta);
       };
       try {
-        return await streamChatInner({ model, messages, params: effectiveParams, onDelta: trackDelta, abortSignal });
+        return await streamChatInner({ model, messages, params: effectiveParams, onDelta: trackDelta, abortSignal, startupTimeoutMs, idleTimeoutMs });
       } catch (err) {
         lastErr = err;
         const more = attempt < LOCAL_RETRY_MAX;
@@ -238,7 +268,24 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
   }
 }
 
-async function streamChatInner({ model, messages, params = {}, onDelta, abortSignal }) {
+async function streamChatInner(args) {
+  const { abortSignal, startupTimeoutMs = 300_000, idleTimeoutMs = 180_000 } = args;
+  const deadline = createStreamDeadline({
+    signal: abortSignal, label: 'Local model chat stream',
+    startupMs: startupTimeoutMs, idleMs: idleTimeoutMs,
+  });
+  try {
+    return await streamChatTransport({ ...args, abortSignal: deadline.signal, onProgress: () => deadline.progress() });
+  } catch (err) {
+    throw deadline.error(err);
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function streamChatTransport({
+  model, messages, params = {}, onDelta, abortSignal, onProgress = () => {},
+}) {
   onDelta = trackStreamProgress(onDelta, { messages, tools: params.tools });
   const res = await fetch(BASE + '/v1/chat/completions', {
     method: 'POST',
@@ -265,10 +312,11 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
   let timings = null;
   let usage = null;
   let finishReason = null;
+  let sawDone = false;
   const toolCalls = []; // streamed as fragments keyed by index; arguments concatenate
   const splitter = makeThinkSplitter();
 
-  while (true) {
+  streamLoop: while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
@@ -278,9 +326,13 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
       buf = buf.slice(nl + 1);
       if (!line.startsWith('data: ')) continue;
       const payload = line.slice(6);
-      if (payload === '[DONE]') continue;
+      if (payload === '[DONE]') {
+        sawDone = true;
+        break streamLoop;
+      }
       let json;
       try { json = JSON.parse(payload); } catch { continue; }
+      onProgress();
       if (json.timings) { timings = json.timings; onDelta?.('', { timings }); }
       if (json.usage) usage = json.usage;
       if (json.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
@@ -318,6 +370,10 @@ async function streamChatInner({ model, messages, params = {}, onDelta, abortSig
         }
       }
     }
+  }
+  if (sawDone) await reader.cancel().catch(() => {});
+  if (!sawDone && !finishReason) {
+    throw new Error('Local model chat stream ended before the model finished');
   }
   const tail = splitter.flush();
   if (tail.reasoning) { reasoning += tail.reasoning; onDelta?.('', { reasoning: tail.reasoning, timings }); }

@@ -1,6 +1,9 @@
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
-import { gpuVram, listModels, loadModel, reloadRouterModels, removeModel, unloadModel } from '../llama.js';
+import { gpuVram, listModels, ensureLoadedModel, reloadRouterModels, removeModel, unloadModel } from '../llama.js';
+import { evictBridgeModels } from '../imagegen.js';
+import { activeMediaJobCount } from '../mediaJobs.js';
+import { isEnhancerModel } from '../promptEnhancer.js';
 import { ctxBlurb, describeModel } from '../modelDescribe.js';
 import { cardFor, queueCardFetch } from '../modelCards.js';
 import { isRemoteId, parseCaps, parseRemoteId, syncStaleProviders } from '../providers.js';
@@ -131,10 +134,21 @@ export default async function modelRoutes(app) {
     return [...chat, ...remote];
   });
 
+  // One GPU, mutual exclusion: loading a chat LLM force-unloads whatever
+  // else holds VRAM — other router models AND any resident bridge media
+  // model — instead of failing with "model limit reached". Two exceptions:
+  // the prompt-improver model shares VRAM with media (never evicts the
+  // bridge), and a running generation is never yanked (its job owns the GPU
+  // until it finishes; the load still proceeds for the router slot).
   app.post('/api/models/:id/load', async (req, reply) => {
-    if (isRemoteId(req.params.id)) return reply.code(400).send({ error: 'remote models run on the provider — nothing to load' });
-    await loadModel(req.params.id);
-    return { ok: true };
+    const id = req.params.id;
+    if (isRemoteId(id)) return reply.code(400).send({ error: 'remote models run on the provider — nothing to load' });
+    let bridgeUnloaded = [];
+    if (!isEnhancerModel(id) && activeMediaJobCount() === 0) {
+      bridgeUnloaded = await evictBridgeModels(req.log);
+    }
+    const r = await ensureLoadedModel(id, req.log);
+    return { ok: true, evicted: r.evicted, bridgeUnloaded, already: r.already || undefined };
   });
 
   app.post('/api/models/:id/unload', async (req, reply) => {

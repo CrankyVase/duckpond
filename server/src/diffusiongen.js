@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { listModels, unloadModel } from './llama.js';
+import { isEnhancerModel } from './promptEnhancer.js';
 
 const BIN = process.env.DIFFUSION_CLI
   ?? '/home/cranky/bin/llama-prebuilt/b9966-vulkan/llama-diffusion-cli';
@@ -136,8 +137,9 @@ export async function generateDiffusion({
   let child = null;
   let killed = false;
   try {
-    // the denoiser needs the VRAM the chat models are holding
-    const loaded = (await listModels().catch(() => [])).filter((m) => m.status === 'loaded' || m.status === 'sleeping');
+    // the denoiser needs the VRAM the chat models are holding — except the
+    // prompt-improver, which is allowed to share the GPU with media
+    const loaded = (await listModels().catch(() => [])).filter((m) => (m.status === 'loaded' || m.status === 'sleeping') && !isEnhancerModel(m.id));
     for (const m of loaded) {
       onFrame?.({ n: 0, steps: nSteps, text: `freeing VRAM (unloading ${m.id})…`, phase: 'load' });
       await unloadModel(m.id).catch(() => {});

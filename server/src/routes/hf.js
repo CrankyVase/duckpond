@@ -7,11 +7,14 @@ import {
   deleteModelFileByPath, deleteModelRepoByPath, deleteVariant, findQuantizers,
   hubHardware, modalityModels, modelInfo, modelReadme, modelVariants, ownerAvatar,
   popularModels, recommendedModels, removeRouterPresetSections,
-  removeRouterPresetSectionsByPath, resolveVariantPath, searchModels,
+  removeRouterPresetSectionsByPath, searchModels,
   upsertRouterPreset,
 } from '../hfHub.js';
-import { listLocalModels } from '../localInventory.js';
-import { loadModel, reloadRouterModels, unloadModel } from '../llama.js';
+import { installedChatModelPath, listLocalModels } from '../localInventory.js';
+import { ensureLoadedModel, reloadRouterModels, unloadModel } from '../llama.js';
+import { evictBridgeModels } from '../imagegen.js';
+import { activeMediaJobCount } from '../mediaJobs.js';
+import { isEnhancerModel } from '../promptEnhancer.js';
 
 // Org/user profile picture, resolved through the server (browser never
 // reaches huggingface.co) and cached in memory for 12h. Lives in its own
@@ -183,14 +186,24 @@ export default async function hfRoutes(app) {
   // Load button). Owner-only — it writes the shared ini.
   app.post('/api/hf/register', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
-    const { repoId, include, load } = req.body ?? {};
+    const { source = 'hf-cache', repoId, include, load } = req.body ?? {};
     try {
-      const path = resolveVariantPath(repoId, include);
-      if (!path) return reply.code(404).send({ error: 'quant is not on disk — download it first' });
+      if (!['hf-cache', 'local-dir'].includes(source)) return reply.code(400).send({ error: 'unsupported model source' });
+      const path = installedChatModelPath({ source, repoId, include });
+      if (!path) return reply.code(404).send({ error: 'complete chat GGUF is not on disk — finish the download first' });
       const preset = upsertRouterPreset(path);
       await reloadRouterModels().catch(() => {});
-      if (load) await loadModel(preset.alias);
-      return { ok: true, ...preset, loaded: !!load };
+      // same one-GPU mutual exclusion as the picker Load button: evict the
+      // bridge (unless the improver) and other resident router models first
+      let evicted = [];
+      let bridgeUnloaded = [];
+      if (load) {
+        if (!isEnhancerModel(preset.alias) && activeMediaJobCount() === 0) {
+          bridgeUnloaded = await evictBridgeModels(req.log);
+        }
+        ({ evicted } = await ensureLoadedModel(preset.alias, req.log));
+      }
+      return { ok: true, ...preset, loaded: !!load, evicted, bridgeUnloaded };
     } catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
   });
 

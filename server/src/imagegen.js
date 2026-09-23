@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
 import { mediaTask } from './modelKind.js';
+import { isEnhancerModel } from './promptEnhancer.js';
 import { presetForQuality, recordMediaTiming } from './mediaEta.js';
 export { IMAGE_PRESETS, PRESET_IDS, presetForQuality, stepsForQuality } from './mediaEta.js';
 
@@ -79,6 +80,29 @@ export async function bridgeGet(path) {
   return res.json();
 }
 
+export async function warmImageModel(model) {
+  return bridgePost('/v1/models/warm', { model: model || 'auto' });
+}
+
+// GPU mutual-exclusion policy (one GPU): a chat-LLM load force-unloads any
+// resident bridge media model first. Never call this while a generation is
+// running — callers must check activeMediaJobCount() === 0 first, so VRAM is
+// never yanked out from under a running denoise/TTS job.
+export async function evictBridgeModels(log) {
+  const unloaded = [];
+  const b = await bridgeModels().catch(() => null);
+  for (const m of b?.models ?? []) {
+    if (!m.loaded) continue;
+    try {
+      await bridgePost('/v1/models/unload', { model: m.id });
+      unloaded.push(m.id);
+    } catch (e) {
+      log?.warn({ err: e, model: m.id }, 'bridge evict-before-load failed');
+    }
+  }
+  return unloaded;
+}
+
 // ---------------------------------------------------------------------------
 // Media generation (image / video / audio) — same bridge, same progress
 // polling, same cancel-by-tag. The bridge's /health tells us which models
@@ -116,12 +140,18 @@ export async function generateViaBridge({
   userId, prompt, model = null, size = '1024x1024', steps = null, n = 1,
   negative = '', enhance = true, seed = null, task = 'image',
   quality = null, trueCfg = null,
+  previewEvery = null, outputFormat = 'png',
   numFrames = null, fps = null, audioDuration = null, duration = null,
   temperature = null, topP = null, topK = null, refAudioB64 = null, refText = null,
   maxNewTokens = null, imagesB64 = null, lyrics = null,
   speaker = null, language = null, instruct = null,
   onProgress = () => {}, signal = null, onSubmission = () => {},
 }) {
+  if (task === 'image' || task === 'video') {
+    const { checkUserContent } = await import('./contentFilter.js');
+    const safety = checkUserContent(userId, prompt, 'image');
+    if (!safety.ok) throw Object.assign(new Error(safety.reason), { code: 'UNSAFE_PROMPT' });
+  }
   const prefs = getUserImagePrefs(userId);
   // Explicit non-auto model wins; otherwise the user's preferred model; else auto.
   const resolvedModel = (model && model !== 'auto')
@@ -137,6 +167,8 @@ export async function generateViaBridge({
   body.steps = Math.max(1, Math.min(Number(resolvedStepsRaw) || preset.steps, 80));
   const resolvedCfg = Math.max(1.0, Math.min(Number(trueCfg ?? preset.trueCfg) || preset.trueCfg, 6.0));
   if (task === 'image') body.true_cfg_scale = resolvedCfg;
+  if (task === 'image') body.preview_every = [0, 1, 2, 4, 8].includes(Number(previewEvery)) ? Number(previewEvery) : 0;
+  if (task === 'image') body.output_format = outputFormat === 'webp' ? 'webp' : 'png';
   const resolvedNegative = (negative?.trim() ? negative.trim() : (resolvedCfg > 1 ? (preset.negative ?? '') : ''));
   if (resolvedNegative?.trim()) body.negative_prompt = resolvedNegative.trim();
   if (seed != null && seed !== '' && Number.isFinite(Number(seed)) && Number(seed) >= 0) {
@@ -175,8 +207,10 @@ export async function generateViaBridge({
   const t0 = Date.now();
   const models = await bridgeModels();
   const warm = !!(models.models?.some(m => m.loaded && (task === 'image' ? m.task === 'image' : true)));
+  // The prompt-improver LLM shares the GPU with media — spare it, evict rest.
+  const reclaimExceptEnhancer = (id) => (isEnhancerModel(id) ? false : reclaimIdleModel(id));
   await prepareMediaGpu({ models, requested: resolvedModel, task,
-    memory: gpuVram, list: listModels, reclaim: reclaimIdleModel, onProgress, signal });
+    memory: gpuVram, list: listModels, reclaim: reclaimExceptEnhancer, onProgress, signal });
 
   // Persist the correlation tag before dispatch. It is not proof of completion
   // and must never be used as permission to blindly resubmit after a crash.
@@ -318,7 +352,7 @@ export async function generateViaBridge({
   async function saveResults(result) {
     const saved = [];
     const resultTask = task;
-    const ext = resultTask === 'video' ? 'mp4' : resultTask === 'image' ? 'png' : 'wav';
+    const ext = resultTask === 'video' ? 'mp4' : resultTask === 'image' ? (result.r.output_format === 'webp' ? 'webp' : 'png') : 'wav';
     const dir = resultTask === 'image' ? IMAGES_DIR : MEDIA_DIR;
     let i = 0;
     for (const item of result.r.data ?? []) {
