@@ -101,6 +101,9 @@ def touch_progress(**kwargs):
             # Only show an estimate after two measured sampling intervals.
             rate = sum(durations) / len(durations)
             remaining = max(0, steps - step)
+            image, count = STATE.get("image"), STATE.get("n")
+            if image and count and count > image:
+                remaining += (count - image) * steps
             STATE["eta_seconds"] = max(0, rate * remaining - (tick - STATE["_step_at"]))
 
 
@@ -1032,8 +1035,9 @@ class Handler(BaseHTTPRequestHandler):
                 info["loaded"] = model_id == _loaded["id"] or model_id == getattr(_tts.get("backend"), "active_model_name", None)
                 info["device"] = "cpu" if model_id in CPU_MODELS else DEVICE
             operation = MODEL_OPERATION
-            if operation and operation.get("type") == "error" and models.get(operation.get("model"), {}).get("loaded"):
-                operation = None
+            if operation and models.get(operation.get("model"), {}).get("loaded"):
+                if operation.get("type") == "unloaded" or (operation.get("type") == "error" and operation.get("action") != "unload"):
+                    operation = None
             return self._json(200, {"ok": True, "models": models, "default_model": DEFAULT_MODEL or "auto",
                                     "model_operation": operation})
         if parsed.path == "/v1/progress":
@@ -1069,6 +1073,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        global MODEL_OPERATION
         parsed = urlparse(self.path)
         length = int(self.headers.get("content-length", 0))
         if length < 0 or length > 48 * 1024 * 1024:
@@ -1097,6 +1102,9 @@ class Handler(BaseHTTPRequestHandler):
                 from comfy_media import MODEL as comfy_model
                 if requested == comfy_model:
                     return self._json(400, {"error": "This model is managed by the separate video runtime"})
+                if _loaded["id"] != requested and getattr(_tts.get("backend"), "active_model_name", None) != requested:
+                    return self._json(200, {"ok": True, "model": requested, "loaded": False, "already": True})
+                MODEL_OPERATION = {"type": "unloading", "model": requested}
                 if _loaded["id"] == requested:
                     _loaded.update(id=None, pipe=None, kind=None, device=None)
                 backend = _tts.get("backend")
@@ -1105,12 +1113,16 @@ class Handler(BaseHTTPRequestHandler):
                 gc.collect()
                 if DEVICE == "cuda":
                     torch.cuda.empty_cache()
+                MODEL_OPERATION = {"type": "unloaded", "model": requested}
                 return self._json(200, {"ok": True, "model": requested, "loaded": False})
+            except Exception as exc:
+                traceback.print_exc()
+                MODEL_OPERATION = {"type": "error", "action": "unload", "model": body.get("model"), "message": str(exc)}
+                return self._json(500, {"error": str(exc)})
             finally:
                 GEN_LOCK.release()
 
         if parsed.path == "/v1/models/warm":
-            global MODEL_OPERATION
             try:
                 model_id, info = resolve_model(body.get("model") or "auto", task="image")
             except ValueError as exc:
@@ -1130,9 +1142,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path in {f"{path}/cancel" for path in ("/v1/images/generations", "/v1/videos/generations", "/v1/audio/generations", "/v1/audio/speech")}:
             tag = body.get("tag")
-            if tag:
-                CANCEL_TAGS.add(tag)
-            return self._json(200, {"ok": True})
+            if not isinstance(tag, str) or not RESULT_TAG.fullmatch(tag):
+                return self._json(400, {"error": "valid tag required"})
+            with STATE_LOCK:
+                active = (STATE.get("active") and STATE.get("tag") == tag) or tag in PENDING_TAGS
+                if active:
+                    CANCEL_TAGS.add(tag)
+            return self._json(200, {"ok": True, "active": bool(active), "already": not bool(active)})
 
         if parsed.path not in ("/v1/images/generations", "/v1/videos/generations", "/v1/audio/generations", "/v1/audio/speech"):
             return self._json(404, {"error": "not found"})

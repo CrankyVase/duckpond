@@ -73,6 +73,13 @@ export default async function chatRoutes(app) {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
     const messages = db.prepare('SELECT * FROM messages WHERE conv_id = ? ORDER BY id').all(conv.id);
+    // A leaf that points at a deleted id walks to an empty path and the next
+    // send used to start a new root, hiding every saved message.
+    if (conv.active_leaf_id != null && !messages.some((m) => m.id === conv.active_leaf_id)) {
+      const leaf = messages.length ? messages[messages.length - 1].id : null;
+      setLeaf(conv.id, leaf);
+      conv.active_leaf_id = leaf;
+    }
     return { ...conv, messages, settings: conv._settings };
   });
 
@@ -190,7 +197,8 @@ export default async function chatRoutes(app) {
       // The worker closes it with stream_end once its cleanup is complete.
       if (obj?.type === 'stream_end') closeLive();
     };
-    unsub = attachListener(job, write);
+    const after = Number(req.query?.after ?? 0);
+    unsub = attachListener(job, write, { after: Number.isFinite(after) ? after : 0 });
     // finished jobs only needed the resume snapshot — close immediately
     if (job.status !== 'running') {
       closeLive();

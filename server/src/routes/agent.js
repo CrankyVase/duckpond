@@ -17,6 +17,8 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmS
 import { dirname, extname, join, resolve } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
+import { createAgentPlan, planView, recordToolResult } from '../agentPlan.js';
+import { submissionHash, submissionKey } from '../idempotency.js';
 import { docFullText, listDocs, retrieveChunks } from '../docs.js';
 import { checkUserContent } from '../contentFilter.js';
 import { generateViaBridge, getUserImagePrefs, stepsForQuality } from '../imagegen.js';
@@ -337,7 +339,7 @@ export async function gateToolCall(run, name, args) {
   return ok ? null : 'DENIED: the user declined this action. Do not retry it and do not attempt the same thing another way; adapt, or explain what you now cannot do.';
 }
 
-export async function execTool(run, ws, name, args, abortSignal) {
+async function execToolUntracked(run, ws, name, args, abortSignal) {
   const denied = await gateToolCall(run, name === 'start_server' ? 'run_command' : name, args);
   if (denied) return denied;
   switch (name) {
@@ -600,6 +602,23 @@ export async function execTool(run, ws, name, args, abortSignal) {
   }
 }
 
+function rememberPlan(run, name, args, result) {
+  if (run?.id == null) return;
+  try { recordToolResult(run.id, name, args, result); }
+  catch { /* plan persistence must not change the tool result */ }
+}
+
+export async function execTool(run, ws, name, args, abortSignal) {
+  try {
+    const result = await execToolUntracked(run, ws, name, args, abortSignal);
+    rememberPlan(run, name, args, result);
+    return result;
+  } catch (err) {
+    rememberPlan(run, name, args, `ERROR: ${err?.message ?? err}`);
+    throw err;
+  }
+}
+
 function requestApproval(run, req) {
   return new Promise((resolvePromise) => {
     // `command` stays in the payload for the existing UI + resume snapshot;
@@ -765,22 +784,62 @@ function markInterruptedRun(runId, reason = null, forceReconcile = false) {
   runApprovals.get(runId)?.finish(false, 'orphaned run reclaimed');
 }
 
-/** Resume only standalone runs from a complete transcript checkpoint. Chat
- * turns need their conversation worker, so they are explicitly reconciled. */
+function persistStopRequest(runId) {
+  db.prepare('UPDATE agent_runs SET stop_requested = 1 WHERE id = ?').run(runId);
+}
+
+/** Classify a non-live run at a restart boundary. Missing workspace is the caller's concern. */
+export function resumeDecision(run, { checkpoint = null, toolCount = null, unresolved = null } = {}) {
+  if (Number(run?.stop_requested) > 0) return 'stop';
+  const status = run?.status;
+  const recorded = checkpoint?.tool_count;
+  const seen = toolCount;
+  const cleanBoundary = checkpoint != null
+    && unresolved === 0
+    && typeof recorded === 'number' && Number.isFinite(recorded)
+    && typeof seen === 'number' && Number.isFinite(seen)
+    && recorded === seen;
+  if (!cleanBoundary || (status !== 'running' && status !== 'waiting_approval')) return 'reconcile';
+  if (status === 'waiting_approval') return 'wait';
+  if (status === 'running') return 'resume';
+  return 'reconcile';
+}
+
+/** Resume from a complete transcript checkpoint, including chat-tied runs.
+ * Stop stays stopped. A clean approval wait stays waiting. Uncertain tool
+ * boundaries are reconciled and are not replayed. */
 export function recoverAgentRuns(log) {
   const rows = db.prepare("SELECT * FROM agent_runs WHERE status IN ('running','waiting_approval') ORDER BY id").all();
-  let resumed = 0, reconciled = 0;
+  let resumed = 0, reconciled = 0, waited = 0, stopped = 0;
   for (const run of rows) {
     if (isRunLive(run.id)) continue;
     const checkpoint = db.prepare('SELECT * FROM agent_checkpoints WHERE run_id = ?').get(run.id);
     const toolCount = db.prepare('SELECT COUNT(*) AS n FROM agent_tool_invocations WHERE run_id = ?').get(run.id).n;
     const unresolved = db.prepare("SELECT COUNT(*) AS n FROM agent_tool_invocations WHERE run_id = ? AND status != 'complete'").get(run.id).n;
     const ws = db.prepare('SELECT * FROM workspaces WHERE id = ? AND user_id = ?').get(run.workspace_id, run.user_id);
-    if (!run.source_conv_id && checkpoint && ws && !unresolved && toolCount === checkpoint.tool_count && run.status === 'running') {
+    let decision = resumeDecision(run, { checkpoint, toolCount, unresolved });
+    if ((decision === 'resume' || decision === 'wait') && !ws) decision = 'reconcile';
+    if (decision === 'stop') {
+      emit(run.id, 'notice', { message: 'You stopped this run. It was not resumed after the server restarted.' });
+      setRunStatus(run.id, 'stopped', true);
+      log?.info?.({ run: run.id }, 'stopped agent run was not resumed');
+      stopped += 1;
+      continue;
+    }
+    if (decision === 'wait') {
+      emit(run.id, 'notice', {
+        message: 'Server restarted while this run was waiting for approval. Approval is still required. The pending tool was not executed.',
+      });
+      log?.info?.({ run: run.id }, 'agent run still waiting for approval after restart');
+      waited += 1;
+      continue;
+    }
+    if (decision === 'resume') {
       try {
         const messages = JSON.parse(checkpoint.messages_json);
         if (!Array.isArray(messages)) throw new Error('invalid checkpoint');
         emit(run.id, 'notice', { message: 'Server restarted; resuming from the last complete model step.' });
+        // A resumed chat-tied agent run continues its own event log; the chat job snapshot remains the conversation worker’s record and is not replayed here.
         void runAgent(run, ws, {}, { step: checkpoint.step, messages })
           .catch((err) => log?.error?.({ err, run: run.id }, 'recovered agent run failed'));
         resumed += 1;
@@ -794,10 +853,10 @@ export function recoverAgentRuns(log) {
     log?.warn?.({ run: run.id, sourceConvId: run.source_conv_id, changedTools, unresolved }, 'agent run needs reconciliation');
     reconciled += 1;
   }
-  return { resumed, reconciled };
+  return { resumed, reconciled, waited, stopped };
 }
 
-export function createRun(workspaceId, userId, modelId, task, sourceConvId = null) {
+export function createRun(workspaceId, userId, modelId, task, sourceConvId = null, idempotencyKey = null, requestHash = null) {
   const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(workspaceId, userId);
   if (!workspace) throw Object.assign(new Error('Project not found'), { code: 404 });
   const projectKey = realpathSync(wsDir(workspaceId));
@@ -814,9 +873,14 @@ export function createRun(workspaceId, userId, modelId, task, sourceConvId = nul
     }
   }
   let r;
+  const insertRun = db.prepare('INSERT INTO agent_runs (workspace_id, user_id, model_id, task, project_key, source_conv_id, idempotency_key, request_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
   try {
-    r = db.prepare('INSERT INTO agent_runs (workspace_id, user_id, model_id, task, project_key, source_conv_id) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(workspaceId, userId, modelId, task.slice(0, 2000), projectKey, sourceConvId);
+    r = db.transaction(() => {
+      const taskText = task.slice(0, 2000);
+      const inserted = insertRun.run(workspaceId, userId, modelId, taskText, projectKey, sourceConvId, idempotencyKey, requestHash);
+      createAgentPlan(inserted.lastInsertRowid, taskText);
+      return inserted;
+    })();
   } catch (err) {
     if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') throw Object.assign(new Error('Another task is already working in this source folder. Wait for it to finish or stop it first.'), { code: 409 });
     throw err;
@@ -841,6 +905,7 @@ export function stopRunsForWorkspace(workspaceId, reason = 'stopped by user') {
                            AND status IN ('running','waiting_approval')`).all(workspaceId);
   let n = 0;
   for (const row of rows) {
+    persistStopRequest(row.id);
     const ctrl = runAborts.get(row.id);
     if (ctrl) {
       try { ctrl.abort(); } catch { /* */ }
@@ -1005,12 +1070,15 @@ export async function agentLoop({
       let result;
       if (args === null) {
         result = 'ERROR: your tool call arguments were not valid JSON (possibly truncated). Retry the call with complete, well-formed arguments.';
+        rememberPlan(run, tc.function.name, {}, result);
       } else {
         // Durable receipt precedes the side effect. If dispatch or settlement
         // crashes, recovery records an unknown outcome rather than replaying it.
         const receipt = journal.begin(run.id, tc.id, tc.function.name, args);
-        if (receipt.replay) result = receipt.result;
-        else {
+        if (receipt.replay) {
+          result = receipt.result;
+          rememberPlan(run, tc.function.name, args, result);
+        } else {
           try { result = await execTool(run, ws, tc.function.name, args, abortSignal); }
           catch (err) { result = `ERROR: ${err.message}`; }
           journal.complete(run.id, tc.id, result);
@@ -1249,8 +1317,21 @@ export default async function agentRoutes(app) {
     if (!ws) return reply.code(404).send({ error: 'not found' });
     const task = String(req.body?.task ?? '').trim();
     if (!task) return reply.code(400).send({ error: 'task required' });
+    let idempotencyKey;
+    try { idempotencyKey = submissionKey(req.body?.idempotencyKey); }
+    catch (err) { return reply.code(400).send({ error: err.message }); }
+    const model = req.body?.model ?? DEFAULT_AGENT_MODEL;
+    const requestHash = submissionHash({ task, model });
+    if (idempotencyKey) {
+      const previous = db.prepare('SELECT * FROM agent_runs WHERE user_id = ? AND workspace_id = ? AND idempotency_key = ?')
+        .get(req.user.id, ws.id, idempotencyKey);
+      if (previous) {
+        if (previous.request_hash !== requestHash) return reply.code(409).send({ error: 'idempotency key was used for a different request' });
+        return { ...previous, duplicate: true };
+      }
+    }
     let run;
-    try { run = createRun(ws.id, req.user.id, req.body?.model ?? DEFAULT_AGENT_MODEL, task); }
+    try { run = createRun(ws.id, req.user.id, model, task, null, idempotencyKey, requestHash); }
     catch (err) { return reply.code(err.code === 409 ? 409 : 500).send({ error: err.message }); }
     runAgent(run, ws).catch((err) => app.log.error({ err, run: run.id }, 'agent run crashed'));
     return run;
@@ -1259,6 +1340,12 @@ export default async function agentRoutes(app) {
   function runForUser(id, userId) {
     return db.prepare('SELECT * FROM agent_runs WHERE id = ? AND user_id = ?').get(id, userId);
   }
+
+  app.get('/api/runs/:id/plan', async (req, reply) => {
+    const run = runForUser(req.params.id, req.user.id);
+    if (!run) return reply.code(404).send({ error: 'not found' });
+    return planView(run);
+  });
 
   app.get('/api/runs/:id/changes', async (req, reply) => {
     const run = runForUser(req.params.id, req.user.id);
@@ -1304,7 +1391,14 @@ export default async function agentRoutes(app) {
     const run = runForUser(req.params.id, req.user.id);
     if (!run) return reply.code(404).send({ error: 'not found' });
     const pending = runApprovals.get(run.id);
-    if (!pending) return reply.code(409).send({ error: 'nothing awaiting approval' });
+    if (!pending) {
+      // The in-memory approval promise does not survive restart. Do not execute a tool from this request.
+      return reply.code(409).send({
+        error: run.status === 'waiting_approval'
+          ? 'This run needs a new decision from the live worker. The pending tool was not executed, and this approval cannot be applied after a restart.'
+          : 'nothing awaiting approval',
+      });
+    }
     pending.finish(!!req.body?.approve, req.user.username);
     return { ok: true };
   });
@@ -1312,6 +1406,7 @@ export default async function agentRoutes(app) {
   app.post('/api/runs/:id/stop', async (req, reply) => {
     const run = runForUser(req.params.id, req.user.id);
     if (!run) return reply.code(404).send({ error: 'not found' });
+    persistStopRequest(run.id);
     runAborts.get(run.id)?.abort();
     runApprovals.get(run.id)?.finish(false, 'stopped');
     return { ok: true };

@@ -10,7 +10,7 @@
 // server: HF API calls, the local-cache scan, VRAM fit math and the TPS
 // estimate. The browser only ever talks to /api/hf/*.
 import {
-  existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync,
   unlinkSync, writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -19,6 +19,7 @@ import { basename, join } from 'node:path';
 import { gpuVram } from './llama.js';
 import { modelParamsB } from './modelDescribe.js';
 import { downloadBusy } from './downloadManager.js';
+import { installationState } from './installState.js';
 import { modelKind } from './modelKind.js';
 
 const HF_API = 'https://huggingface.co';
@@ -179,7 +180,12 @@ export async function modelInfo(repoId) {
     kind: modelKind(m.id, m.pipeline_tag),
     gated: !!m.gated,
     private: !!m.private,
-    license: m.cardData?.license ?? null,
+    license: typeof m.cardData?.license === 'string' ? m.cardData.license
+      : (m.tags?.find((tag) => typeof tag === 'string' && tag.startsWith('license:'))?.slice(8) ?? null),
+    updatedAt: m.lastModified ?? null,
+    tags: m.tags ?? [],
+    libraryName: m.library_name ?? null,
+    paramsB: modelParamsB(m.id).totalB,
     siblings: (m.siblings ?? []).map((s) => s.rfilename),
   };
 }
@@ -244,7 +250,7 @@ async function hardwareSnapshot() {
   return {
     gpuTotalBytes, gpuFreeBytes,
     gpuTotalGB: gpuTotalBytes ? gpuTotalBytes / 1024 ** 3 : null,
-    gpuFreeGB: gpuFreeBytes ? gpuFreeBytes / 1024 ** 3 : null,
+    gpuFreeGB: gpuFreeBytes != null ? gpuFreeBytes / 1024 ** 3 : null,
     ramTotalGB: ramTotalBytes ? ramTotalBytes / 1024 ** 3 : null,
     ramAvailableGB: ramAvailableBytes ? ramAvailableBytes / 1024 ** 3 : null,
     ramTotalBytes, ramAvailableBytes,
@@ -256,14 +262,20 @@ async function hardwareSnapshot() {
 export async function hubHardware() {
   const hw = await hardwareSnapshot();
   let cacheCount = 0;
+  let diskFreeBytes = null;
   try {
     const hub = join(HF_HOME, 'hub');
     cacheCount = readdirSync(hub).filter((n) => n.startsWith('models--')).length;
   } catch { /* HF_HOME missing */ }
+  try {
+    const fs = statfsSync(HF_HOME, { bigint: true });
+    diskFreeBytes = Number(fs.bavail * fs.bsize);
+  } catch { /* storage may be unavailable during startup */ }
   const fmt = (gb) => (gb == null ? null : gb >= 10 ? `${Math.round(gb)} GB` : `${gb.toFixed(1)} GB`);
   return {
     ...hw,
     cacheCount,
+    diskFreeBytes,
     gpuLabel: fmt(hw.gpuTotalGB),
     ramLabel: fmt(hw.ramTotalGB),
     cpuLabel: hw.cpuCores ? `${hw.cpuCores}` : null,
@@ -546,20 +558,43 @@ export async function modelVariants(repoId) {
   const aliases = routerAliasesByPath();
 
   const enriched = grouped.variants.map((v) => {
-    const cachedBytes = v.include && snapDir && !String(v.include).includes('*')
+    const selectedFiles = entries.filter((file) => includeMatches(v.include, file.path));
+    const ggufVariant = selectedFiles.some((file) => /\.gguf$/i.test(file.path));
+    const cachedBytes = snapDir && v.include && !String(v.include).includes('*')
       ? cachedFileBytes(snapDir, v.include)
-      : (v.include && snapDir ? cachedPatternBytes(snapDir, v.include) : null);
+      : (snapDir ? cachedPatternBytes(snapDir, v.include) : null);
     const draft = draftKind(v.name);
     const baseQuant = quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null);
     const downloaded = cachedBytes != null && cachedBytes >= v.size * 0.999;
     const path = downloaded ? resolveVariantPath(repoId, v.include) : null;
+    const present = presentCachedFiles(snapDir, v.include);
+    const ggufReady = ggufVariant && selectedFiles.filter((file) => /\.gguf$/i.test(file.path)).every((file) => {
+      const got = present.find((item) => item.path.toLowerCase() === file.path.toLowerCase());
+      return !!got && got.size > 0 && (file.size <= 0 || got.size >= file.size * 0.999);
+    });
+    // A resolved GGUF path is a llama.cpp load path. It is not proof of a run.
+    const runtimeCompatible = modelKind(repoId) === 'chat' && !draft && !/mmproj/i.test(v.name ?? '')
+      && ggufReady && !!resolveVariantPath(repoId, v.include);
+    const installation = installationState({
+      expectedFiles: selectedFiles.map((file) => ({ path: file.path, size: file.size ?? 0 })),
+      presentFiles: present,
+      downloading: downloadBusy(repoId, v.include) || (v.include != null && downloadBusy(repoId, null)),
+      runtimeCompatible,
+    });
     return {
       ...v,
+      fileCount: selectedFiles.length,
+      files: selectedFiles.slice(0, 100),
+      filesTruncated: selectedFiles.length > 100,
       quant: draft ? `${draft} draft (${baseQuant ?? 'GGUF'})` : baseQuant,
       draft,
       cachedBytes,
       downloaded,
+      installation,
       fit: fitTier(v.size, hw),
+      // GGUF weights need extra room for loader state and a modest context.
+      // This is a planning estimate, never a measured allocation.
+      memoryEstimateBytes: ggufVariant ? Math.round(v.size * 1.15 + 1024 ** 3) : null,
       tps: estimateTps(v.size, repoId, hw),
       routerAlias: path ? (aliases.get(path) ?? null) : null,
     };
@@ -605,6 +640,23 @@ function walkRel(dir, prefix = '') {
     if (e.isDirectory()) out.push(...walkRel(join(dir, e.name), rel));
     else out.push(rel);
   }
+  return out;
+}
+
+function presentCachedFiles(snapDir, include) {
+  if (!snapDir) return [];
+  const out = [];
+  const add = (rel) => {
+    if (include && !includeMatches(include, rel)) return;
+    const size = cachedFileBytes(snapDir, rel);
+    if (size == null) return;
+    out.push({ path: rel, size });
+  };
+  if (include && !String(include).includes('*')) {
+    add(include);
+    return out;
+  }
+  for (const rel of walkRel(snapDir)) add(rel);
   return out;
 }
 

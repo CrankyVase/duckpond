@@ -5,6 +5,7 @@
   import X from '@lucide/svelte/icons/x';
   import { toast } from '../lib/toast.svelte.js';
   import { api } from '../lib/api.js';
+  import AgentPlan from './AgentPlan.svelte';
   let projects = $state([]), selected = $state(''), name = $state(''), folder = $state('');
   let dialog;
   let setupMode = $state('new');
@@ -36,6 +37,24 @@
       await selectProject(project.id); expanded = false; name = ''; folder = '';
     } catch (e) { error = e.message; } finally { busy = false; }
   }
+  const runId = $derived(app.streaming?.convId === app.conv?.id && app.streaming?.run?.id
+    ? app.streaming.run.id : [...(app.conv?.messages || [])].reverse().find(m => m.run_id)?.run_id);
+  const planRefresh = $derived(`${runId ?? ''}:${app.filesVersion}:${app.streaming?.convId === app.conv?.id ? (app.streaming?.events?.length ?? 0) : '-'}`);
+  let plan = $state(null), planError = $state(''), planRequest = 0, shownRun = null;
+  $effect(() => {
+    const id = runId;
+    void planRefresh;
+    if (shownRun !== id) { shownRun = id; plan = null; planError = ''; }
+    if (!id) return;
+    const ticket = ++planRequest;
+    let alive = true;
+    api(`/api/runs/${id}/plan`).then((row) => {
+      if (alive && ticket === planRequest) { plan = row; planError = ''; }
+    }).catch((err) => {
+      if (alive && ticket === planRequest) planError = err.message || 'Could not load the plan';
+    });
+    return () => { alive = false; };
+  });
   async function savePriorities() {
     try {
       const settings = { ...app.conv.settings, system_prompt: priorities };
@@ -65,6 +84,7 @@
       <Plus size={13} /> <span class="setup-label">{project ? 'Projects' : 'Open project'}</span>
     </button>
   </div>
+  {#if runId}<AgentPlan {plan} error={planError} />{/if}
   <dialog bind:this={dialog} onclose={() => expanded = false}>
     <div class="dialog-head"><div><h2>Project setup</h2><p>Open your source folder or start a new project.</p></div><button class="close" onclick={() => expanded = false} aria-label="Close project setup"><X size={18} /></button></div>
     <div class="setup">

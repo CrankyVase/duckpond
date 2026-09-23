@@ -11,7 +11,7 @@
 // throttled to ~1 row-write/second (SQLite WAL handles far more, but there is
 // no reason to).
 import { db, nowSec } from './db.js';
-import { acknowledgeBridgeResult, bridgeResult, generateViaBridge, getUserImagePrefs, saveBridgeOutput, warmImageModel } from './imagegen.js';
+import { acknowledgeBridgeResult, bridgeResult, cancelBridgeJob, generateViaBridge, getUserImagePrefs, saveBridgeOutput, warmImageModel } from './imagegen.js';
 import { presetForQuality, recordImageJobTiming } from './mediaEta.js';
 import { enhanceMediaPrompt } from './promptEnhancer.js';
 import { checkUserContent } from './contentFilter.js';
@@ -42,6 +42,8 @@ const userJob = (id, userId) => db.prepare('SELECT id FROM media_jobs WHERE id =
 export function jobProgressWriteMs() { return PROGRESS_WRITE_MS; }
 
 function patchJob(id, fields) {
+  if (fields.status && ['done', 'error', 'cancelled'].includes(fields.status)) fields.eta_seconds = null;
+  else if (fields.phase && !['generating', 'denoising'].includes(fields.phase)) fields.eta_seconds = null;
   const keys = Object.keys(fields);
   if (!keys.length) return;
   db.prepare(`UPDATE media_jobs SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`)
@@ -80,7 +82,8 @@ export function jobView(row, position = 0) {
     steps: row.steps ?? null,
     image: row.image ?? null,
     n: row.n ?? null,
-    eta_seconds: row.eta_seconds ?? null,
+    eta_seconds: row.status === 'running' && ['generating', 'denoising'].includes(row.phase)
+      ? (row.eta_seconds ?? null) : null,
     queue_position: row.status === 'queued' ? position : 0,
     error: row.error ?? null,
     result_ids: resultIds,
@@ -145,15 +148,23 @@ function markUnknown(id, reason) {
 async function reconcileRecoveredJob(row) {
   const tag = row.bridge_tag;
   if (!tag) {
+    if (row.cancel_requested) {
+      patchJob(row.id, { status: 'cancelled', phase: null, finished_at: nowSec() });
+      return;
+    }
     // The tag is written before the bridge POST. No tag means the job never
     // reached the engine, so this attempt is safe to put back in the queue.
     patchJob(row.id, { status: 'queued', phase: 'queued', started_at: null });
     enqueue(row.id);
     return;
   }
-  patchJob(row.id, { phase: 'reconciling' });
+  if (row.cancel_requested) void cancelBridgeJob(row.task, tag).catch(() => {});
+  patchJob(row.id, { phase: row.cancel_requested ? 'stopping' : 'reconciling' });
   const deadline = Date.now() + 50 * 60_000;
   const availabilityDeadline = Date.now() + 2 * 60_000;
+  // The tag is durable just before HTTP dispatch. A missing receipt can be a
+  // short race while that POST is reaching the bridge, not proof it never ran.
+  const missingGraceDeadline = Date.now() + 10_000;
   try {
     while (Date.now() < deadline) {
       let receipt;
@@ -164,11 +175,21 @@ async function reconcileRecoveredJob(row) {
         continue;
       }
       if (receipt.state === 'active') {
+        if (getJob(row.id)?.cancel_requested) void cancelBridgeJob(row.task, tag).catch(() => {});
         await new Promise((resolve) => setTimeout(resolve, 2000));
         continue;
       }
       if (receipt.state === 'missing') {
-        markUnknown(row.id, 'The media engine has no saved result for this job. Check your library before retrying.');
+        if (Date.now() < missingGraceDeadline) {
+          if (getJob(row.id)?.cancel_requested) void cancelBridgeJob(row.task, tag).catch(() => {});
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+        if (getJob(row.id)?.cancel_requested) {
+          patchJob(row.id, { status: 'cancelled', phase: null, error: null, finished_at: nowSec() });
+        } else {
+          markUnknown(row.id, 'The media engine has no saved result for this job. Check your library before retrying.');
+        }
         return;
       }
       const params = safeJson(row.params);
@@ -221,6 +242,7 @@ async function runJob(row) {
   running.set(id, entry);
   let lastWrite = 0;
   let releaseGpu = null;
+  let preloadMs = 0;
   patchJob(id, { status: 'running', phase: 'starting', step: null, steps: null, started_at: nowSec(), error: null });
   try {
     releaseGpu = await acquireGpu({ signal: abort.signal });
@@ -238,9 +260,14 @@ async function runJob(row) {
       const imageWarmup = row.task === 'image';
       patchJob(id, { phase: imageWarmup ? 'preparing' : 'enhancing' });
       const polish = enhanceMediaPrompt({ prompt: row.prompt, task: row.task, modelId: row.model });
-      const r = imageWarmup
-        ? (await Promise.all([polish, warmImageModel(row.model).catch(() => null)]))[0]
-        : await polish;
+      let warmup = null;
+      let r;
+      if (imageWarmup) {
+        [r, warmup] = await Promise.all([polish, warmImageModel(row.model).catch(() => null)]);
+      } else {
+        r = await polish;
+      }
+      preloadMs += Number(warmup?.load_ms) || 0;
       if (r) {
         const polishedSafety = checkUserContent(row.user_id, r.text, 'image');
         if (!polishedSafety.ok) throw Object.assign(new Error(polishedSafety.reason), { code: 'UNSAFE_PROMPT' });
@@ -306,10 +333,13 @@ async function runJob(row) {
       retainBridgeResult: true,
     });
     if (result.cancelled) {
-      // Caller (us) cancelled, or the bridge job was already reaped. The
-      // detached save in imagegen still lands files if the GPU finished.
-      patchJob(id, { status: 'cancelled', phase: null, finished_at: nowSec(),
-        error: entry.cancelRequested ? null : 'Cancelled.' });
+      if (result.stopPending) {
+        patchJob(id, { phase: 'stopping' });
+        await reconcileRecoveredJob(getJob(id));
+      } else {
+        patchJob(id, { status: 'cancelled', phase: null, finished_at: nowSec(),
+          error: entry.cancelRequested ? null : 'Cancelled.' });
+      }
     } else {
       const ids = result.images.map((im) => im.id);
       const modelUsed = result.model_used ?? row.model;
@@ -324,17 +354,19 @@ async function runJob(row) {
         previewEvery: params.previewEvery ?? 1,
         refCount: params.imagesB64?.length ?? 0, enhance: !!params.enhance,
         wallMs: Date.now() - jobStartedAt,
+        loadMs: preloadMs + (Number(result.load_ms) || 0),
       });
     }
   } catch (e) {
     if (e?.code === 'UNSAFE_PROMPT' || /Image safety check/.test(String(e?.message))) {
       db.prepare('DELETE FROM media_job_previews WHERE job_id = ?').run(id);
     }
-    if (e?.code === 'CANCELLED' || abort.signal.aborted || entry.cancelRequested) {
-      patchJob(id, { status: 'cancelled', phase: null, finished_at: nowSec() });
-    } else if (!e?.status && getJob(id)?.bridge_tag) {
-      // The reply may have been lost after the bridge saved its result.
+    if (getJob(id)?.bridge_tag && (!e?.status || abort.signal.aborted || entry.cancelRequested)) {
+      // The reply may have been lost after the bridge accepted work. Even a
+      // requested Stop keeps the GPU lease until the bridge settles.
       await reconcileRecoveredJob(getJob(id));
+    } else if (e?.code === 'CANCELLED' || abort.signal.aborted || entry.cancelRequested) {
+      patchJob(id, { status: 'cancelled', phase: null, finished_at: nowSec() });
     } else {
       patchJob(id, { status: 'error', phase: null, error: String(e.message ?? e), finished_at: nowSec() });
     }
@@ -420,6 +452,10 @@ export function cancelMediaJob(id, userId) {
   if (entry) {
     entry.cancelRequested = true;
     entry.abort.abort();
+  } else if (cur.bridge_tag) {
+    // After a server restart there is no AbortController, but the bridge tag
+    // still lets us stop the running or lock-waiting generation.
+    void cancelBridgeJob(cur.task, cur.bridge_tag).catch(() => {});
   }
   // runJob's finally-path writes the final cancelled row; the caller sees
   // "cancelling" reflected immediately via the in-memory flag.

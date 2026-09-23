@@ -1,11 +1,11 @@
 // Theme engine. The active theme = preset + per-token overrides + layout +
-// effects (glass/glow/motion/background/scale/type) + custom CSS, applied as
+// effects (glass/glow/motion/scale/type) + custom CSS, applied as
 // CSS custom properties / data-attributes on <html>. Persisted server-side
 // (users.ui_theme — shared with Duck Pond Control) and mirrored to
 // localStorage so the login screen and first paint are themed before auth.
 import { api } from './api.js';
 import {
-  ALL_TOKENS, ANIM_MODES, BG_MODES, DARK_SHADOW, DEFAULT_EFFECTS, DEFAULT_LAYOUT,
+  ALL_TOKENS, ANIM_MODES, DARK_SHADOW, DEFAULT_EFFECTS, DEFAULT_LAYOUT,
   FONT_OPTIONS, GLASS_MODES, LAYOUT_OPTIONS, presetById,
 } from './themes.js';
 
@@ -23,6 +23,7 @@ const DEFAULTS = {
 
 const clamp = (n, lo, hi, fb) => (Number.isFinite(+n) ? Math.min(hi, Math.max(lo, +n)) : fb);
 const oneOf = (v, list, fb) => (list.some(([id]) => id === v) ? v : fb);
+export const hasGradient = (css) => /(?:-(?:webkit|moz|o)-)?(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/i.test(String(css ?? ''));
 
 export function sanitizeEffects(raw) {
   const e = { ...DEFAULT_EFFECTS, ...(raw ?? {}) };
@@ -33,7 +34,6 @@ export function sanitizeEffects(raw) {
     glow: !!e.glow,
     anim: oneOf(e.anim, ANIM_MODES, 'subtle'),
     lab: !!e.lab,
-    bg: oneOf(e.bg, BG_MODES, 'solid'),
     uiScale: clamp(e.uiScale, 0.85, 1.25, 1),
     font: oneOf(e.font, FONT_OPTIONS, 'default'),
   };
@@ -44,8 +44,12 @@ function sanitize(raw) {
   t.layout = { ...DEFAULT_LAYOUT, ...(t.layout ?? {}) };
   t.effects = sanitizeEffects(t.effects);
   t.colors = Object.fromEntries(Object.entries(t.colors ?? {}).filter(([k]) => ALL_TOKENS.includes(k)));
-  t.custom = Array.isArray(t.custom) ? t.custom.slice(0, 30) : [];
-  t.customCss = String(t.customCss ?? '').slice(0, 20000);
+  t.custom = Array.isArray(t.custom) ? t.custom.slice(0, 30).map((entry) => ({
+    ...entry,
+    ...(typeof entry?.css === 'string' && hasGradient(entry.css) ? { css: '' } : {}),
+    ...(entry?.effects ? { effects: sanitizeEffects(entry.effects) } : {}),
+  })) : [];
+  t.customCss = hasGradient(t.customCss) ? '' : String(t.customCss ?? '').slice(0, 20000);
   t.favorites = Array.isArray(t.favorites)
     ? [...new Set(t.favorites.map((id) => String(id)).filter(Boolean))].slice(0, 200)
     : [];
@@ -113,7 +117,6 @@ export function applyTheme(t = theme) {
   el.dataset.anim = e.anim;
   el.dataset.lab = e.lab ? 'on' : 'off';
   el.dataset.glow = e.glow ? 'on' : 'off';
-  el.dataset.bg = e.bg;
   el.style.setProperty('--glass-blur', `${e.glassBlur}px`);
   el.style.setProperty('--glass-a', `${Math.round(e.glassOpacity * 100)}%`);
   el.style.setProperty('--ui-scale', String(e.uiScale));
@@ -128,7 +131,7 @@ export function applyTheme(t = theme) {
   }
   // Old saved themes may contain decorative blends. Never apply those rules.
   const css = String(t.customCss ?? '');
-  styleEl.textContent = /\b(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/i.test(css) ? '' : css;
+  styleEl.textContent = hasGradient(css) ? '' : css;
 }
 
 // snapshot/restore lets the studio preview freely and revert on cancel

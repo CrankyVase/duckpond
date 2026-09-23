@@ -3,37 +3,13 @@
 // countTokensAny and never cares which side a model id lives on.
 import { db } from './db.js';
 import { countInputTokens, listModels, streamChat } from './llama.js';
+import { mapParamsForRemote } from './remoteParams.js';
 import {
   estimateTokens, isRemoteId, resolveRemote, streamRemote,
 } from './providers.js';
 
 export { isRemoteId };
-
-// llama.cpp-only knobs that OpenAI-compatible APIs reject or ignore.
-const LLAMA_ONLY = new Set([
-  'top_k', 'repeat_penalty', 'mirostat', 'mirostat_tau', 'mirostat_eta',
-  'grammar', 'json_schema', 'chat_template_kwargs', 'timings_per_token',
-]);
-
-// Paid models must never run with unlimited output (llama's max_tokens: -1)
-// — a runaway loop on a paid endpoint is a real bill. The saver's default
-// cap; per-model profiles can raise/lower it via settings.max_tokens.
-export const DEFAULT_REMOTE_MAX_TOKENS = 4096;
-
-/** Map duckpond/llama gen params to what an OpenAI-compatible API accepts. */
-export function mapParamsForRemote(params = {}, modelRow = null) {
-  const out = {};
-  for (const [k, v] of Object.entries(params)) {
-    if (LLAMA_ONLY.has(k) || v === undefined) continue;
-    out[k] = v;
-  }
-  const cap = Number(modelRow?.max_output) > 0
-    ? Math.min(Number(modelRow.max_output), DEFAULT_REMOTE_MAX_TOKENS * 4)
-    : DEFAULT_REMOTE_MAX_TOKENS;
-  if (out.max_tokens == null || Number(out.max_tokens) < 0) out.max_tokens = cap;
-  // reasoning_effort passes through (OpenAI o-series, gpt-5, deepseek v3.1+)
-  return out;
-}
+export { DEFAULT_REMOTE_MAX_TOKENS, mapParamsForRemote } from './remoteParams.js';
 
 /**
  * streamChat for any model id. Returns the same shape as llama.js streamChat

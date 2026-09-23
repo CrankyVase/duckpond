@@ -77,38 +77,10 @@ body::after {
   93%, 100% { opacity: 0; }
 }
 html[data-anim='off'] body::before, html[data-anim='off'] body::after { display: none; }
-/* starfield + one faint nebula, behind everything */
-#app::before {
-  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  background-image:
-    radial-gradient(50% 34% at 76% 16%, rgba(96, 120, 220, 0.16), transparent 70%),
-    radial-gradient(40% 30% at 15% 78%, rgba(140, 90, 200, 0.08), transparent 70%),
-    radial-gradient(2px 2px at 12% 22%, rgba(255,255,255,.9) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 34% 74%, rgba(255,255,255,.6) 50%, transparent 51%),
-    radial-gradient(2.5px 2.5px at 56% 12%, rgba(210,225,255,.95) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 71% 51%, rgba(255,255,255,.55) 50%, transparent 51%),
-    radial-gradient(2px 2px at 88% 83%, rgba(255,255,255,.7) 50%, transparent 51%),
-    radial-gradient(2px 2px at 22% 91%, rgba(210,225,255,.65) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 45% 38%, rgba(255,255,255,.5) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 7% 55%, rgba(255,255,255,.6) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 62% 65%, rgba(255,255,255,.5) 50%, transparent 51%),
-    radial-gradient(2px 2px at 81% 40%, rgba(210,225,255,.7) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 93% 27%, rgba(255,255,255,.65) 50%, transparent 51%),
-    radial-gradient(1px 1px at 27% 45%, rgba(255,255,255,.45) 50%, transparent 51%),
-    radial-gradient(1px 1px at 52% 82%, rgba(255,255,255,.4) 50%, transparent 51%),
-    radial-gradient(1px 1px at 68% 28%, rgba(255,255,255,.45) 50%, transparent 51%);
 }`;
 
-const ARCADE_CSS = `/* — insert coin — square everything, scanlines, chunky press-down buttons */
+const ARCADE_CSS = `/* — insert coin — square everything, chunky press-down buttons */
 :root { --rf: 0 !important; }
-body::after {
-  content: ''; position: fixed; inset: 0; z-index: 2147483001; pointer-events: none;
-  background: repeating-linear-gradient(0deg, rgba(0,0,0,.13) 0 1px, transparent 1px 3px);
-}
-#app::before {
-  content: ''; position: fixed; inset: 0; z-index: 2147483000; pointer-events: none;
-  background: radial-gradient(135% 100% at 50% 50%, transparent 70%, rgba(0, 0, 0, 0.30));
-}
 button { box-shadow: 2px 2px 0 rgba(0,0,0,.55) !important; }
 button:active { transform: translate(2px, 2px) !important; box-shadow: none !important; }
 button.primary { box-shadow: 3px 3px 0 rgba(0,0,0,.6) !important; }
@@ -133,14 +105,14 @@ const SEEDS = [
       layout: { chatWidth: 'normal', sidebar: 'left', radius: 'soft', bubbles: 'bubbles' },
       effects: {
         glass: 'frosted', glassBlur: 16, glassOpacity: 0.55, glow: true, anim: 'full',
-        bg: 'animated', bgA: '#060b18', bgB: '#152448', bgAngle: 155, uiScale: 1, font: 'default',
+        uiScale: 1, font: 'default',
       },
       css: OUTER_RIM_CSS,
     },
   },
   {
     author: 'pixl_pond', name: '8-Bit Arcade', downloads: 946, days_ago: 26,
-    blurb: 'Cabinet-grade: zero corner radius, scanlines, chunky press-down buttons, NES reds and coin golds.',
+    blurb: 'Cabinet-grade: zero corner radius, chunky press-down buttons, NES reds and coin golds.',
     theme: {
       name: '8-Bit Arcade', base: 'pond',
       colors: {
@@ -155,7 +127,7 @@ const SEEDS = [
       layout: { chatWidth: 'normal', sidebar: 'left', radius: 'sharp', bubbles: 'bubbles' },
       effects: {
         glass: 'off', glassBlur: 14, glassOpacity: 0.6, glow: false, anim: 'subtle',
-        bg: 'solid', bgA: '', bgB: '', bgAngle: 160, uiScale: 1, font: 'mono',
+        uiScale: 1, font: 'mono',
       },
       css: ARCADE_CSS,
     },
@@ -197,13 +169,14 @@ A theme is:
 - colors: EVERY one of these tokens as #rrggbb hex: ${THEME_TOKENS.join(', ')}.
   Semantics: bg = app background; bg-sidebar = left rail; bg-raised = buttons/chips; bg-card = cards & bubbles; bg-hover = hover state; bg-input = text fields; bg-code / bg-code-inline = code surfaces; border / border-soft = outlines; text / text-dim / text-faint = the reading ramp; accent / accent-deep / accent-dim = one accent family (deep = pressed, dim = quiet tint); on-accent = text drawn ON accent; green/yellow/red = status; scrollbar.
 - layout (optional): { chatWidth: narrow|normal|wide|full, sidebar: left|right, radius: sharp|soft|round, bubbles: bubbles|minimal }.
-- effects (optional): { glass: off|frosted|liquid, glassBlur: 4–32, glassOpacity: 0.3–0.92, glow: bool, anim: off|subtle|full, bg: solid|gradient|animated|aurora, bgA/bgB: #rrggbb gradient stops, bgAngle: 0–360, uiScale: 0.85–1.25, font: default|rounded|serif|mono }.
+- effects (optional): { glass: off|frosted|liquid, glassBlur: 4–32, glassOpacity: 0.3–0.92, glow: bool, anim: off|subtle|full, uiScale: 0.85–1.25, font: default|rounded|serif|mono }.
 - css (optional): extra custom CSS for a signature scene. Keep it SUBTLE: fixed-position, pointer-events:none, low-opacity. Always respect motion preferences by adding: html[data-anim='off'] <selector> { display:none; } for anything animated. Never restyle layout-critical properties (no display/position changes on app chrome).
 
 Design rules:
 - Premium means restrained: near-black backgrounds with a warm or cool cast, one accent family, generous contrast between text and bg (aim for WCAG AA on text/bg), dim/faint steps that read as a ramp, borders barely lighter than the surface they divide.
 - Match the brief's mood. If the user asks for loud/retro/neon, deliver it with conviction — but keep text legible.
 - Dark themes unless asked for light. Light themes: paper-like, soft borders, ink-dark text, on-accent usually near-white.
+- Use flat colors only. Never use gradients in CSS or visual effects.
 - green/yellow/red should harmonize with the palette (muted, never pure #0f0/#ff0/#f00 unless the brief screams terminal).
 - reply: one or two warm sentences describing the look you made (no technical token talk — talk about the feeling). If the user is iterating ("make it bluer"), say what changed.`;
 
@@ -237,10 +210,6 @@ const THEME_JSON_SCHEMA = {
             glassOpacity: { type: 'number' },
             glow: { type: 'boolean' },
             anim: { enum: ['off', 'subtle', 'full'] },
-            bg: { enum: ['solid', 'gradient', 'animated', 'aurora'] },
-            bgA: { type: 'string' },
-            bgB: { type: 'string' },
-            bgAngle: { type: 'integer' },
             uiScale: { type: 'number' },
             font: { enum: ['default', 'rounded', 'serif', 'mono'] },
           },
@@ -253,6 +222,17 @@ const THEME_JSON_SCHEMA = {
   required: ['reply', 'theme'],
 };
 
+const hasGradient = (value) => /(?:-(?:webkit|moz|o)-)?(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/i.test(String(value ?? ''));
+function flatTheme(value) {
+  if (!value || typeof value !== 'object') return value;
+  const effects = { ...(value.effects ?? {}) };
+  delete effects.bg;
+  delete effects.bgA;
+  delete effects.bgB;
+  delete effects.bgAngle;
+  return { ...value, effects, css: hasGradient(value.css) ? '' : String(value.css ?? '') };
+}
+
 function parseThemeReply(content) {
   // schema-constrained output should be pure JSON; stay tolerant anyway
   const s = String(content ?? '').trim();
@@ -263,6 +243,7 @@ function parseThemeReply(content) {
   if (!out || typeof out.reply !== 'string' || !out.theme?.colors) {
     throw new Error('the designer returned an incomplete theme');
   }
+  out.theme = flatTheme(out.theme);
   return out;
 }
 
@@ -312,7 +293,7 @@ export default async function themeRoutes(app) {
     return rows.map((r) => ({
       id: r.id, author: r.author, name: r.name, blurb: r.blurb,
       downloads: r.downloads, created_at: r.created_at,
-      mine: r.user_id === req.user.id, theme: JSON.parse(r.theme_json),
+      mine: r.user_id === req.user.id, theme: flatTheme(JSON.parse(r.theme_json)),
     }));
   });
 
@@ -323,19 +304,20 @@ export default async function themeRoutes(app) {
     if (!theme || typeof theme !== 'object') return reply.code(400).send({ error: 'theme required' });
     const json = JSON.stringify(theme);
     if (json.length > 40_000) return reply.code(413).send({ error: 'theme too large' });
+    if (hasGradient(json)) return reply.code(400).send({ error: 'Gradient CSS is disabled. Use flat colors.' });
     const mine = db.prepare('SELECT COUNT(*) AS n FROM community_themes WHERE user_id = ?').get(req.user.id).n;
     if (mine >= 20) return reply.code(429).send({ error: 'you have 20 published themes — delete one first' });
     const row = db.prepare(`INSERT INTO community_themes (user_id, author, name, blurb, theme_json)
                             VALUES (?, ?, ?, ?, ?) RETURNING *`)
       .get(req.user.id, req.user.username, n, String(blurb ?? '').trim().slice(0, 200), json);
-    return { ...row, mine: true, theme: JSON.parse(row.theme_json), theme_json: undefined };
+    return { ...row, mine: true, theme: flatTheme(JSON.parse(row.theme_json)), theme_json: undefined };
   });
 
   app.post('/api/themes/market/:id/install', async (req, reply) => {
     const row = db.prepare(`UPDATE community_themes SET downloads = downloads + 1 WHERE id = ? RETURNING *`)
       .get(Number(req.params.id));
     if (!row) return reply.code(404).send({ error: 'no such theme' });
-    return { id: row.id, name: row.name, theme: JSON.parse(row.theme_json) };
+    return { id: row.id, name: row.name, theme: flatTheme(JSON.parse(row.theme_json)) };
   });
 
   app.delete('/api/themes/market/:id', async (req, reply) => {

@@ -342,7 +342,29 @@ try { db.exec('ALTER TABLE users ADD COLUMN default_model_id TEXT'); } catch { /
 // keeps one workspace so follow-up tasks continue on the same files
 try { db.exec('ALTER TABLE messages ADD COLUMN run_id INTEGER'); } catch { /* exists */ }
 try { db.exec('ALTER TABLE chat_jobs ADD COLUMN prompt_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE chat_jobs ADD COLUMN idempotency_key TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE chat_jobs ADD COLUMN request_hash TEXT'); } catch { /* exists */ }
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS chat_jobs_idempotency ON chat_jobs(user_id, conv_id, idempotency_key) WHERE idempotency_key IS NOT NULL');
 try { db.exec('ALTER TABLE agent_runs ADD COLUMN source_conv_id INTEGER'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE agent_runs ADD COLUMN idempotency_key TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE agent_runs ADD COLUMN request_hash TEXT'); } catch { /* exists */ }
+try { db.exec('ALTER TABLE agent_runs ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0'); } catch { /* exists */ }
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_idempotency ON agent_runs(user_id, workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL');
+// One durable plan per agent run. Chat prose and PLAN.md are not the source of truth.
+db.exec(`
+CREATE TABLE IF NOT EXISTS agent_plans (
+  run_id INTEGER PRIMARY KEY REFERENCES agent_runs(id) ON DELETE CASCADE,
+  objective TEXT NOT NULL DEFAULT '',
+  constraints_json TEXT NOT NULL DEFAULT '[]',
+  steps_json TEXT NOT NULL DEFAULT '[]',
+  current_step INTEGER NOT NULL DEFAULT 0,
+  changed_files_json TEXT NOT NULL DEFAULT '[]',
+  verification_json TEXT NOT NULL DEFAULT '[]',
+  failures_json TEXT NOT NULL DEFAULT '[]',
+  remaining_json TEXT NOT NULL DEFAULT '[]',
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+`);
 // image generation preferences: can the model reach for generate_image at
 // all, and which quality/speed preset drives its default step count
 try { db.exec("ALTER TABLE users ADD COLUMN allow_image_gen INTEGER NOT NULL DEFAULT 1"); } catch { /* exists */ }

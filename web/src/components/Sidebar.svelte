@@ -33,6 +33,7 @@
   import ModeSwitch from './ModeSwitch.svelte';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import Gauge from '@lucide/svelte/icons/gauge';
+  import Activity from '@lucide/svelte/icons/activity';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Palette from '@lucide/svelte/icons/palette';
@@ -117,7 +118,8 @@
     const out = buckets.map((b) => ({ label: b.label, items: [] }));
     for (const c of app.conversations) {
       if ((c.mode || 'chat') !== app.mode) continue;
-      if (historyQuery && !c.title.toLowerCase().includes(historyQuery.toLowerCase().trim())) continue;
+      const title = typeof c.title === 'string' ? c.title : '';
+      if (historyQuery && !title.toLowerCase().includes(historyQuery.toLowerCase().trim())) continue;
       const idx = buckets.findIndex((b) => b.test(c.updated_at));
       out[idx].items.push(c);
     }
@@ -263,7 +265,7 @@
                   if (e.key === 'Escape') renamingId = null;
                 }} />
             {:else}
-              <span class="title">{c.title}</span>
+              <span class="title">{c.title || 'New chat'}</span>
               <button class="act rn" onclick={(e) => startRename(c, e)} title="Rename chat">
                 <Pencil size={12} />
               </button>
@@ -281,6 +283,9 @@
       <div class="nav-space"></div>
     {/if}
     <div class="utility-nav">
+      <button class="page" onclick={() => { window.dispatchEvent(new Event('dp:hardware-toggle')); closeSidebarIfMobile(); }} title="Show or hide hardware monitor">
+        <Activity size={16} /> Hardware
+      </button>
       {#if overflowItems.length || app.user?.role === 'owner'}
         <div class="morewrap">
           <button class="page" class:active={overflowItems.some((item) => item.id === app.view)}

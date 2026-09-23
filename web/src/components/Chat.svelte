@@ -190,6 +190,7 @@ import ChatFiles from './ChatFiles.svelte';
   function handleEvent(ev, convId) {
     const s = app.streaming;
     const here = app.conv?.id === convId;
+    if (s?.convId === convId && Number.isFinite(ev.seq)) s.seq = ev.seq;
     switch (ev.type) {
       case 'user_msg':
         if (here) { if (!app.conv.messages.some(m => m.id === ev.msg.id)) app.conv.messages.push(ev.msg); app.conv.active_leaf_id = ev.msg.id; scrollToBottom(true); }
@@ -407,14 +408,24 @@ import ChatFiles from './ChatFiles.svelte';
               app.conv.active_leaf_id = ev.finalMsg.id;
             }
           } else if (here && (ev.text || ev.error)) {
-            app.conv.messages.push({
-              id: `tmp-${Date.now()}`, conv_id: convId,
-              parent_id: app.conv.active_leaf_id, role: 'assistant',
-              run_id: ev.run?.id ?? null,
-              content: (ev.text || '') + (ev.error ? `\n\n> Interrupted: ${ev.error}` : '\n\n> Stopped.'),
-              pinned: 0,
-            });
-            app.conv.active_leaf_id = app.conv.messages[app.conv.messages.length - 1].id;
+            const needle = String(ev.text || '').slice(0, 80);
+            const saved = needle && [...app.conv.messages].reverse().find((m) =>
+              m.role === 'assistant' && typeof m.id === 'number'
+              && />\s*Interrupted:/i.test(String(m.content || ''))
+              && String(m.content || '').includes(needle));
+            const parent = realParentId();
+            if (saved && (saved.id === app.conv.active_leaf_id || saved.parent_id === parent)) {
+              app.conv.active_leaf_id = saved.id;
+            } else {
+              app.conv.messages.push({
+                id: `tmp-${Date.now()}`, conv_id: convId,
+                parent_id: parent, role: 'assistant',
+                run_id: ev.run?.id ?? null,
+                content: (ev.text || '') + (ev.error ? `\n\n> Interrupted: ${ev.error}` : '\n\n> Stopped.'),
+                pinned: 0,
+              });
+              app.conv.active_leaf_id = app.conv.messages[app.conv.messages.length - 1].id;
+            }
           }
           app.streaming = null;
           break;
@@ -422,6 +433,7 @@ import ChatFiles from './ChatFiles.svelte';
         app.streaming = {
           convId,
           jobId: ev.jobId ?? null,
+          seq: Number.isFinite(ev.seq) ? ev.seq : 0,
           text: ev.text || '',
           thinking: ev.thinking || '',
           tokS: ev.tokS ?? null,
@@ -452,7 +464,7 @@ import ChatFiles from './ChatFiles.svelte';
   function emptyStreaming(convId) {
     return {
       convId, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
-      jobId: null,
+      jobId: null, seq: 0,
       run: null, events: [], liveTool: null, lastWrite: null, pendingApproval: null,
       image: null, diffusion: null, queued: 0,
       search: null, widgets: [],
@@ -464,17 +476,36 @@ import ChatFiles from './ChatFiles.svelte';
   let resuming = false;
   let reconnectFailures = 0;
 
-  /** Resolve a parent id the server will accept (no tmp-* client leaves). */
+  /** Resolve a parent id the server will accept (no tmp-* or missing leaves). */
   function realParentId() {
+    const messages = app.conv?.messages ?? [];
     let parent = app.conv?.active_leaf_id ?? null;
-    if (parent != null && (typeof parent === 'string') && String(parent).startsWith('tmp-')) {
-      const tmp = app.conv.messages.find((m) => m.id === parent);
-      // Prefer the interrupted assistant's parent (the original user turn) only
-      // when we must; usually we want to hang "continue" UNDER the interrupted
-      // asst — but tmp asst isn't in the DB, so use its parent_id (the user msg).
+    if (parent != null && typeof parent === 'string' && parent.startsWith('tmp-')) {
+      const tmp = messages.find((m) => m.id === parent);
+      // tmp assistant isn't in the DB, so hang the next turn on its real parent.
       parent = tmp?.parent_id ?? null;
     }
+    if (parent != null && !messages.some((m) => m.id === parent)) parent = null;
+    // A null or dangling leaf must not start a new root while history exists.
+    if (parent == null) {
+      const lastReal = [...messages].reverse().find((m) => typeof m.id === 'number');
+      parent = lastReal?.id ?? null;
+    }
     return parent;
+  }
+
+  // A lost POST response must not create a second prompt on retry. Keep the
+  // original body and key until the server identifies the accepted job.
+  function pendingSubmission(convId, body) {
+    const storageKey = `dp_chat_submission_${convId}`;
+    const identity = JSON.stringify({ content: body.content ?? null, regenerateFrom: body.regenerateFrom ?? null });
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(storageKey) ?? 'null');
+      if (saved?.identity === identity && saved.body?.idempotencyKey) return { storageKey, body: saved.body };
+    } catch { /* storage may be blocked */ }
+    const next = { ...body, idempotencyKey: crypto.randomUUID() };
+    try { sessionStorage.setItem(storageKey, JSON.stringify({ identity, body: next })); } catch { /* best effort */ }
+    return { storageKey, body: next };
   }
 
   async function run(body) {
@@ -491,15 +522,20 @@ import ChatFiles from './ChatFiles.svelte';
       parentId: body.parentId !== undefined ? body.parentId : realParentId(),
       researchMode: prefs.researchMode,
     };
+    const submission = pendingSubmission(convId, outBody);
     let started = false;
     try {
       // The POST only creates the server job. Read progress through a separate
       // live feed so a proxy's request limit cannot interrupt generation.
-      const accepted = await api(`/api/conversations/${convId}/chat`, { method: 'POST', body: outBody });
+      const accepted = await api(`/api/conversations/${convId}/chat`, { method: 'POST', body: submission.body });
+      try { sessionStorage.removeItem(submission.storageKey); } catch { /* storage may be blocked */ }
       if (app.streaming?.convId === convId) app.streaming.jobId = accepted.jobId ?? null;
       started = true;
       await tryResume(convId, { nested: true });
     } catch (err) {
+      if (err?.status === 400 || (err?.status === 409 && /idempotency key/.test(err.message ?? ''))) {
+        try { sessionStorage.removeItem(submission.storageKey); } catch { /* storage may be blocked */ }
+      }
       if (err?.name === 'AbortError') { /* stop / tab close */ }
       else if (err?.status === 409) {
         // Another tab started this conversation first. Its job remains the
@@ -562,12 +598,8 @@ import ChatFiles from './ChatFiles.svelte';
       content = '(work in progress — open Project files to see what was written)';
     }
     if (!content && !snap.error) return;
-    // Parent under the real leaf before this stream (not a previous tmp- partial)
-    let parent = app.conv.active_leaf_id;
-    if (typeof parent === 'string' && String(parent).startsWith('tmp-')) {
-      const tmp = app.conv.messages.find((m) => m.id === parent);
-      parent = tmp?.parent_id ?? parent;
-    }
+    // Parent under a real saved message. A missing leaf must not become a new root.
+    const parent = realParentId();
     const msg = {
       id: `tmp-${Date.now()}`,
       conv_id: convId,
@@ -664,7 +696,11 @@ import ChatFiles from './ChatFiles.svelte';
       let gotResume = false;
       let status = null;
       const jobId = app.streaming?.convId === convId ? app.streaming.jobId : null;
-      const path = `/api/conversations/${convId}/live${jobId ? `?jobId=${encodeURIComponent(jobId)}` : ''}`;
+      const seq = app.streaming?.convId === convId ? Number(app.streaming.seq) : 0;
+      const params = new URLSearchParams();
+      if (jobId) params.set('jobId', jobId);
+      if (Number.isFinite(seq) && seq > 0) params.set('after', String(seq));
+      const path = `/api/conversations/${convId}/live${params.size ? `?${params}` : ''}`;
       const handle = sseGet(path, (ev) => {
         if (token !== resumeToken) return;
         if (ev.type === 'resume') {

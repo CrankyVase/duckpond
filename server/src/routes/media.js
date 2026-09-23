@@ -52,7 +52,9 @@ export default async function mediaRoutes(app) {
     const previewEvery = [0, 1, 2, 4, 8].includes(Number(req.query.previewEvery)) ? Number(req.query.previewEvery) : 1;
     const refCount = Math.max(0, Math.min(4, Number(req.query.refCount ?? 0) || 0));
     const enhance = req.query.enhance !== '0';
-    return { ok: true, ...presetEstimates({ shape, n, previewEvery, refCount, enhance }) };
+    const models = await bridgeModels().catch(() => null);
+    const loaded = !!models?.models?.some((model) => model.task === 'image' && model.loaded);
+    return { ok: true, ...presetEstimates({ shape, n, previewEvery, refCount, enhance, loaded }) };
   });
 
   app.get('/api/media/resources', async () => {

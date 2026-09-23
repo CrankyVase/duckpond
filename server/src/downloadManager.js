@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { assertRepoId } from './hfHub.js';
+import { assertRepoId, mainSnapshotDir } from './hfHub.js';
 
 const HF_CLI = process.env.HF_CLI ?? '/home/cranky/.local/bin/hf';
 const HF_HOME = process.env.HF_HOME ?? '/var/mnt/modelnvme/ai/huggingface';
@@ -69,6 +69,34 @@ function scanProgress(repoId, include) {
   return { downloadedBytes: downloaded + incomplete, incompleteBytes: incomplete };
 }
 
+// A successful CLI exit is only complete when its selected files can be
+// resolved from the HF snapshot. Cache blobs can exist without snapshot
+// links after a crash or cancellation, so blob byte counts alone are not
+// enough to mark a model usable.
+function verifiedSnapshotBytes(repoId, include) {
+  const root = mainSnapshotDir(repoId);
+  if (!root) return { bytes: 0, files: 0 };
+  const pattern = include == null ? null : new RegExp(`^${String(include)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+  let bytes = 0;
+  let files = 0;
+  const walk = (dir, prefix = '') => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) { walk(join(dir, entry.name), rel); continue; }
+      if (pattern && !pattern.test(rel)) continue;
+      try {
+        const size = statSync(join(dir, entry.name)).size;
+        if (size <= 0) continue;
+        files += 1;
+        bytes += size;
+      } catch { /* broken snapshot link */ }
+    }
+  };
+  try { walk(root); } catch { return { bytes, files }; }
+  return { bytes, files };
+}
+
 // Speed/ETA from a time window of disk scans; extra polling tabs share it.
 const sampleSpeed = createDownloadRate();
 
@@ -97,7 +125,18 @@ function spawnWorker(job) {
     job.finishedAt = Date.now();
     if (job.state === 'cancelling') { job.state = 'cancelled'; job.error = null; }
     else if (error) { job.state = 'error'; job.error = error.message; }
-    else if (code === 0) { job.state = 'done'; job.error = null; if (job.totalBytes) job.downloadedBytes = job.totalBytes; job.etaSec = 0; }
+    else if (code === 0) {
+      const verified = verifiedSnapshotBytes(job.repoId, job.include);
+      if (!verified.files || (job.totalBytes && verified.bytes < job.totalBytes * 0.99)) {
+        job.state = 'error';
+        job.error = 'Transfer ended without complete model files. Retry to resume the download.';
+      } else {
+        job.state = 'done';
+        job.error = null;
+        job.downloadedBytes = job.totalBytes ?? verified.bytes;
+        job.etaSec = 0;
+      }
+    }
     else { job.state = 'error'; job.error = errTail.trim().split('\n').pop() || `exited ${code ?? signal}`; }
     persistJob(job);
   };

@@ -60,6 +60,7 @@
   function openStudio(id) { sessionStorage.setItem('dp:media-selection', id); app.view = 'media'; }
   let recModels = $state([]);
   let readme = $state(new Map()); // repoId -> { loading, text, error }
+  let facts = $state(new Map()); // repoId -> HF model-card metadata, loaded on selection
   let registering = $state(null);
   let showPaste = $state(false);
 
@@ -97,6 +98,14 @@
       readme.set(repoId, { loading: false, text: '', error: e.message ?? 'readme failed' });
     }
     readme = new Map(readme);
+  }
+  async function loadFacts(repoId) {
+    if (!repoId || facts.has(repoId)) return;
+    facts.set(repoId, { loading: true });
+    facts = new Map(facts);
+    try { facts.set(repoId, { loading: false, ...(await api(`/api/hf/models/${repoId}`)) }); }
+    catch { facts.set(repoId, { loading: false, error: true }); }
+    facts = new Map(facts);
   }
   // Same "is this already a quantized GGUF repo" heuristic hfHub.js's
   // findQuantizers() uses server-side to filter its own results.
@@ -333,7 +342,8 @@
   function setMode(m) {
     mode = m;
     if (m === 'discover') mobileViewingDetail = false;
-    if (m === 'my-models') { void loadLocal(); void refreshRuntime(); }
+    if (m === 'my-models') { void loadLocal(); void refreshRuntime(); void loadHardware(); }
+    if (m === 'downloads') void loadHardware();
     if (m === 'discover' && !discoverLoaded) {
       discoverLoaded = true;
       void loadRecommended();
@@ -375,6 +385,7 @@
       });
       toast(`Deleted — ${fmtBytes(r.freedBytes)} freed`, 'ok');
       await loadLocal();
+      void loadHardware();
       // ModelPicker reads app.models from a separate store that only
       // refreshes on its own actions — without this, a model deleted here
       // keeps showing as pickable there until something else happens to
@@ -448,6 +459,7 @@
   const selectedModel = $derived(results.find((m) => m.id === selected) ?? null);
   const selectedQuantizers = $derived(selected ? quantizers.get(selected) : null);
   const activeRepo = $derived(selected ? (quantRepo.get(selected) ?? selected) : null);
+  const selectedFacts = $derived(activeRepo ? facts.get(activeRepo) : null);
   const selectedVariants = $derived(activeRepo ? variants.get(activeRepo) : null);
   // The full quant list is collapsed behind the picked-quant summary row by
   // default — Unsloth's own Hub layout — and closes again on every new
@@ -628,6 +640,7 @@
       void loadQuantizers(repoId);
     }
     void loadReadme(repoId);
+    void loadFacts(repoId);
     if (jumpToDetail && window.matchMedia('(max-width: 900px)').matches) {
       mobileViewingDetail = true;
       requestAnimationFrame(() => detailEl?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
@@ -663,12 +676,14 @@
       quantRepo.set(repoId, activeRepoId);
       quantRepo = new Map(quantRepo);
     }
+    void loadFacts(quantRepo.get(repoId));
     void loadVariants(quantRepo.get(repoId));
   }
 
   function pickQuantRepo(baseRepoId, quantRepoId) {
     quantRepo.set(baseRepoId, quantRepoId);
     quantRepo = new Map(quantRepo);
+    void loadFacts(quantRepoId);
     void loadVariants(quantRepoId);
   }
 
@@ -712,6 +727,7 @@
       if ((previous === 'running' || previous === 'cancelling') && j.state === 'done') {
         toast(`${j.variant ?? j.repoId} downloaded`, 'ok');
         void loadLocal();
+        void loadHardware();
         if (j.repoId === activeRepo) void loadVariants(activeRepo, true);
       }
     }
@@ -758,6 +774,8 @@
     if (!/^[^/\s]+\/[^/\s]+$/.test(id)) { toast('Enter a repository URL or ID like unsloth/Qwen3-8B-GGUF', 'error'); return; }
     try {
       const model = await api(`/api/hf/models/${id}`);
+      facts.set(id, { loading: false, ...model });
+      facts = new Map(facts);
       activeTab = model.kind === 'image' ? 'image' : model.kind === 'audio' ? 'audio'
         : model.kind === 'video' ? 'video' : 'llm';
       taskFilter = '';
@@ -835,6 +853,8 @@
       const r = await api('/api/hf/variants/delete', { method: 'POST', body: { repoId, include } });
       toast(`Deleted ${name} — ${fmtBytes(r.freedBytes)} freed`, 'ok');
       await loadVariants(repoId, true);
+      void loadLocal();
+      void loadHardware();
     } catch (e) {
       toast(e.error ?? e.message ?? 'delete failed', 'error');
     } finally {
@@ -1153,6 +1173,13 @@
             {#if selectedModel.gated}<span class="badge warn">gated</span>{/if}
             {#if selectedModel.private}<span class="badge warn">private</span>{/if}
           </div>
+          <div class="model-metadata">
+            <div><span>License</span><strong>{selectedFacts?.loading ? 'Checking…' : selectedFacts?.license ?? (activeRepo === selectedModel.id ? selectedModel.license : null) ?? (selectedFacts?.error ? 'Unavailable' : 'Not listed')}</strong></div>
+            <div><span>File source</span><strong title={activeRepo ?? selectedModel.id}>{activeRepo ?? selectedModel.id}</strong></div>
+          </div>
+          {#if selectedFacts?.gated || (activeRepo === selectedModel.id && selectedModel.gated)}
+            <p class="access-note">This repository requires access on Hugging Face before its files can be downloaded.</p>
+          {/if}
 
           {@const qz = selectedQuantizers}
           {#if isMediaTab}
@@ -1215,6 +1242,10 @@
               <div class="vhead mediahead">
                 <span class="qtrigger">
                   <span class="mono">{picked?.name ?? 'Full model'}</span>
+                  {#if picked?.installation}
+                    <span class="vstate" data-state={picked.installation.state} title={picked.installation.detail}>{picked.installation.label}</span>
+                    <span class="vhint install-next" title={picked.installation.detail}>{picked.installation.next}</span>
+                  {/if}
                   <span class="qsize mono">{fmtBytes(picked?.size ?? v.total)}</span>
                 </span>
                 {#if isOwner}
@@ -1257,7 +1288,10 @@
                       <span class="mono">{picked.quant ?? picked.name}</span>
                       {#if v.recommended && picked.include === v.recommended}<span class="reclabel">Recommended</span>{/if}
                     </span>
-                    {#if picked.downloaded}<span class="dottag success"><span class="dot"></span>On device</span>{/if}
+                    {#if picked.installation}
+                      <span class="vstate" data-state={picked.installation.state} title={picked.installation.detail}>{picked.installation.label}</span>
+                      <span class="vhint install-next" title={picked.installation.detail}>{picked.installation.next}</span>
+                    {:else if picked.downloaded}<span class="dottag success"><span class="dot"></span>On device</span>{/if}
                     <span class="qsize mono">{fmtBytes(picked.size)}</span>
                     {#if picked.fit && FIT[picked.fit]}<span class="fitpill {picked.fit}" title={FIT[picked.fit].tip}>{FIT[picked.fit].label}</span>{/if}
                     {#if picked.tps}<span class="tps mono" title="Estimated decode speed on this GPU (9070 XT) at the current free VRAM — rough order-of-magnitude">~{picked.tps} t/s</span>{/if}
@@ -1315,7 +1349,10 @@
                       <span class="fiticon {FIT[row.fit]?.icon ?? 'sky'}" title={FIT[row.fit]?.tip ?? ''}><Info size={13} /></span>
                       <span class="mono qname">{row.quant ?? row.name}</span>
                       {#if v.recommended && row.include === v.recommended}<span class="reclabel">Recommended</span>{/if}
-                      {#if row.downloaded}
+                      {#if row.installation}
+                        <span class="vstate" data-state={row.installation.state} title={row.installation.detail}>{row.installation.label}</span>
+                        <span class="vhint install-next" title={row.installation.detail}>{row.installation.next}</span>
+                      {:else if row.downloaded}
                         <span class="dottag success"><span class="dot"></span>On device</span>
                       {/if}
                     </span>
@@ -1368,6 +1405,36 @@
               {/if}
             {/if}
           </div>
+          {#if v && !v.loading && !v.error && pickedVariant(v)}
+            {@const chosen = pickedVariant(v)}
+            {@const additionalDisk = Math.max(0, chosen.size - Math.min(chosen.size, chosen.cachedBytes ?? 0))}
+            <section class="download-planning" aria-label="Download and memory details">
+              <div class="planning-heading"><strong>File and device details</strong><span>{chosen.downloaded ? 'Stored on this device' : 'Before downloading'}</span></div>
+              <div class="planning-grid">
+                <div><span>Selected files</span><strong>{chosen.fileCount ?? '—'} · {fmtBytes(chosen.size)}</strong></div>
+                <div><span>Additional storage</span><strong>{chosen.downloaded ? 'None' : `Up to ${fmtBytes(additionalDisk)}`}</strong></div>
+                <div><span>Storage free now</span><strong>{hw?.diskFreeBytes != null ? fmtBytes(hw.diskFreeBytes) : 'Unavailable'}</strong></div>
+                {#if chosen.memoryEstimateBytes != null}
+                  <div><span>Estimated load memory</span><strong>{fmtBytes(chosen.memoryEstimateBytes)}</strong></div>
+                  <div><span>VRAM free now</span><strong>{v.vramFreeBytes != null ? fmtBytes(v.vramFreeBytes) : 'Unavailable'}</strong></div>
+                  <div><span>RAM available now</span><strong>{v.ramAvailableBytes != null ? fmtBytes(v.ramAvailableBytes) : 'Unavailable'}</strong></div>
+                {/if}
+              </div>
+              {#if !chosen.downloaded && hw?.diskFreeBytes != null && additionalDisk > hw.diskFreeBytes}
+                <p class="planning-warning">This file is larger than the available model storage. Free space before downloading.</p>
+              {/if}
+              <p class="planning-note">Storage and memory figures are planning estimates. Runtime compatibility is checked when you use the model.</p>
+              {#if chosen.files?.length}
+                <details class="file-inventory">
+                  <summary>Show included files <span>{chosen.fileCount}</span><ChevronDown size={14} /></summary>
+                  <div class="file-items">
+                    {#each chosen.files as file (file.path)}<div><span title={file.path}>{file.path}</span><strong>{fmtBytes(file.size)}</strong></div>{/each}
+                  </div>
+                  {#if chosen.filesTruncated}<p>Showing the first {chosen.files.length} of {chosen.fileCount} files.</p>{/if}
+                </details>
+              {/if}
+            </section>
+          {/if}
           {#if activeRepo && activeRepo !== selectedModel.id}
             <div class="fromrepo mono">from {activeRepo}</div>
           {/if}
@@ -1440,21 +1507,22 @@
                 <div class="installed-meta">{row.repoId ?? 'Local files'}{#if row.updatedAt} · Updated {fmtAgo(row.updatedAt)}{/if}</div>
                 <div class="installed-status" class:status-attention={['setup', 'incomplete'].includes(readiness.state)}><span class:available={readiness.state === 'ready'}>{readiness.label}</span>{#if row.source === 'media-components'}<span>ComfyUI media</span>{/if}<p>{readiness.detail}</p></div>
                 <div class="installed-actions">
-                  {#if readiness.runtime?.ready}<button class="ghost" onclick={() => openStudio(readiness.runtime.id)}><Play size={12} /> Open Studio</button>{/if}
+                  {#if readiness.runtime?.ready}<button class="ghost" onclick={() => openStudio(readiness.runtime.id)}><Play size={12} /> Open Studio</button>
+                  {:else if readiness.runtime && row.source === 'media-components'}<button class="ghost" onclick={() => openStudio(readiness.runtime.id)}>Review in Studio <ChevronRight size={12} /></button>{/if}
                   {#if isOwner && chatVariants(row).length === 1}
                     {@const variant = chatVariants(row)[0]}
                     <button class="installed-use" disabled={usingInstalled === `${row.repoId}::${variant.include}`} onclick={() => useInstalledInChat(row, variant)}><Play size={12} /> {usingInstalled === `${row.repoId}::${variant.include}` ? 'Adding…' : 'Use in chat'}</button>
                   {/if}
-                  {#if row.repoId && row.source.startsWith('hf-cache')}<button class="ghost" onclick={() => inspectInstalled(row)}>Files & setup <ChevronRight size={12} /></button>{/if}
+                  {#if row.repoId && row.source.startsWith('hf-cache')}<button class="ghost" onclick={() => inspectInstalled(row)}>{readiness.state === 'incomplete' ? 'Repair files' : readiness.state === 'setup' ? 'Review setup' : 'Files & setup'} <ChevronRight size={12} /></button>{/if}
                 </div>
                 <details class="installed-files" open={row.broken}>
-                  <summary>{row.broken ? 'Incomplete files' : `${row.variants.length} file${row.variants.length === 1 ? '' : 's'} on disk`}<ChevronDown size={14} /></summary>
+                  <summary>{row.broken ? 'Incomplete files' : `${row.variants.length} version${row.variants.length === 1 ? '' : 's'} · ${row.variants.reduce((total, variant) => total + (variant.fileCount ?? 1), 0)} files`}<ChevronDown size={14} /></summary>
                 {#if row.broken}
                   <div class="qlist">
                     <div class="qrow mmvariant">
                       <span class="qleft">
-                        <span class="mono qname err">Incomplete — not usable</span>
-                        <span class="vhint">Review Files & setup to resume the download, or remove it to reclaim space.</span>
+                        <span class="mono qname err" title={row.installation?.detail}>{row.installation?.label ?? 'Incomplete — not usable'}</span>
+                        <span class="vhint" title={row.installation?.detail}>{row.installation?.next ?? 'Review Files & setup to resume the download, or remove it to reclaim space.'}</span>
                       </span>
                       <span class="qright">
                         {#if isOwner}
@@ -1472,14 +1540,19 @@
                     {#each row.variants as variant (variant.include ?? variant.name)}
                       <div class="qrow mmvariant">
                         <span class="qleft">
-                          <span class="mono qname" title={variant.name}>{variant.quant ?? variant.name}</span>
+                          <span class="mono qname" title={variant.installation?.detail || variant.name}>{variant.quant ?? variant.name}</span>
+                          {#if variant.installation}
+                            <span class="vstate" data-state={variant.installation.state} title={variant.installation.detail}>{variant.installation.label}</span>
+                            <span class="vhint install-next" title={variant.installation.detail}>{variant.installation.next}</span>
+                          {:else if variant.containsGguf && variant.chatCompatible === false && row.task === 'chat'}
+                            <span class="vhint" title="The GGUF files for this version are incomplete">Incomplete</span>
+                          {/if}
                         </span>
                         <span class="qright">
                           <span class="qsize mono">{fmtBytes(variant.size)}</span>
                           {#if isOwner && chatVariants(row).length > 1 && chatVariants(row).includes(variant)}
                             <button class="variant-use" disabled={usingInstalled === `${row.repoId}::${variant.include}`} onclick={() => useInstalledInChat(row, variant)}>{usingInstalled === `${row.repoId}::${variant.include}` ? 'Adding…' : 'Use in chat'}</button>
                           {/if}
-                          {#if variant.containsGguf && variant.chatCompatible === false && row.task === 'chat'}<span class="vhint" title="The GGUF files for this version are incomplete">Incomplete</span>{/if}
                           {#if isOwner && row.source !== 'media-components'}
                             <button class="qdel" disabled={localDeleting === `${row.repoDir}::${variant.include}`}
                               onclick={() => deleteLocalVariant(row, variant)} title="Delete from disk">
@@ -1488,6 +1561,15 @@
                           {/if}
                         </span>
                       </div>
+                      {#if variant.files?.length}
+                        <details class="file-inventory installed-file-list">
+                          <summary>View exact files <span>{variant.fileCount ?? variant.files.length}</span><ChevronDown size={13} /></summary>
+                          <div class="file-items">
+                            {#each variant.files as file (file.path)}<div><span title={file.path}>{file.path}</span><strong>{fmtBytes(file.size)}</strong></div>{/each}
+                          </div>
+                          {#if variant.filesTruncated}<p>Showing the first {variant.files.length} of {variant.fileCount} files.</p>{/if}
+                        </details>
+                      {/if}
                     {/each}
                   </div>
                 {/if}
@@ -1980,6 +2062,14 @@
   .job-link { display: inline-flex; align-items: center; gap: 3px; color: var(--accent); font-size: 11px; padding: 3px 0; }
   .vhint { font-size: 12.5px; color: var(--text-faint); }
   .vhint.err { color: var(--red); }
+  .vstate {
+    flex-shrink: 0; font-size: 10.5px; line-height: 1.3; padding: 2px 6px;
+    border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); white-space: nowrap;
+  }
+  .vstate[data-state="partial"], .vstate[data-state="dependencies_missing"] { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); }
+  .vstate[data-state="downloading"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+  .vstate[data-state="ready"], .vstate[data-state="loaded"], .vstate[data-state="verified"] { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+  .install-next { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qskeleton { display: flex; flex-direction: column; gap: 6px; }
   .qsk { justify-content: space-between; padding: 12px 10px; }
   .sk.wq { height: 14px; width: 30%; }
@@ -2322,8 +2412,16 @@
   .detail-eyebrow { margin-bottom: 16px; }
   .dhead { margin-bottom: 16px; }
   .dtitle h2 { font-size: 20px; }
-  .badges { margin-bottom: 22px; }
+  .badges { margin-bottom: 14px; }
   .badge { padding: 5px 10px; border: 1px solid var(--border-soft); }
+  .model-metadata { display: grid; grid-template-columns: minmax(100px, .6fr) minmax(0, 1.4fr); gap: 14px;
+    padding: 12px 14px; margin-bottom: 18px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg-raised); }
+  .model-metadata > div { display: grid; gap: 4px; min-width: 0; }
+  .model-metadata span, .planning-grid span { color: var(--text-faint); font-size: 10px; }
+  .model-metadata strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text);
+    font-size: 11px; font-weight: 600; }
+  .access-note { margin: -6px 0 16px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--yellow) 35%, var(--border));
+    border-radius: 9px; color: var(--text-dim); font-size: 11px; line-height: 1.5; }
   .varbar { border-top: 1px solid var(--border-soft); padding-top: 18px; }
   .choice-heading strong { font-size: 14px; }
   .choice-heading span { font-size: 12px; }
@@ -2334,6 +2432,29 @@
   .dlbtn { border-radius: 9px; }
   .stats { padding: 14px 0; border-top: 1px solid var(--border-soft); }
   .readme { max-width: 780px; }
+  .download-planning { padding: 16px; margin: 0 0 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised); }
+  .planning-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 5px 12px; margin-bottom: 13px; }
+  .planning-heading strong { font-size: 13px; font-weight: 650; }
+  .planning-heading span { color: var(--text-faint); font-size: 11px; }
+  .planning-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
+  .planning-grid > div { display: grid; gap: 4px; min-width: 0; }
+  .planning-grid strong { color: var(--text); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+  .planning-warning { margin: 13px 0 0; color: var(--yellow); font-size: 11px; line-height: 1.5; }
+  .planning-note { margin: 13px 0 0; color: var(--text-faint); font-size: 10.5px; line-height: 1.5; }
+  .file-inventory { margin-top: 12px; border-top: 1px solid var(--border-soft); }
+  .file-inventory summary { display: flex; align-items: center; gap: 6px; width: fit-content; padding: 11px 0 3px;
+    list-style: none; cursor: pointer; color: var(--text-dim); font-size: 11px; font-weight: 600; }
+  .file-inventory summary::-webkit-details-marker { display: none; }
+  .file-inventory summary span { color: var(--text-faint); font-weight: 500; }
+  .file-inventory[open] summary :global(svg) { transform: rotate(180deg); }
+  .file-items { display: grid; max-height: 220px; overflow-y: auto; padding: 6px 0; }
+  .file-items > div { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 6px 0;
+    border-bottom: 1px solid var(--border-soft); font-size: 10.5px; }
+  .file-items > div:last-child { border-bottom: 0; }
+  .file-items span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-family: var(--mono); }
+  .file-items strong { flex-shrink: 0; color: var(--text-faint); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .file-inventory p { margin: 4px 0; color: var(--text-faint); font-size: 10px; }
+  .installed-file-list { margin: -3px 8px 8px 12px; }
   .installed-intro, .downloads-intro { margin-bottom: 20px; }
   .library-summary { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 20px; border: 1px solid var(--border);
     border-radius: 14px; background: var(--bg-card); }
@@ -2414,6 +2535,8 @@
     .installed-status { align-items: start; }
     .installed-status p { margin-top: 4px; }
     .detail { padding: 18px; }
+    .model-metadata { grid-template-columns: 1fr; }
+    .planning-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .vhead { gap: 8px; }
     .vpicklabel { width: 100%; }
     .jobbar { padding: 14px; }

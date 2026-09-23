@@ -60,14 +60,6 @@ export const DARK_SHADOW = '0 16px 48px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 
 export const LIGHT_SHADOW = '0 16px 48px rgba(70, 55, 30, 0.16), 0 4px 12px rgba(70, 55, 30, 0.10)';
 
 
-// Showcase presets rely on their palette and flat surfaces. Keep these exports
-// so older saved preset IDs still resolve without injecting decorative layers.
-export const SCENE_SYNTHWAVE = '';
-export const SCENE_ABYSS = '';
-export const SCENE_EMBER = '';
-export const SCENE_NIGHTSHADE = '';
-export const SCENE_PHOSPHOR = '';
-
 // Built-in handcrafted presets. `pond` is the default/featured original.
 // Everything else is browsable under Dark/Light → color group.
 export const PRESETS = [
@@ -91,7 +83,7 @@ export const PRESETS = [
   },
   {
     id: 'mallard',
-    effects: { glass: 'frosted', glassBlur: 12, glassOpacity: 0.62, bg: 'solid' },
+    effects: { glass: 'frosted', glassBlur: 12, glassOpacity: 0.62 },
     name: 'Mallard',
     dark: true,
     group: 'green',
@@ -109,7 +101,7 @@ export const PRESETS = [
   },
   {
     id: 'slate',
-    effects: { glass: 'frosted', glassBlur: 14, glassOpacity: 0.6, bg: 'solid' },
+    effects: { glass: 'frosted', glassBlur: 14, glassOpacity: 0.6 },
     name: 'Slate',
     dark: true,
     group: 'blue',
@@ -127,8 +119,7 @@ export const PRESETS = [
   },
   {
     id: 'nightshade',
-    effects: { glow: true, bg: 'solid' },
-    css: SCENE_NIGHTSHADE,
+    effects: { glow: true },
     name: 'Nightshade',
     dark: true,
     group: 'purple',
@@ -146,8 +137,6 @@ export const PRESETS = [
   },
   {
     id: 'ember',
-    effects: { bg: 'solid' },
-    css: SCENE_EMBER,
     name: 'Ember',
     dark: true,
     group: 'orange',
@@ -165,7 +154,6 @@ export const PRESETS = [
   },
   {
     id: 'duckling',
-    effects: { bg: 'solid' },
     name: 'Duckling',
     dark: false,
     group: 'gold',
@@ -202,8 +190,7 @@ export const PRESETS = [
   },
   {
     id: 'phosphor',
-    effects: { glow: true, bg: 'solid' },
-    css: SCENE_PHOSPHOR,
+    effects: { glow: true },
     name: 'Phosphor',
     dark: true,
     group: 'green',
@@ -226,8 +213,7 @@ export const PRESETS = [
     group: 'pink',
     category: 'fun',
     blurb: 'plum dusk, a quiet magenta glow at the horizon',
-    effects: { glow: true, bg: 'solid' },
-    css: SCENE_SYNTHWAVE,
+    effects: { glow: true },
     colors: {
       'bg': '#161020', 'bg-sidebar': '#1a1326', 'bg-raised': '#251b35', 'bg-card': '#271d38',
       'bg-hover': '#322544', 'bg-input': '#1e1630', 'bg-code': '#120d1a', 'bg-code-inline': '#2b2040',
@@ -245,8 +231,7 @@ export const PRESETS = [
     group: 'teal',
     category: 'fun',
     blurb: 'deep water — glass panels lit from the surface',
-    effects: { glass: 'liquid', glassBlur: 20, glassOpacity: 0.55, bg: 'solid' },
-    css: SCENE_ABYSS,
+    effects: { glass: 'liquid', glassBlur: 20, glassOpacity: 0.55 },
     colors: {
       'bg': '#071420', 'bg-sidebar': '#0a1a28', 'bg-raised': '#122636', 'bg-card': '#132839',
       'bg-hover': '#1a3346', 'bg-input': '#0d1f2e', 'bg-code': '#050f18', 'bg-code-inline': '#152c3e',
@@ -314,7 +299,7 @@ export const LAYOUT_OPTIONS = {
 
 export const DEFAULT_LAYOUT = { chatWidth: 'normal', sidebar: 'left', radius: 'soft', bubbles: 'bubbles' };
 
-// ---- effects: glass, glow, motion, backgrounds, scale, type ----
+// ---- effects: glass, glow, motion, scale, type ----
 export const GLASS_MODES = [
   ['off', 'Off', 'solid surfaces'],
   ['frosted', 'Frosted', 'soft blur, quiet tint'],
@@ -324,9 +309,6 @@ export const ANIM_MODES = [
   ['off', 'Off', 'no motion at all'],
   ['subtle', 'Subtle', 'the stock fades'],
   ['full', 'Full', 'lively hovers & entrances'],
-];
-export const BG_MODES = [
-  ['solid', 'Solid', 'theme background'],
 ];
 export const FONT_OPTIONS = [
   ['default', 'Pond', "'Inter Variable', 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif"],
@@ -342,7 +324,6 @@ export const DEFAULT_EFFECTS = {
   glow: false,         // accent glow on primary controls
   anim: 'subtle',      // off | subtle | full
   lab: false,          // experimental premium motion pack
-  bg: 'solid',
   uiScale: 1,          // 0.85..1.25
   font: 'default',
 };

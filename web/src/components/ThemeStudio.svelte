@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   // Theme Studio — the full look-and-feel workshop. Everything previews LIVE
   // on the real app behind the dialog: preset gallery, community marketplace,
-  // per-token color editing, effects (glass/glow/motion/backgrounds/scale/
+  // per-token color editing, effects (glass/glow/motion/scale/
   // type), layout styles, and raw custom CSS. Close without saving reverts;
   // Save persists server-side so the theme follows the account.
   import { api } from '../lib/api.js';
@@ -11,7 +11,7 @@
   import { app } from '../lib/state.svelte.js';
   import {
     activePresetMeta, applyTheme, isFavorite, persistTheme, resolveColors, restoreTheme,
-    sanitizeEffects, snapshotTheme, theme, toggleFavorite,
+    hasGradient, sanitizeEffects, snapshotTheme, theme, toggleFavorite,
   } from '../lib/theme.svelte.js';
   import {
     ALL_PRESETS, ALL_TOKENS, ANIM_MODES, BROWSE_PRESETS, COLOR_GROUPS,
@@ -100,7 +100,7 @@
     const p = ALL_PRESETS.find((x) => x.id === id);
     if (p) {
       // adopting a preset adopts its whole art direction: effects reset to
-      // stock + the preset's signature, scene CSS replaces custom CSS
+      // stock + the preset's signature; preserve only flat custom CSS
       theme.effects = sanitizeEffects({ ...DEFAULT_EFFECTS, ...(p.effects ?? {}) });
       theme.customCss = p.css ?? '';
       cssDraft = theme.customCss;
@@ -109,7 +109,10 @@
     if (c) {
       if (c.layout) theme.layout = { ...DEFAULT_LAYOUT, ...c.layout };
       if (c.effects) theme.effects = sanitizeEffects(c.effects);
-      if (c.css !== undefined) { theme.customCss = c.css; cssDraft = c.css; }
+      if (c.css !== undefined) {
+        theme.customCss = hasGradient(c.css) ? '' : c.css;
+        cssDraft = theme.customCss;
+      }
     }
     applyTheme();
   }
@@ -210,7 +213,7 @@
   }
 
   function applyCss() {
-    if (/\b(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/i.test(cssDraft)) {
+    if (hasGradient(cssDraft)) {
       toast('Gradient CSS is disabled. Use flat colors instead.', 'error');
       return;
     }
@@ -276,7 +279,7 @@
       name, base: 'pond', colors,
       ...(Object.keys(layout).length ? { layout: { ...DEFAULT_LAYOUT, ...layout } } : {}),
       ...(t.effects ? { effects: sanitizeEffects(t.effects) } : {}),
-      ...(typeof t.css === 'string' && t.css.trim() ? { css: t.css.slice(0, 20000) } : {}),
+      ...(typeof t.css === 'string' && t.css.trim() && !hasGradient(t.css) ? { css: t.css.slice(0, 20000) } : {}),
     };
     // iterating on an AI design: update that entry in place (pickPreset early-outs
     // when the id is unchanged, so re-apply layout/effects/css + applyTheme here)
@@ -337,15 +340,16 @@
     try {
       const { theme: t } = await api(`/api/themes/market/${entry.id}/install`, { method: 'POST' });
       const id = `m-${entry.id}-${Date.now().toString(36)}`;
+      const safeCss = hasGradient(t.css) ? '' : String(t.css ?? '');
       theme.custom = [...theme.custom.filter((c) => !c.marketId || c.marketId !== entry.id), {
         id, marketId: entry.id, name: t.name ?? entry.name, base: t.base ?? 'pond',
-        colors: t.colors ?? {}, layout: t.layout, effects: t.effects, css: t.css ?? '',
+        colors: t.colors ?? {}, layout: t.layout, effects: t.effects, css: safeCss,
       }];
       theme.preset = id;
       theme.colors = {};
       if (t.layout) theme.layout = { ...DEFAULT_LAYOUT, ...t.layout };
       if (t.effects) theme.effects = sanitizeEffects(t.effects);
-      cssDraft = t.css ?? '';
+      cssDraft = safeCss;
       theme.customCss = cssDraft;
       applyTheme();
       market = market?.map((m) => (m.id === entry.id ? { ...m, downloads: m.downloads + 1 } : m));

@@ -14,17 +14,10 @@ import {
   resolveRemote, streamRemote,
 } from './providers.js';
 import { makeThinkSplitter, REASONING_PARAM_KEYS } from './reasoning.js';
+import { mapParamsForRemote } from './remoteParams.js';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
 
-// llama.cpp-only knobs that OpenAI-compatible APIs reject or ignore, and the
-// output cap for paid models (llama's max_tokens -1 = unlimited is a bill
-// waiting to happen on a metered endpoint).
-const LLAMA_ONLY_PARAMS = [
-  'top_k', 'repeat_penalty', 'mirostat', 'mirostat_tau', 'mirostat_eta',
-  'grammar', 'json_schema', 'chat_template_kwargs', 'timings_per_token',
-];
-const REMOTE_MAX_TOKENS = 4096;
 // total attempts per remote turn, the requested model included — bounds both
 // the wait and the chance of burning through a whole chain on a dead provider
 const REMOTE_FALLBACK_MAX = 3;
@@ -33,13 +26,7 @@ async function remoteCall({ model, messages, params, onDelta, abortSignal, onEve
   const r = resolveRemote(model);
   if (!r) throw new Error(`remote model unavailable (provider deleted or disabled): ${model}`);
   if (r.model && !r.model.enabled) throw new Error(`model disabled in the Providers panel: ${r.modelId}`);
-  const mapped = { ...params };
-  for (const k of LLAMA_ONLY_PARAMS) delete mapped[k];
-  if (mapped.max_tokens == null || Number(mapped.max_tokens) < 0) {
-    mapped.max_tokens = Number(r.model?.max_output) > 0
-      ? Math.min(Number(r.model.max_output), REMOTE_MAX_TOKENS)
-      : REMOTE_MAX_TOKENS;
-  }
+  const mapped = mapParamsForRemote(params, r.model);
   // Fallback chain: a transient failure transparently retries on the next
   // enabled model in the provider's chain (OmniRoute-style). Only while
   // nothing has streamed yet — a half-delivered reply never restarts.

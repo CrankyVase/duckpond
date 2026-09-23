@@ -77,16 +77,23 @@ function profileKey({ quality, size, steps, n, trueCfg, previewEvery, refCount =
 }
 
 export function recordImageJobTiming({ quality = 'medium', size, steps, n = 1, trueCfg = 1,
-  previewEvery = 1, refCount = 0, enhance = true, wallMs } = {}) {
+  previewEvery = 1, refCount = 0, enhance = true, wallMs, loadMs = 0 } = {}) {
   if (!(Number(wallMs) > 0) || !(Number(steps) > 0)) return null;
+  const load = Number(loadMs) > 0 ? Number(loadMs) : 0;
+  if (load > 0) {
+    const stats = statsForTask('image');
+    const nextLoad = clamp(stats.samples ? ema(stats.loadMs, load) : load, 2000, 600000);
+    try { persistTask('image', { ...stats, loadMs: nextLoad, updated: Date.now() }); } catch { /* keep the image */ }
+  }
+  const genMs = Math.max(1, Number(wallMs) - load);
   const all = loadProfiles();
   const key = profileKey({ quality, size, steps, n, trueCfg, previewEvery, refCount, enhance });
   const prior = all.profiles?.[key];
-  const avgMs = prior ? ema(prior.avgMs, wallMs, 0.45) : wallMs;
+  const avgMs = prior ? ema(prior.avgMs, genMs, 0.45) : genMs;
   all.profiles ??= {};
   all.profiles[key] = { avgMs, samples: (prior?.samples ?? 0) + 1, updated: Date.now() };
   const units = Number(steps) * Math.max(1, Number(n)) * pixelsForSize(size) / REF_PIXELS * cfgMul(trueCfg);
-  const sampleUnitMs = Number(wallMs) / units;
+  const sampleUnitMs = genMs / units;
   all.global = {
     unitMs: all.global ? ema(all.global.unitMs, sampleUnitMs, 0.45) : sampleUnitMs,
     samples: (all.global?.samples ?? 0) + 1,
@@ -130,21 +137,26 @@ export function recordMediaTiming({ task = 'image', size = '1024x1024', steps = 
   return entry;
 }
 
+function withLoad(seconds, loaded, task) {
+  if (loaded !== false) return seconds;
+  return Math.round((seconds + statsForTask(task).loadMs / 1000) * 10) / 10;
+}
+
 export function estimateMediaSeconds({ task = 'image', size = '1024x1024', steps = 40, n = 1, trueCfg = 1, warm = null,
-  quality = null, previewEvery = 1, refCount = 0, enhance = true } = {}) {
+  quality = null, previewEvery = 1, refCount = 0, enhance = true, loaded = null } = {}) {
   if (task === 'image') {
     const all = loadProfiles();
     if (quality) {
       const exact = all.profiles?.[profileKey({ quality, size, steps, n, trueCfg, previewEvery, refCount, enhance })];
-      if (exact?.avgMs > 0) return Math.round(exact.avgMs / 100) / 10;
+      if (exact?.avgMs > 0) return withLoad(Math.round(exact.avgMs / 100) / 10, loaded, task);
     }
     if (all.global?.unitMs > 0) {
       const units = Number(steps) * Math.max(1, Number(n)) * pixelsForSize(size) / REF_PIXELS * cfgMul(trueCfg);
-      return Math.round(all.global.unitMs * units / 100) / 10;
+      return withLoad(Math.round(all.global.unitMs * units / 100) / 10, loaded, task);
     }
   }
   const stats = statsForTask(task);
-  const useWarm = warm ?? (stats.samples > 0);
+  const useWarm = loaded === true ? true : loaded === false ? false : (warm ?? (stats.samples > 0));
   const stepsNum = Number(steps) || 0;
   const nNum = Number(n) || 1;
   const pxScale = pixelsForSize(size) / REF_PIXELS;
@@ -153,13 +165,14 @@ export function estimateMediaSeconds({ task = 'image', size = '1024x1024', steps
   return Math.round(total * 10) / 10;
 }
 
-export function presetEstimates({ shape = 'square', n = 1, previewEvery = 1, refCount = 0, enhance = true } = {}) {
+export function presetEstimates({ shape = 'square', n = 1, previewEvery = 1, refCount = 0, enhance = true, loaded = null } = {}) {
   const stats = statsForTask('image');
   const profiles = loadProfiles();
-  const warm = stats.samples > 0;
+  const warm = loaded === true ? true : loaded === false ? false : stats.samples > 0;
   return {
     shape,
     n,
+    loaded: loaded === null ? warm : !!loaded,
     calibrated: (profiles.global?.samples ?? 0) >= 2,
     samples: profiles.global?.samples ?? 0,
     perStepMs: Math.round(stats.stepMsRef),
@@ -171,7 +184,7 @@ export function presetEstimates({ shape = 'square', n = 1, previewEvery = 1, ref
         ...p,
         size,
         seconds: estimateMediaSeconds({ size, n, steps: p.steps, trueCfg: p.trueCfg, warm,
-          quality: id, previewEvery, refCount, enhance }),
+          quality: id, previewEvery, refCount, enhance, loaded }),
       };
     }),
   };

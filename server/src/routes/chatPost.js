@@ -2,6 +2,7 @@
 // routes/chat.js (same plugin scope, so the requireAuth hook applies). Split
 // out when the original chat.js outgrew one file.
 import { db } from '../db.js';
+import { submissionHash, submissionKey } from '../idempotency.js';
 import { ipLocation } from '../geoip.js';
 import { countInputTokens, listModels, streamChat } from '../llama.js';
 import { clientIp } from '../auth.js';
@@ -18,7 +19,7 @@ import { isDiffusionModel } from '../diffusiongen.js';
 import { acquireGpu } from '../gpuqueue.js';
 import { finishRun, isRunLive } from './agent.js';
 import {
-  broadcast, createLiveJob, finishLiveJob, getLiveJob, waitForStoppingJob,
+  broadcast, createLiveJob, finishLiveJob, getLiveJob, saveInterruptedSnapshot, waitForStoppingJob,
 } from '../liveJobs.js';
 import { convDocs, docFullText, retrieveChunks } from '../docs.js';
 // remote providers + cost saver (feat/remote-providers)
@@ -75,6 +76,18 @@ const PROJECT_NUDGE = 'Stop. You are writing a multi-file project as chat text i
   + 'After the workspace opens, create the files with write_file, change them with edit_file, and verify with '
   + 'one-shot commands that exit. Do not paste project code into the chat.';
 
+function messageExists(convId, id) {
+  return id != null && !!db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(id, convId);
+}
+
+// A missing parent must not become a new root: that drops every earlier
+// message off the active path. Use the live leaf, then the newest real row.
+function resolveDanglingParent(convId) {
+  const leaf = db.prepare('SELECT active_leaf_id FROM conversations WHERE id = ?').get(convId)?.active_leaf_id ?? null;
+  if (messageExists(convId, leaf)) return leaf;
+  return db.prepare('SELECT id FROM messages WHERE conv_id = ? ORDER BY id DESC LIMIT 1').get(convId)?.id ?? null;
+}
+
 export function registerChatPost(app) {
   // Start a turn and return immediately. Progress is read from GET /live so a
   // browser refresh or proxy request limit cannot cancel the model invocation.
@@ -82,15 +95,36 @@ export function registerChatPost(app) {
   app.post('/api/conversations/:id/chat', async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
+    const { content, parentId, regenerateFrom } = req.body ?? {};
+    let idempotencyKey;
+    try { idempotencyKey = submissionKey(req.body?.idempotencyKey); }
+    catch (err) { return reply.code(400).send({ error: err.message }); }
+    const requestHash = submissionHash({ content, parentId, regenerateFrom,
+      researchMode: req.body?.researchMode ?? null });
+    if (idempotencyKey) {
+      const previous = db.prepare('SELECT id, status, request_hash FROM chat_jobs WHERE user_id = ? AND conv_id = ? AND idempotency_key = ?')
+        .get(req.user.id, conv.id, idempotencyKey);
+      if (previous) {
+        if (previous.request_hash !== requestHash) return reply.code(409).send({ error: 'idempotency key was used for a different request' });
+        return reply.code(202).send({ convId: conv.id, jobId: previous.id, status: previous.status, duplicate: true });
+      }
+    }
     if (!conv.model_id) return reply.code(400).send({ error: 'no model selected' });
 
     // Stop followed by Send waits for prior cleanup; other concurrent sends still 409.
     await waitForStoppingJob(conv.id);
+    if (idempotencyKey) {
+      const previous = db.prepare('SELECT id, status, request_hash FROM chat_jobs WHERE user_id = ? AND conv_id = ? AND idempotency_key = ?')
+        .get(req.user.id, conv.id, idempotencyKey);
+      if (previous) {
+        if (previous.request_hash !== requestHash) return reply.code(409).send({ error: 'idempotency key was used for a different request' });
+        return reply.code(202).send({ convId: conv.id, jobId: previous.id, status: previous.status, duplicate: true });
+      }
+    }
     if (getLiveJob(conv.id)?.status === 'running') {
       return reply.code(409).send({ error: 'a reply is already generating for this chat' });
     }
 
-    const { content, parentId, regenerateFrom } = req.body ?? {};
     if (regenerateFrom) {
       const src = db.prepare('SELECT role FROM messages WHERE id = ? AND conv_id = ?').get(regenerateFrom, conv.id);
       if (src?.role !== 'assistant') return reply.code(400).send({ error: 'bad regenerateFrom' });
@@ -121,11 +155,9 @@ export function registerChatPost(app) {
           const filtered = checkUserContent(req.user.id, content, 'chat');
           if (!filtered.ok) throw Object.assign(new Error(filtered.reason), { code: 400, filterCode: filtered.code });
           // Explicit null starts a new root; an absent parent uses the current leaf.
+          // A dangling id is repaired onto the saved branch instead of null.
           let parent = parentId !== undefined ? parentId : (conv.active_leaf_id ?? null);
-          if (parent != null && !db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id)) {
-            parent = db.prepare('SELECT active_leaf_id FROM conversations WHERE id = ?').get(conv.id)?.active_leaf_id ?? null;
-            if (parent != null && !db.prepare('SELECT 1 FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id)) parent = null;
-          }
+          if (parent != null && !messageExists(conv.id, parent)) parent = resolveDanglingParent(conv.id);
           // Continue under an interrupted assistant when that row is durable.
           if (/^(continue|keep going|resume|go on|try again|pick up)\b/i.test(content.trim()) && parent != null) {
             const leaf = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(parent, conv.id);
@@ -138,7 +170,7 @@ export function registerChatPost(app) {
           promptLeaf = insertMessage(conv.id, parent, 'user', content);
           setLeaf(conv.id, promptLeaf.id);
         }
-        job = createLiveJob(conv.id, req.user.id, promptLeaf);
+        job = createLiveJob(conv.id, req.user.id, promptLeaf, idempotencyKey, requestHash);
       })();
     }
     catch (err) {
@@ -152,6 +184,20 @@ export function registerChatPost(app) {
     setImmediate(() => { void processTurn().catch((err) => {
       req.log.error({ err }, 'detached chat turn failed');
       send({ type: 'error', message: String(err.message ?? err) });
+      if (!job.finalMsg && promptLeaf) {
+        try {
+          const saved = saveInterruptedSnapshot({
+            convId: conv.id,
+            promptId: promptLeaf.id,
+            modelId: conv.model_id,
+            state: job.state,
+            aborted: job.abort.signal.aborted,
+          });
+          if (saved) job.finalMsg = saved;
+        } catch (parkErr) {
+          req.log.error({ err: parkErr }, 'failed to keep partial reply');
+        }
+      }
       finishLiveJob(job, 'error');
       for (const fn of [...job.listeners]) {
         try { fn({ type: 'stream_end' }); } catch { /* ignore */ }

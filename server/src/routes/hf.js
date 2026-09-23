@@ -142,7 +142,7 @@ export default async function hfRoutes(app) {
   // notes/HUB-3.md: the Discover/My-Models split LM Studio and Unsloth
   // Studio both make, that the search-only Hub didn't have a page for.
   app.get('/api/hf/local', async (req, reply) => {
-    try { return listLocalModels(); }
+    try { return listLocalModels({ downloads: listDownloads() }); }
     catch (e) { return reply.code(500).send({ error: e.message }); }
   });
 

@@ -26,8 +26,18 @@ const jobs = new Map();
 const DONE_TTL_MS = 5 * 60_000;
 const SNAPSHOT_DELAY_MS = 2_000;
 const MAX_STORED_EVENTS = 250;
+// Process-local raw event ring. A cursor replay uses it; a gap or a restart
+// falls back to the folded snapshot. The ring is not copied into SQLite.
+const EVENT_LOG_LIMIT = 400;
 const writeSnapshot = db.prepare(`UPDATE chat_jobs SET status = ?, state_json = ?, final_msg_json = ?,
   updated_at = unixepoch(), finished_at = CASE WHEN ? = 'running' THEN NULL ELSE unixepoch() END WHERE id = ?`);
+const insertPartial = db.prepare(`INSERT INTO messages (conv_id, parent_id, role, content, thinking, model_id, run_id, search_json)
+  VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?)`);
+const messageById = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?');
+const promptById = db.prepare('SELECT id, role FROM messages WHERE id = ? AND conv_id = ?');
+const assistantChildren = db.prepare(`SELECT * FROM messages WHERE conv_id = ? AND parent_id = ? AND role = 'assistant' ORDER BY id DESC`);
+const convLeaf = db.prepare('SELECT active_leaf_id, model_id FROM conversations WHERE id = ?');
+const setConvLeaf = db.prepare('UPDATE conversations SET active_leaf_id = ?, updated_at = unixepoch() WHERE id = ?');
 
 function storedState(job) {
   // Image previews are transient binary data. Persist the rest so a reconnect
@@ -42,6 +52,7 @@ function storedState(job) {
     if (event?.type !== 'tool_call' || !event.args?.content || event.args.content.length <= 8_000) return event;
     return { ...event, args: { ...event.args, content: event.args.content.slice(0, 8_000) } };
   });
+  state.seq = job.seq ?? 0;
   return state;
 }
 
@@ -71,21 +82,141 @@ export function getStoredLiveJob(convId, userId, jobId = null) {
     convId: row.conv_id, ...state, finalMsg };
 }
 
+function partialText(state) {
+  let text = String(state?.text || '').trim();
+  const write = state?.lastWrite || (state?.liveTool?.content ? state.liveTool : null);
+  if (write?.path && write?.content && !text.includes(write.path)) {
+    const lang = String(write.path).split('.').pop() || '';
+    text += `${text ? '\n\n' : ''}// ${write.path}\n\`\`\`${lang}\n${write.content}\n\`\`\``;
+  } else if (write?.path && !text.includes(write.path)) {
+    text += `${text ? '\n\n' : ''}(was writing \`${write.path}\` — check Project files)`;
+  }
+  if (Array.isArray(state?.events) && state.events.length && !text) {
+    const tools = state.events.filter((e) => e.type === 'tool_call').map((e) => e.name).filter(Boolean);
+    if (tools.length) text = `Work in progress (${[...new Set(tools)].join(', ')}). Check Project files for what was written.`;
+  }
+  return text;
+}
+
+// Same markers as persistInterruptedReply, so "continue" can see the row.
+function interruptedBody(state, aborted) {
+  const reason = state?.error
+    ? String(state.error)
+    : aborted
+      ? 'Stopped by user.'
+      : 'Connection or generation interrupted.';
+  let text = partialText(state);
+  if (!text) text = '_(no text yet)_';
+  if (!text.includes(reason) && !text.includes('Interrupted:') && !text.includes('Stopped')) {
+    text += `\n\n> Interrupted: ${reason}`;
+  }
+  if (!/say \*\*continue\*\*|say continue/i.test(text)) {
+    text += `\n\n_Say **continue** to pick up from here — project files already written stay put._`;
+  }
+  return text;
+}
+
+function findParkedAssistant(convId, promptId, partial) {
+  const needle = String(partial || '').slice(0, 80);
+  return assistantChildren.all(convId, promptId).find((m) => {
+    const content = String(m.content || '');
+    if (!/Interrupted:/.test(content)) return false;
+    if (!needle) return content.startsWith('_(no text yet)_');
+    return content.includes(needle);
+  }) ?? null;
+}
+
+// Only move the leaf when this prompt is still the tip. A later turn must stay put.
+function shouldAdoptLeaf(convId, promptId, leafId) {
+  if (leafId == null) return true;
+  const leaf = messageById.get(leafId, convId);
+  if (!leaf) return true;
+  if (leaf.id === promptId) return true;
+  return leaf.parent_id === promptId && leaf.role === 'assistant';
+}
+
+// Write the in-flight reply into the message tree. Idempotent if that partial
+// was already parked (crash between insert and the job-status update).
+export function saveInterruptedSnapshot({ convId, promptId, modelId = null, state = {}, aborted = false } = {}) {
+  if (!convId || !promptId) return null;
+  const prompt = promptById.get(promptId, convId);
+  if (!prompt || prompt.role !== 'user') return null;
+  const partial = partialText(state);
+  const existing = findParkedAssistant(convId, prompt.id, partial);
+  const conv = convLeaf.get(convId);
+  if (existing) {
+    if (shouldAdoptLeaf(convId, prompt.id, conv?.active_leaf_id ?? null)) setConvLeaf.run(existing.id, convId);
+    return existing;
+  }
+  const search = state.search?.steps?.length ? { ...state.search, active: false, reading: null } : null;
+  const info = insertPartial.run(
+    convId, prompt.id, interruptedBody(state, aborted),
+    state.thinking || null,
+    modelId ?? conv?.model_id ?? null,
+    state.run?.id ?? null,
+    search ? JSON.stringify(search) : null,
+  );
+  const msg = messageById.get(info.lastInsertRowid, convId);
+  if (msg && shouldAdoptLeaf(convId, prompt.id, conv?.active_leaf_id ?? null)) setConvLeaf.run(msg.id, convId);
+  return msg ?? null;
+}
+
 export function reconcileChatJobs() {
   db.prepare("DELETE FROM chat_jobs WHERE status != 'running' AND updated_at < unixepoch() - 7 * 86400").run();
-  const rows = db.prepare("SELECT id, conv_id, prompt_msg_id, state_json FROM chat_jobs WHERE status = 'running'").all();
-  const update = db.prepare("UPDATE chat_jobs SET status = 'interrupted', state_json = ?, updated_at = unixepoch(), finished_at = unixepoch() WHERE id = ?");
-  for (const row of rows) {
+  const rows = db.prepare("SELECT id, conv_id, prompt_msg_id, state_json, final_msg_json FROM chat_jobs WHERE status = 'running'").all();
+  const update = db.prepare(`UPDATE chat_jobs SET status = 'interrupted', state_json = ?, final_msg_json = ?,
+    updated_at = unixepoch(), finished_at = unixepoch() WHERE id = ?`);
+  const tx = db.transaction((row) => {
     let state = {};
-    try { state = JSON.parse(row.state_json); } catch { /* ignore */ }
+    try { state = JSON.parse(row.state_json || '{}'); } catch { /* ignore */ }
     if (!state.userMsg && row.prompt_msg_id) {
-      state.userMsg = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(row.prompt_msg_id, row.conv_id) ?? null;
+      state.userMsg = messageById.get(row.prompt_msg_id, row.conv_id) ?? null;
     }
-    state.error = 'The server restarted while this task was running. Its last progress was saved; inspect the result before continuing. Any in-flight tool outcome may need reconciliation.';
-    update.run(JSON.stringify(state), row.id);
+    if (!state.error) {
+      state.error = 'The server restarted while this task was running. Its last progress was saved; inspect the result before continuing. Any in-flight tool outcome may need reconciliation.';
+    }
+    let saved = null;
+    if (row.final_msg_json) {
+      try {
+        const parsed = JSON.parse(row.final_msg_json);
+        if (parsed?.id) saved = messageById.get(parsed.id, row.conv_id) ?? null;
+      } catch { /* ignore */ }
+    }
+    if (!saved) {
+      saved = saveInterruptedSnapshot({
+        convId: row.conv_id,
+        promptId: row.prompt_msg_id || state.userMsg?.id || null,
+        state,
+      });
+    }
+    update.run(JSON.stringify(state), saved ? JSON.stringify(saved) : null, row.id);
+  });
+  let n = 0;
+  for (const row of rows) {
+    // A job still running in this process will park its own partial on the way out.
+    if (jobs.get(Number(row.conv_id))?.status === 'running') continue;
+    tx(row);
+    n += 1;
   }
-  return rows.length;
+  return n;
 }
+
+function flushRunningJobs() {
+  for (const job of jobs.values()) {
+    if (job.status === 'running') {
+      try { persist(job); } catch { /* process is already going away */ }
+    }
+  }
+}
+
+// systemd restart sends SIGTERM. Flush the live partial first so the next
+// process can park it; then exit, because a listener removes the default kill.
+function flushThenExit(code) {
+  flushRunningJobs();
+  process.exit(code);
+}
+process.once('SIGTERM', () => flushThenExit(143));
+process.once('SIGINT', () => flushThenExit(130));
 
 export function getLiveJob(convId) {
   return jobs.get(Number(convId)) ?? null;
@@ -102,7 +233,7 @@ export function activeChatJobCount() {
   return count;
 }
 
-export function createLiveJob(convId, userId, promptLeaf = null) {
+export function createLiveJob(convId, userId, promptLeaf = null, idempotencyKey = null, requestHash = null) {
   const id = Number(convId);
   const existing = jobs.get(id);
   if (existing?.status === 'running') {
@@ -143,9 +274,11 @@ export function createLiveJob(convId, userId, promptLeaf = null) {
     finalMsg: null,
     settled,
     resolveSettled,
+    seq: 0,
+    eventLog: [],
   };
-  db.prepare("INSERT INTO chat_jobs (id, conv_id, user_id, prompt_msg_id, status, state_json) VALUES (?, ?, ?, ?, 'running', ?)")
-    .run(job.id, id, userId, promptLeaf?.id ?? null, JSON.stringify(job.state));
+  db.prepare("INSERT INTO chat_jobs (id, conv_id, user_id, prompt_msg_id, status, state_json, idempotency_key, request_hash) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)")
+    .run(job.id, id, userId, promptLeaf?.id ?? null, JSON.stringify(job.state), idempotencyKey, requestHash);
   jobs.set(id, job);
   return job;
 }
@@ -310,24 +443,56 @@ export function applyLiveEvent(job, ev) {
   }
 }
 
-export function broadcast(job, ev) {
-  applyLiveEvent(job, ev);
-  queuePersist(job, ev.type === 'done' || ev.type === 'error' || ev.type === 'agent');
-  for (const fn of [...job.listeners]) {
-    try { fn(ev); } catch { /* dead listener */ }
-  }
-}
-
-/** Attach a listener; immediately sends a resume snapshot. Returns unsubscribe. */
-export function attachListener(job, sendFn) {
-  sendFn({
+function resumeSnapshot(job) {
+  return {
     type: 'resume',
     status: job.status,
     jobId: job.id,
     convId: job.convId,
+    seq: job.seq ?? 0,
     ...job.state,
     finalMsg: job.finalMsg,
-  });
+  };
+}
+
+/** Events with seq greater than `after`, or null when the ring no longer contains that cursor. */
+export function eventsAfter(job, after) {
+  const cursor = Number(after);
+  const log = job.eventLog ?? [];
+  if (!Number.isFinite(cursor) || cursor < 0 || !log.length) return null;
+  const last = log[log.length - 1].seq;
+  if (cursor > last || log[0].seq > cursor + 1) return null;
+  return log.filter((event) => event.seq > cursor);
+}
+
+export function broadcast(job, ev) {
+  job.seq = (job.seq ?? 0) + 1;
+  const stamped = { ...ev, seq: job.seq };
+  applyLiveEvent(job, stamped);
+  if (!job.eventLog) job.eventLog = [];
+  job.eventLog.push(stamped);
+  if (job.eventLog.length > EVENT_LOG_LIMIT) job.eventLog.splice(0, job.eventLog.length - EVENT_LOG_LIMIT);
+  // The first tokens must reach SQLite immediately. A crash inside the 2s
+  // debounce used to leave state_json empty, so restart had nothing to park.
+  const hasPartial = !!(job.state.text || job.state.thinking);
+  const firstPartial = hasPartial && !job.persistedPartial;
+  if (firstPartial) job.persistedPartial = true;
+  queuePersist(job, stamped.type === 'done' || stamped.type === 'error' || stamped.type === 'agent' || firstPartial);
+  for (const fn of [...job.listeners]) {
+    try { fn(stamped); } catch { /* dead listener */ }
+  }
+}
+
+/** Attach a listener. A live cursor replays only unseen events; a gap sends the folded snapshot. */
+export function attachListener(job, sendFn, { after = 0 } = {}) {
+  const cursor = Number(after);
+  const replay = Number.isFinite(cursor) && cursor > 0 ? eventsAfter(job, cursor) : null;
+  if (replay) {
+    for (const event of replay) sendFn(event);
+    if (!replay.length && job.status !== 'running') sendFn(resumeSnapshot(job));
+  } else {
+    sendFn(resumeSnapshot(job));
+  }
   if (job.status !== 'running') {
     // one-shot for finished jobs
     return () => {};

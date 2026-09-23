@@ -34,6 +34,7 @@
   let unloading = $state(false);
   let loadingModel = $state(false);
   let modelOperation = $state(null);
+  let modelActionTarget = $state('');
   let defaultModel = $state('');
   let model = $state('auto');
   let prompt = $state('');
@@ -246,7 +247,7 @@
       models = m.models ?? [];
       defaultModel = m.default_model;
       modelOperation = m.model_operation ?? null;
-      if (selected?.loaded || modelOperation?.type === 'error') loadingModel = false;
+      settleModelAction();
       gallery = saved;
       const pick = sessionStorage.getItem('dp:media-selection');
       if (pick) {
@@ -257,6 +258,16 @@
     } catch (e) { error = e.message; }
     finally { if (mounted) loading = false; }
   }
+  function settleModelAction() {
+    const target = models.find((item) => item.id === modelActionTarget);
+    if (modelOperation?.type === 'error') {
+      loadingModel = false;
+      unloading = false;
+      return;
+    }
+    if (target?.loaded && modelOperation?.type !== 'loading') loadingModel = false;
+    if (target && !target.loaded && modelOperation?.type !== 'unloading') unloading = false;
+  }
   async function refreshModelStatus() {
     try {
       const m = await api('/api/images/models');
@@ -265,12 +276,13 @@
       models = m.models ?? [];
       defaultModel = m.default_model;
       modelOperation = m.model_operation ?? null;
-      if (models.find((item) => item.id === selected?.id)?.loaded || modelOperation?.type === 'error') loadingModel = false;
+      settleModelAction();
     } catch { bridgeOk = false; }
   }
   async function warmSelected() {
     if (!selected || loadingModel || selected.loaded) return;
     loadingModel = true;
+    modelActionTarget = selected.id;
     try {
       await api('/api/images/warm', { method: 'POST', body: { model: selected.id } });
       await refreshModelStatus();
@@ -280,19 +292,19 @@
   async function unloadSelected() {
     if (!selected || unloading) return;
     unloading = true;
+    modelActionTarget = selected.id;
     try {
       await api('/api/images/unload', { method: 'POST', body: { model: selected.id } });
-      await load();
-      toast('Model unloaded from memory', 'ok');
-    } catch (e) { toast(e.message ?? e.error, 'error'); }
-    finally { unloading = false; }
+      await refreshModelStatus();
+      toast('Releasing model memory in the background', 'ok');
+    } catch (e) { unloading = false; toast(e.message ?? e.error, 'error'); }
   }
   onMount(() => {
     load();
     loadEstimates();
     resourceTimer = setInterval(() => {
       if (app.user?.role === 'owner' && imageOptionsOpen && task === 'image') void refreshResources();
-      if (loadingModel || modelOperation?.type === 'loading') void refreshModelStatus();
+      if (loadingModel || unloading || ['loading', 'unloading'].includes(modelOperation?.type)) void refreshModelStatus();
     }, 3000);
     jobsApi = useMediaJobs();
   });
@@ -488,7 +500,7 @@
   <header class="studio-head">
     <div><span class="studio-kicker">DUCKPOND STUDIO</span><h1>{task === 'image' ? 'Image Studio' : 'Media Studio'}</h1><p>{task === 'image' ? 'Create and edit with Qwen-Image 2.1. Your work keeps going when you leave.' : 'Create images, speech, music, and video in one workspace.'}</p></div>
     <div class="head-actions">
-      {#if task === 'image'}<span class="engine-badge" class:engine-offline={!bridgeOk || modelOperation?.type === 'error'} role="status"><span class="engine-dot"></span>{!bridgeOk ? 'Engine offline' : selected?.loaded ? 'Model ready' : modelOperation?.type === 'error' ? 'Load failed' : modelOperation?.type === 'loading' || loadingModel ? 'Loading model' : readyModels.length ? 'Ready on demand' : 'Model needed'}</span>{/if}
+      {#if task === 'image'}<span class="engine-badge" class:engine-offline={!bridgeOk || modelOperation?.type === 'error'} role="status"><span class="engine-dot"></span>{!bridgeOk ? 'Engine offline' : modelOperation?.type === 'error' ? 'Model action failed' : modelOperation?.type === 'unloading' || unloading ? 'Unloading model' : modelOperation?.type === 'loading' || loadingModel ? 'Loading model' : selected?.loaded ? 'Model ready' : readyModels.length ? 'Ready on demand' : 'Model needed'}</span>{/if}
       <button class="subtle" onclick={load} disabled={loading} aria-label="Refresh models and gallery"><RefreshCw size={15} /><span>Refresh</span></button>
       {#if app.user?.role === 'owner'}
         <button class="subtle" aria-pressed={mediaJobs.paused}
@@ -514,7 +526,7 @@
 
         {#if selected}<div class="image-engine" role="status">
           <div class="image-engine-mark"><ImageIcon size={18} /></div>
-          <div class="image-engine-copy"><strong>{selected.id.split('/').pop()}</strong><span>{modelOperation?.model === selected.id && modelOperation.type === 'error' ? modelOperation.message : modelOperation?.model === selected.id && modelOperation.type === 'loading' || loadingModel ? 'Loading weights into memory. You can leave this page.' : selected.loaded ? 'Loaded and ready to create' : 'On disk · loads automatically when you create'}</span></div>
+          <div class="image-engine-copy"><strong>{selected.id.split('/').pop()}</strong><span>{modelOperation?.model === selected.id && modelOperation.type === 'error' ? modelOperation.message : modelOperation?.model === selected.id && (modelOperation.type === 'unloading' || unloading) ? 'Releasing GPU memory. You can leave this page.' : modelOperation?.model === selected.id && (modelOperation.type === 'loading' || loadingModel) ? 'Loading weights into memory. You can leave this page.' : selected.loaded ? 'Loaded and ready to create' : 'On disk · loads automatically when you create'}</span></div>
           {#if app.user?.role === 'owner' && selected.kind !== 'comfy'}
             {#if selected.loaded}<button class="engine-action" onclick={unloadSelected} disabled={unloading || generating} title="Free memory used by the image model">{unloading ? 'Unloading…' : 'Unload'}</button>
             {:else}<button class="engine-action" onclick={warmSelected} disabled={loadingModel || modelOperation?.type === 'loading' || generating || !bridgeOk}>{loadingModel || modelOperation?.type === 'loading' ? 'Loading…' : 'Load model'}</button>{/if}

@@ -98,12 +98,20 @@ export async function warmImageModel(model) {
   return bridgePost('/v1/models/warm', { model: model || 'auto' });
 }
 
+export async function cancelBridgeJob(task, tag) {
+  const endpoint = ENDPOINTS[task];
+  if (!endpoint || !/^[A-Za-z0-9_-]{1,80}$/.test(tag ?? '')) return { ok: true, already: true };
+  return bridgePost(`${endpoint}/cancel`, { tag });
+}
+
 // GPU mutual-exclusion policy (one GPU): a chat-LLM load force-unloads any
 // resident bridge media model first. Never call this while a generation is
 // running — callers must check activeMediaJobCount() === 0 first, so VRAM is
 // never yanked out from under a running denoise/TTS job.
 export async function evictBridgeModels(log) {
   const unloaded = [];
+  const progress = await bridgeGet('/v1/progress?since=999999999').catch(() => null);
+  if (progress?.active) throw Object.assign(new Error('The media engine is generating. Wait for it to finish before loading another GPU model.'), { status: 409 });
   const b = await bridgeModels().catch(() => null);
   for (const m of b?.models ?? []) {
     if (!m.loaded) continue;
@@ -112,6 +120,7 @@ export async function evictBridgeModels(log) {
       unloaded.push(m.id);
     } catch (e) {
       log?.warn({ err: e, model: m.id }, 'bridge evict-before-load failed');
+      throw e;
     }
   }
   return unloaded;
@@ -234,11 +243,9 @@ export async function generateViaBridge({
   const post = bridgePost(endpoint, body)
     .then((r) => ({ ok: true, r })).catch((e) => ({ ok: false, e }));
 
-  // A closed chat/studio connection must actually stop the GPU job, not just
-  // stop listening to it — otherwise a cancelled generation keeps burning
-  // GPU time (and VRAM) with nobody watching. The bridge checks CANCEL_TAGS
-  // between denoise steps, so this takes effect within one step.
-  const onAbort = () => { bridgePost(`${endpoint}/cancel`, { tag }).catch(() => {}); };
+  // Explicit cancellation reaches the bridge. Studio jobs have no browser
+  // abort signal; closing the page cannot trigger this path.
+  const onAbort = () => { void cancelBridgeJob(task, tag).catch(() => {}); };
   if (signal) {
     if (signal.aborted) onAbort();
     else signal.addEventListener('abort', onAbort, { once: true });
@@ -347,15 +354,25 @@ export async function generateViaBridge({
   }
 
   if (!settled) {
-    // Caller disconnected or the run was aborted: stop watching, but keep a
-    // detached save — if the bridge finishes the job anyway (cancel landed
-    // between steps), the media still lands in the gallery on next load.
+    // Give the bridge time to confirm the stop before callers release their
+    // GPU lease. A native call can take longer than one denoise step; then the
+    // durable job runner keeps reconciling while the engine is still active.
+    const result = await Promise.race([post, sleep(ABORT_GRACE_MS).then(() => null)]);
+    if (result) {
+      if (result.ok) {
+        const saved = await saveResults(result);
+        if (!retainBridgeResult) void acknowledgeBridgeResult(tag).catch(() => {});
+        return saved;
+      }
+      if (result.e?.status === 499) return { images: [], enhanced: null, model_used: null, task, cancelled: true };
+      throw result.e;
+    }
     void post.then(async (r) => {
       if (!r.ok) return;
       await saveResults(r);
       if (!retainBridgeResult) void acknowledgeBridgeResult(tag).catch(() => {});
     }).catch(() => {});
-    return { images: [], enhanced: null, model_used: null, task, cancelled: true };
+    return { images: [], enhanced: null, model_used: null, task, cancelled: true, stopPending: true };
   }
   const result = await post;
   if (!result.ok) throw result.e;
@@ -408,6 +425,7 @@ export function saveBridgeOutput({ userId, prompt, task, body, resolvedModel, ta
     images: saved,
     enhanced: result.prompt_enhanced ?? null,
     model_used: result.model_used ?? null,
+    load_ms: Number(result.load_ms) || 0,
     steps_used: result.steps_used ?? body.steps ?? null,
     steps_requested: result.steps_requested ?? body.steps ?? null,
     steps_capped: !!result.steps_capped,

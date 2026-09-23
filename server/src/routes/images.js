@@ -5,15 +5,15 @@ import { join } from 'node:path';
 import { requireAuth } from '../auth.js';
 import { db } from '../db.js';
 import { checkUserContent } from '../contentFilter.js';
-import { bridgePost, bridgeModels, IMAGES_DIR, MEDIA_DIR, warmImageModel } from '../imagegen.js';
+import { bridgeGet, bridgePost, bridgeModels, IMAGES_DIR, MEDIA_DIR, warmImageModel } from '../imagegen.js';
 import { acquireGpu } from '../gpuqueue.js';
 import { activeMediaJobCount, createMediaJob } from '../mediaJobs.js';
 import { prepareMediaGpu } from '../mediaGpu.js';
 import { gpuVram, listModels, reclaimIdleModel } from '../llama.js';
 
 const MIME = { png: 'image/png', webp: 'image/webp', mp4: 'video/mp4', wav: 'audio/wav' };
-let warming = false;
-let warmState = null;
+let modelAction = null; // { type, model } while an owner action is running
+let actionState = null;
 
 export default async function imageRoutes(app) {
   app.addHook('preHandler', requireAuth);
@@ -21,23 +21,28 @@ export default async function imageRoutes(app) {
   // model list for the picker: auto + every ready model on the bridge, grouped by task
   app.get('/api/images/models', async () => {
     const m = await bridgeModels().catch(() => ({ available: false, models: [] }));
-    if (!m.available) return { available: false, models: [] };
-    if (warmState?.type === 'error' && m.models.some((item) => item.id === warmState.model && item.loaded)) warmState = null;
-    return { available: true, models: m.models, default_model: m.default_model ?? 'auto', model_operation: warmState ?? m.model_operation };
+    if (!m.available) return { available: false, models: [], model_operation: actionState };
+    if (actionState?.type === 'error' && actionState.action === 'load'
+      && m.models.some((item) => item.id === actionState.model && item.loaded)) actionState = null;
+    return { available: true, models: m.models, default_model: m.default_model ?? 'auto', model_operation: actionState ?? m.model_operation };
   });
 
   // Start the slow Qwen load in the server. The browser receives an immediate
   // response and can watch /api/images/models through a tunnel or after refresh.
   app.post('/api/images/warm', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
-    if (warming || activeMediaJobCount() > 0) return reply.code(409).send({ error: 'The image engine is busy. Wait for the current job to finish.' });
     const model = String(req.body?.model ?? '');
+    if (modelAction) {
+      if (modelAction.type === 'loading' && modelAction.model === model) return reply.code(202).send({ ok: true, loading: true, model });
+      return reply.code(409).send({ error: 'Another model action is running.' });
+    }
+    if (activeMediaJobCount() > 0) return reply.code(409).send({ error: 'The image engine is busy. Wait for the current job to finish.' });
     const catalog = await bridgeModels();
     const selected = catalog.models?.find((m) => m.id === model && m.task === 'image' && m.ready);
     if (!selected || selected.className !== 'QwenImage21Pipeline') return reply.code(400).send({ error: 'Choose a ready Qwen-Image 2.1 model.' });
-    if (selected.loaded) return { ok: true, loaded: true };
-    warming = true;
-    warmState = { type: 'loading', model };
+    if (selected.loaded) return { ok: true, loaded: true, already: true };
+    modelAction = { type: 'loading', model };
+    actionState = { type: 'loading', model };
     void (async () => {
       let release = null;
       try {
@@ -45,13 +50,13 @@ export default async function imageRoutes(app) {
         await prepareMediaGpu({ models: catalog, requested: model, task: 'image',
           memory: gpuVram, list: listModels, reclaim: reclaimIdleModel });
         await warmImageModel(model);
-        warmState = null;
+        actionState = null;
       } catch (error) {
-        warmState = { type: 'error', model, message: error.message };
+        actionState = { type: 'error', action: 'load', model, message: error.message };
         app.log.error({ err: error, model }, 'Image model prewarm failed');
       } finally {
         release?.();
-        warming = false;
+        modelAction = null;
       }
     })();
     return reply.code(202).send({ ok: true, loading: true, model });
@@ -59,11 +64,38 @@ export default async function imageRoutes(app) {
 
   app.post('/api/images/unload', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
-    if (warming || activeMediaJobCount() > 0) return reply.code(409).send({ error: 'Wait for the image engine to finish before unloading.' });
     const model = req.body?.model;
     if (typeof model !== 'string' || !model) return reply.code(400).send({ error: 'model required' });
-    try { return await bridgePost('/v1/models/unload', { model }); }
-    catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
+    if (modelAction) {
+      if (modelAction.type === 'unloading' && modelAction.model === model) return reply.code(202).send({ ok: true, unloading: true, model });
+      return reply.code(409).send({ error: 'Another model action is running.' });
+    }
+    if (activeMediaJobCount() > 0) return reply.code(409).send({ error: 'Wait for the image engine to finish before unloading.' });
+    const catalog = await bridgeModels();
+    if (!catalog.available) return reply.code(502).send({ error: 'The media engine is offline.' });
+    const selected = catalog.models.find((item) => item.id === model);
+    if (!selected) return reply.code(404).send({ error: 'Model not found on this engine.' });
+    if (!selected.loaded) return { ok: true, model, loaded: false, already: true };
+    const progress = await bridgeGet('/v1/progress?since=999999999').catch(() => null);
+    if (!progress) return reply.code(502).send({ error: 'Could not confirm whether the media engine is busy.' });
+    if (progress.active) return reply.code(409).send({ error: 'A media generation is active. Wait for it to finish.' });
+    modelAction = { type: 'unloading', model };
+    actionState = { type: 'unloading', model };
+    void (async () => {
+      let release = null;
+      try {
+        release = await acquireGpu();
+        await bridgePost('/v1/models/unload', { model });
+        actionState = null;
+      } catch (error) {
+        actionState = { type: 'error', action: 'unload', model, message: error.message };
+        app.log.error({ err: error, model }, 'Image model unload failed');
+      } finally {
+        release?.();
+        modelAction = null;
+      }
+    })();
+    return reply.code(202).send({ ok: true, unloading: true, model });
   });
 
   app.get('/api/images', async (req) => db.prepare(`

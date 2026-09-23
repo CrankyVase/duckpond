@@ -10,6 +10,7 @@ import {
   HF_HOME, MODEL_ROOTS, cacheDir, groupVariants, includeMatches, mainSnapshotDir, quantLabel,
 } from './hfHub.js';
 import { modelKind } from './modelKind.js';
+import { installationState } from './installState.js';
 
 const COMFY_MODELS_DIR = process.env.COMFY_MODELS_DIR ?? '/var/mnt/modelnvme/ai/duckpond-comfy/models';
 
@@ -35,6 +36,7 @@ function walkFiles(dir, base = dir) {
 export function completeGgufFiles(files) {
   const ggufs = files.filter((f) => /\.gguf$/i.test(f.path));
   if (!ggufs.length) return false;
+  if (ggufs.some((f) => f.size <= 0)) return false;
   const names = new Set(files.map((f) => f.path.toLowerCase()));
   return ggufs.every((f) => {
     const shard = f.path.match(/^(.*)-(\d{5})-of-(\d{5})\.gguf$/i);
@@ -60,18 +62,19 @@ function repoIdFromCacheDirName(dirName) {
 // commit. A cancel (or a crash) landing in that gap leaves a fully-written,
 // real blob on disk with nothing in any snapshot dir referencing it: the
 // repo scans as empty even though it's actually holding real gigabytes.
-// Sums every blob that isn't a live ".incomplete" transfer, real usage
-// whether or not anything currently links to it — good enough to flag
-// "there's reclaimable space here" without walking the symlink graph.
-function blobBytes(repoDir) {
+// Sum blobs, including partial transfers. A cancelled download can leave
+// only a .incomplete file and no snapshot entry; it still needs a visible
+// repair path in Installed.
+function blobFootprint(repoDir) {
   let names;
-  try { names = readdirSync(join(repoDir, 'blobs')); } catch { return 0; }
+  try { names = readdirSync(join(repoDir, 'blobs')); } catch { return { bytes: 0, partial: false }; }
   let total = 0;
+  let partial = false;
   for (const n of names) {
-    if (n.endsWith('.incomplete')) continue;
+    if (n.endsWith('.incomplete')) partial = true;
     try { total += statSync(join(repoDir, 'blobs', n)).size; } catch { /* vanished mid-scan */ }
   }
-  return total;
+  return { bytes: total, partial };
 }
 
 /** One HF-cache repo -> a "My Models" row, or null when there's nothing on disk at all. */
@@ -89,6 +92,9 @@ function hfCacheRepoEntry(dirName) {
         const variantFiles = files.filter((f) => includeMatches(v.include, f.path));
         return {
           name: v.name, include: v.include, size: v.size,
+          fileCount: variantFiles.length,
+          files: variantFiles.map((file) => ({ path: file.path, size: file.size })),
+          filesTruncated: variantFiles.length > 100,
           quant: quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null),
           containsGguf: variantFiles.some((f) => /\.gguf$/i.test(f.path)),
           chatCompatible: completeGgufFiles(variantFiles),
@@ -110,8 +116,8 @@ function hfCacheRepoEntry(dirName) {
   }
   // No usable snapshot — see if there's an orphaned blob explaining why
   // "I downloaded this" doesn't match "it's not in my list".
-  const orphaned = blobBytes(repoDir);
-  if (orphaned < 1024) return null; // a few stray KB isn't worth reporting
+  const orphaned = blobFootprint(repoDir);
+  if (orphaned.bytes < 1024) return null; // a few stray KB isn't worth reporting
   let mtimeMs = Date.now();
   try { mtimeMs = statSync(repoDir).mtimeMs; } catch { /* repoDir vanished mid-scan */ }
   return {
@@ -120,9 +126,10 @@ function hfCacheRepoEntry(dirName) {
     repoDir,
     kind: 'broken',
     task: modelKind(repoId),
-    totalBytes: orphaned,
+    totalBytes: orphaned.bytes,
     variants: [],
     broken: true,
+    repairReason: orphaned.partial ? 'Partial transfer has no complete files yet.' : 'Downloaded data has no usable file entry.',
     updatedAt: new Date(mtimeMs).toISOString(),
   };
 }
@@ -171,6 +178,9 @@ function listPlainDirModels() {
           name: displayName.split('/').pop(),
           include: join(realRoot, parts[0].path),
           size,
+          fileCount: parts.length,
+          files: parts.map((file) => ({ path: file.path, size: file.size })),
+          filesTruncated: parts.length > 100,
           quant: quantLabel(parts[0].path) ?? 'GGUF',
           containsGguf: true,
           chatCompatible: completeGgufFiles(parts),
@@ -202,18 +212,86 @@ export function listMediaComponents(root = COMFY_MODELS_DIR) {
     kind: 'components',
     task,
     totalBytes: parts.reduce((n, f) => n + f.size, 0),
-    variants: parts.map((f) => ({ name: f.path, include: null, size: f.size, quant: null })),
+    variants: parts.map((f) => ({ name: f.path, include: null, size: f.size, fileCount: 1,
+      files: [{ path: f.path, size: f.size }], filesTruncated: false, quant: null })),
     updatedAt: new Date(Math.max(...parts.map((f) => f.mtimeMs))).toISOString(),
   }));
+}
+
+function transferActive(downloads, repoId, include, any = false) {
+  if (!repoId || !Array.isArray(downloads)) return false;
+  const repo = String(repoId).toLowerCase();
+  return downloads.some((job) => {
+    if (!job || String(job.repoId ?? '').toLowerCase() !== repo) return false;
+    if (job.state !== 'running' && job.state !== 'cancelling') return false;
+    if (any) return true;
+    // A whole-repo transfer covers every variant. A variant with no include
+    // is the whole-repo row, so it only matches that same transfer.
+    if (job.include == null || job.include === '') return true;
+    if (include == null || include === '') return false;
+    return job.include === include;
+  });
+}
+
+// Caller-supplied resident/verified records. File bytes never count as either.
+function callerFact(list, row, variant) {
+  if (!Array.isArray(list)) return null;
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue;
+    const repoOk = entry.repoId == null || String(entry.repoId).toLowerCase() === String(row.repoId ?? '').toLowerCase();
+    const includeOk = entry.include == null || entry.include === variant?.include;
+    const pathOk = entry.path == null || entry.path === variant?.include;
+    if (!repoOk || !includeOk || !pathOk) continue;
+    if (entry.repoId == null && entry.include == null && entry.path == null) continue;
+    return entry;
+  }
+  return null;
+}
+
+function annotateRow(row, downloads, context) {
+  const bundleFiles = (row.variants ?? []).flatMap((variant) => variant.files ?? []);
+  if (row.broken || !(row.variants ?? []).length) {
+    row.installation = installationState({
+      filesPresent: row.totalBytes > 0,
+      bytes: row.totalBytes,
+      incomplete: true,
+      downloading: transferActive(downloads, row.repoId, null, true),
+      note: row.repairReason,
+    });
+  }
+  for (const variant of row.variants ?? []) {
+    const files = variant.files ?? [];
+    const gguf = variant.containsGguf === true || files.some((file) => /\.gguf$/i.test(file.path));
+    const base = String(variant.name ?? '').split('/').pop();
+    const chatReady = row.task === 'chat' && gguf && variant.chatCompatible === true && !!variant.include
+      && !/(?:^|[-_.])(mmproj|mtp|dflash|eagle-?3)(?:[-_.]|$)/i.test(base);
+    const verified = callerFact(context.verified, row, variant);
+    const resident = callerFact(context.resident ?? context.loaded, row, variant);
+    variant.installation = installationState({
+      presentFiles: files,
+      bundleFiles,
+      downloading: transferActive(downloads, row.repoId, variant.include),
+      incompleteShard: gguf && variant.chatCompatible === false ? true : undefined,
+      runtimeCompatible: chatReady,
+      loaded: !!(resident && resident.loaded !== false && resident.resident !== false),
+      verifiedAt: verified ? (verified.at ?? verified.verifiedAt ?? (verified.verified === true ? true : null)) : null,
+      verified: verified?.verified === true ? true : undefined,
+    });
+    if (files.length > 100) variant.files = files.slice(0, 100);
+  }
 }
 
 /**
  * Everything currently on disk, newest first. Each row is one repo (HF cache)
  * or one model/shard-family (plain dir), with every downloaded quant listed
  * so the UI can show per-quant delete without a second lookup.
+ * `downloads` are active transfer records; `resident` / `verified` are optional
+ * caller facts. Neither file size nor a preset alias proves a successful task.
  */
-export function listLocalModels() {
+export function listLocalModels(context = {}) {
+  const downloads = Array.isArray(context?.downloads) ? context.downloads : [];
   const rows = [...listHfCacheModels(), ...listPlainDirModels(), ...listMediaComponents()];
+  for (const row of rows) annotateRow(row, downloads, context ?? {});
   rows.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   return {
     models: rows,

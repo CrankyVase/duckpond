@@ -5,6 +5,7 @@
   import ModelPicker from './ModelPicker.svelte';
   import Clapperboard from '@lucide/svelte/icons/clapperboard';
   import AudioWaveform from '@lucide/svelte/icons/audio-waveform';
+  import Activity from '@lucide/svelte/icons/activity';
   import BarChart3 from '@lucide/svelte/icons/bar-chart-3';
   import Cloud from '@lucide/svelte/icons/cloud';
   import Download from '@lucide/svelte/icons/download';
@@ -48,6 +49,8 @@
   {#if app.view === 'chat'}
     <div class="desk ctxwrap"><ContextBar /></div>
   {/if}
+  {#if app.sidebarCollapsed}<button class="ghost iconb" onclick={() => window.dispatchEvent(new Event('dp:hardware-toggle'))}
+    title="Hardware monitor" aria-label="Show or hide hardware monitor"><Activity size={18} /></button>{/if}
   {#if app.sidebarCollapsed}<button class="ghost iconb" class:onview={app.view === 'settings'}
     onclick={() => { app.view = 'settings'; app.themeStudioOpen = false; }}
     title="Settings" aria-label="Settings">

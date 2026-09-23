@@ -4,6 +4,7 @@
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import Duck from './components/Duck.svelte';
   import DuckGallery from './components/DuckGallery.svelte';
+  import HardwareMonitor from './components/HardwareMonitor.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
   import Sidebar from './components/Sidebar.svelte';
@@ -351,6 +352,7 @@
         {:catch}<div class="panel-loading">Could not open Theme Studio. Reload to try again.</div>{/await}
       {/if}
     </div>
+    <HardwareMonitor />
     {#snippet failed({ error })}
       <div class="crashed">
         <h1>Something broke</h1>
