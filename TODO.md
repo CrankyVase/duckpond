@@ -50,7 +50,7 @@ Implementation staged: authenticated metrics endpoint and a movable, resizable, 
 
 - [x] Offer only requested useful visual outputs in Chat: chart, table, diagram, slides or CSV. Keep old widget renderers for historical messages.
 - [x] Offer direct memory tools only when the user explicitly asks to remember, correct or forget. Keep automatic memory extraction separate.
-- [ ] Inventory old widget use; remove dormant novelty tool schemas, builders and Settings toggles after confirming historical messages still render through a fallback.
+- [ ] Verify historical widget rendering after the lazy-renderer change. The live database had zero saved widget messages on 2026-09-23; dormant novelty tool schemas/builders are removed, and old renderer components remain loadable on demand.
 - [ ] Consolidate model-facing schema, UI label, risk level and executor into one tool registry. Provide small, task-specific tool sets to local models.
 - [ ] Tune Qwen3.8-27B on the installed RX 9070 XT/61 GiB RAM machine: choose a feasible quant, measured context and output reserve, thinking mode, sampling, tool schema length and compaction thresholds. Do not assume the published maximum context fits locally.
 - [ ] Run a small coding suite with bug fix, multi-file app, failed-command recovery, document use, browser inspection, partial reconnect and task completion. Score actual files/evidence, not just prose.

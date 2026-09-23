@@ -1,32 +1,49 @@
 <script>
   // Dispatcher: renders the right component for a widget object { type, data },
   // wrapped in a shell that offers download-as-PNG (except the WebGL map).
-  import WeatherWidget from './widgets/WeatherWidget.svelte';
-  import MapWidget from './widgets/MapWidget.svelte';
-  import GithubWidget from './widgets/GithubWidget.svelte';
-  import WikipediaWidget from './widgets/WikipediaWidget.svelte';
-  import YoutubeWidget from './widgets/YoutubeWidget.svelte';
-  import ImagesWidget from './widgets/ImagesWidget.svelte';
-  import ChartWidget from './widgets/ChartWidget.svelte';
-  import CryptoWidget from './widgets/CryptoWidget.svelte';
-  import DictionaryWidget from './widgets/DictionaryWidget.svelte';
-  import LinkPreviewWidget from './widgets/LinkPreviewWidget.svelte';
-  import MermaidWidget from './widgets/MermaidWidget.svelte';
-  import CurrencyWidget from './widgets/CurrencyWidget.svelte';
-  import NpmWidget from './widgets/NpmWidget.svelte';
-  import HackerNewsWidget from './widgets/HackerNewsWidget.svelte';
-  import TableWidget from './widgets/TableWidget.svelte';
-  import NewsWidget from './widgets/NewsWidget.svelte';
-  import CountdownWidget from './widgets/CountdownWidget.svelte';
-  import ColorPaletteWidget from './widgets/ColorPaletteWidget.svelte';
-  import QrWidget from './widgets/QrWidget.svelte';
-  import FileWidget from './widgets/FileWidget.svelte';
-  import DashboardWidget from './widgets/DashboardWidget.svelte';
   import Download from '@lucide/svelte/icons/download';
+
+  // Historical cards remain readable, but their code is loaded only when a
+  // message actually contains that card. A normal chat avoids the map stack.
+  const LOADERS = {
+    weather: () => import('./widgets/WeatherWidget.svelte'),
+    map: () => import('./widgets/MapWidget.svelte'),
+    github: () => import('./widgets/GithubWidget.svelte'),
+    wikipedia: () => import('./widgets/WikipediaWidget.svelte'),
+    youtube: () => import('./widgets/YoutubeWidget.svelte'),
+    images: () => import('./widgets/ImagesWidget.svelte'),
+    chart: () => import('./widgets/ChartWidget.svelte'),
+    crypto: () => import('./widgets/CryptoWidget.svelte'),
+    dictionary: () => import('./widgets/DictionaryWidget.svelte'),
+    link: () => import('./widgets/LinkPreviewWidget.svelte'),
+    mermaid: () => import('./widgets/MermaidWidget.svelte'),
+    currency: () => import('./widgets/CurrencyWidget.svelte'),
+    npm: () => import('./widgets/NpmWidget.svelte'),
+    hackernews: () => import('./widgets/HackerNewsWidget.svelte'),
+    table: () => import('./widgets/TableWidget.svelte'),
+    news: () => import('./widgets/NewsWidget.svelte'),
+    countdown: () => import('./widgets/CountdownWidget.svelte'),
+    palette: () => import('./widgets/ColorPaletteWidget.svelte'),
+    qr: () => import('./widgets/QrWidget.svelte'),
+    file: () => import('./widgets/FileWidget.svelte'),
+    dashboard: () => import('./widgets/DashboardWidget.svelte'),
+  };
 
   let { widget } = $props();
   let node = $state(null);
   let saving = $state(false);
+  let Component = $state(null);
+  let loadFailed = $state(false);
+  $effect(() => {
+    const loader = LOADERS[widget?.type];
+    Component = null;
+    loadFailed = false;
+    if (!loader) return;
+    let current = true;
+    loader().then((module) => { if (current) Component = module.default; })
+      .catch(() => { if (current) loadFailed = true; });
+    return () => { current = false; };
+  });
   // exclude embeds/WebGL that html-to-image can't capture (map=WebGL,
   // iframes=cross-origin, dashboard=may nest either)
   const NO_SAVE = new Set(['map', 'youtube', 'file', 'dashboard']);
@@ -47,48 +64,12 @@
 </script>
 
 <div class="wcard" bind:this={node}>
-  {#if widget?.type === 'weather'}
-    <WeatherWidget data={widget.data} />
-  {:else if widget?.type === 'map'}
-    <MapWidget data={widget.data} />
-  {:else if widget?.type === 'github'}
-    <GithubWidget data={widget.data} />
-  {:else if widget?.type === 'wikipedia'}
-    <WikipediaWidget data={widget.data} />
-  {:else if widget?.type === 'youtube'}
-    <YoutubeWidget data={widget.data} />
-  {:else if widget?.type === 'images'}
-    <ImagesWidget data={widget.data} />
-  {:else if widget?.type === 'chart'}
-    <ChartWidget data={widget.data} />
-  {:else if widget?.type === 'crypto'}
-    <CryptoWidget data={widget.data} />
-  {:else if widget?.type === 'dictionary'}
-    <DictionaryWidget data={widget.data} />
-  {:else if widget?.type === 'link'}
-    <LinkPreviewWidget data={widget.data} />
-  {:else if widget?.type === 'mermaid'}
-    <MermaidWidget data={widget.data} />
-  {:else if widget?.type === 'currency'}
-    <CurrencyWidget data={widget.data} />
-  {:else if widget?.type === 'npm'}
-    <NpmWidget data={widget.data} />
-  {:else if widget?.type === 'hackernews'}
-    <HackerNewsWidget data={widget.data} />
-  {:else if widget?.type === 'table'}
-    <TableWidget data={widget.data} />
-  {:else if widget?.type === 'news'}
-    <NewsWidget data={widget.data} />
-  {:else if widget?.type === 'countdown'}
-    <CountdownWidget data={widget.data} />
-  {:else if widget?.type === 'palette'}
-    <ColorPaletteWidget data={widget.data} />
-  {:else if widget?.type === 'qr'}
-    <QrWidget data={widget.data} />
-  {:else if widget?.type === 'file'}
-    <FileWidget data={widget.data} />
-  {:else if widget?.type === 'dashboard'}
-    <DashboardWidget data={widget.data} />
+  {#if Component}
+    <Component data={widget.data} />
+  {:else if LOADERS[widget?.type] && !loadFailed}
+    <div class="wunknown" role="status">Loading saved content…</div>
+  {:else if loadFailed}
+    <div class="wunknown">Could not load saved content: {widget?.type}</div>
   {:else}
     <div class="wunknown">Unsupported widget: {widget?.type}</div>
   {/if}
