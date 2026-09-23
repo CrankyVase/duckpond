@@ -148,16 +148,16 @@
       if (id === 'ultra') count = 1;
     }
   }
-  async function loadEstimates() {
+  async function loadEstimates({ quiet = false } = {}) {
     if (task !== 'image') return;
-    estLoading = true;
+    if (!quiet) estLoading = true;
     try {
       const estimateShape = shape === 'photo' ? (refs[0]?.width > refs[0]?.height ? 'landscape' : refs[0]?.width < refs[0]?.height ? 'portrait' : 'square') : shape;
       const params = new URLSearchParams({ shape: estimateShape, n: String(count), previewEvery: String(previewEvery),
         refCount: String(refs.length), enhance: enhance ? '1' : '0' });
       estimates = await api('/api/media/estimates?' + params);
-    } catch { estimates = null; }
-    finally { estLoading = false; }
+    } catch { if (!quiet) estimates = null; }
+    finally { if (!quiet) estLoading = false; }
   }
   const CLIP_SECONDS = [1, 2, 3, 5, 8, 10, 15];
   const SONG_SECONDS = [20, 30, 60, 90, 120, 180];
@@ -263,7 +263,7 @@
     load();
     loadEstimates();
     refreshResources();
-    resourceTimer = setInterval(refreshResources, 3000);
+    resourceTimer = setInterval(() => { refreshResources(); loadEstimates({ quiet: true }); }, 3000);
     jobsApi = useMediaJobs();
   });
   onDestroy(() => {
@@ -509,6 +509,7 @@
             <button type="button" class="image-choice" class:active={preset === 'ultra'} aria-pressed={preset === 'ultra'} onclick={() => selectPreset('ultra')}><strong>Ultra</strong><small>{presetSize('ultra').replace('x', ' × ')} · finest detail</small><span>{presetEta('ultra')}</span></button>
           </div>
           <button class="custom-link" class:active={preset === 'custom'} aria-pressed={preset === 'custom'} onclick={() => selectPreset('custom')}>Use my own settings <span aria-hidden="true">↗</span></button>
+          {#if estimates?.loaded === false}<p class="hint">Times include {fmtSecs(estimates.loadMs / 1000)} to load the model. It unloads after 2 minutes of idle time.</p>{/if}
         </div>
 
         <div class="image-group">
@@ -554,7 +555,7 @@
             </div>
             <div class="option-section"><h4>Model</h4>
               <label class="field"><span>Image model</span><select bind:value={model} disabled={!readyModels.length}><option value="auto">{readyModels.length ? 'Automatic · Qwen-Image 2.1' : loading ? 'Checking models…' : 'No model ready'}</option>{#each readyModels as m}<option value={m.id}>{m.id.split('/').pop()}</option>{/each}</select></label>
-              {#if selected}<div class="runtime-status"><span>{selected.id.split('/').pop()} · {selected.loaded ? 'Loaded' : 'Loads when needed'}</span>{#if app.user?.role === 'owner' && selected.kind !== 'comfy'}<button class="btn" disabled={unloading} onclick={unloadSelected}>{unloading ? 'Unloading…' : 'Unload'}</button>{/if}</div>{/if}
+              {#if selected}<div class="runtime-status"><span>{selected.id.split('/').pop()} · {(estimates?.loaded ?? selected.loaded) ? 'Loaded' : 'Loads when needed'}</span>{#if app.user?.role === 'owner' && selected.kind !== 'comfy'}<button class="btn" disabled={unloading} onclick={unloadSelected}>{unloading ? 'Unloading…' : 'Unload'}</button>{/if}</div>{/if}
               {#if taskModels.some((m) => !m.ready)}<details class="readiness"><summary>{taskModels.filter((m) => !m.ready).length} model(s) need attention</summary>{#each taskModels.filter((m) => !m.ready) as m}<div><strong>{m.id.split('/').pop()}</strong><p>{m.reason}</p></div>{/each}</details>{/if}
             </div>
             <div class="option-section"><h4>Workspace</h4><div class="workspace-actions"><button class="subtle" onclick={load} disabled={loading}><RefreshCw size={14} /> Refresh models and images</button>{#if app.user?.role === 'owner'}<button class="subtle" aria-pressed={mediaJobs.paused} onclick={async () => { try { await pauseMediaQueue(!mediaJobs.paused); } catch (e) { toast(e.message, 'error'); } }}>{mediaJobs.paused ? 'Resume queue' : 'Pause queue'}</button>{/if}</div></div>
@@ -575,7 +576,7 @@
           <button type="button" class="preset" class:active={preset === 'high'} aria-pressed={preset === 'high'} onclick={() => selectPreset('high')}><span class="preset-label">Quality</span><span class="preset-eta">{presetEta('high')}</span></button>
           <button type="button" class="preset" class:active={preset === 'custom'} aria-pressed={preset === 'custom'} onclick={() => selectPreset('custom')}><span class="preset-label">Custom</span><span class="preset-eta">{presetEta('custom')}</span></button>
         </div>
-        {#if estimates}<p class="hint">{estimates.calibrated === false ? 'Times are estimates until the engine has run a few images.' : `Measured on this engine · ${estimates.samples} runs`}</p>{/if}
+        {#if estimates}<p class="hint">{estimates.loaded === false ? `Times include ${fmtSecs(estimates.loadMs / 1000)} to load the model. It unloads after 2 minutes of idle time.` : estimates.calibrated === false ? 'Times are estimates until the engine has run a few images.' : `Measured on this engine · ${estimates.samples} runs`}</p>{/if}
       {/if}
       <label class="field"><span>Model <span class="local-tag">ON DEVICE</span></span><select bind:value={model} disabled={!readyModels.length}>
         <option value="auto">{readyModels.length ? 'Automatic · best available' : loading ? 'Checking your models…' : 'No ready model'}</option>
@@ -584,7 +585,7 @@
       {#if selected}<div class="model-note"><span class="status-dot"></span><span>{selected.id}</span></div>{/if}
       {#if selected}
         <div class="runtime-status">
-          <span>{selected.device === 'cpu' ? 'CPU · system RAM' : 'GPU + system RAM'} · {selected.loaded ? 'Loaded' : 'Loads when needed'}</span>
+          <span>{selected.device === 'cpu' ? 'CPU · system RAM' : 'GPU + system RAM'} · {(estimates?.loaded ?? selected.loaded) ? 'Loaded' : 'Loads when needed'}</span>
           {#if app.user?.role === 'owner' && selected.kind !== 'comfy'}<button class="btn" disabled={unloading} onclick={unloadSelected}>{unloading ? 'Unloading…' : 'Unload model'}</button>{/if}
         </div>
       {/if}
