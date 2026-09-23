@@ -100,6 +100,32 @@ Scope: arbitrary downloaded weights need matching runtime adapters. Unsupported
 and incomplete models must remain visibly distinct from usable ones. Metadata
 readiness is not a guarantee of GPU fit or generation quality.
 
+## Requested for the production redesign — September 23
+
+- [ ] Build an optional, small floating hardware monitor. Unsloth Studio's
+      monitor is the interaction reference: open/close, drag and resize inside
+      the viewport, keep its position on resize, and poll only while visible
+      (its implementation polls every 5 seconds). Its current floating panel
+      shows RAM and VRAM used/total with clear GiB units, usage bars, separate
+      GPU pools when needed, and unknown values rather than fabricated zeroes.
+      Reference: https://github.com/unslothai/unsloth/blob/main/studio/frontend/src/components/floating-monitor.tsx
+- [ ] Extend DuckPond's monitor beyond that reference: CPU load and temperature,
+      GPU load/temperature/VRAM, RAM and swap, SSD used/free and disk activity;
+      show SSD temperature, fan speed and GPU power only where the host exposes
+      reliable sensors. Allow each person to choose, reorder and hide readings,
+      choose compact/expanded layout and refresh interval, and save position and
+      preferences. Explain what every value means in plain-language tooltips.
+      Label dedicated versus shared VRAM and GiB versus GB accurately. Read
+      metrics through an authenticated server endpoint, bound polling and
+      history, and show "unavailable" for unsupported sensors. Keep the panel
+      clear of chat controls and usable on phones.
+- [ ] Use flat colors throughout DuckPond. Remove built-in gradients from
+      backgrounds, themes, cards, loading states, weather cards, login, voice
+      controls, and mascot framing; do not introduce new gradients.
+- [ ] Push reviewed implementation checkpoints to GitHub and update main
+      periodically after the build and release review. Keep the live auto-deploy
+      source protected from partial work; record the commit and deployment state.
+
 
 ## Active work — September 21: MiniMax-informed coding workbench
 
