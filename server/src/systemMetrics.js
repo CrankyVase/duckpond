@@ -2,7 +2,7 @@
 // bytes on the wire; the UI labels binary memory units GiB. Missing sensors
 // stay null. Samples are cached briefly so several open tabs do not multiply
 // sysfs reads or process launches.
-import { readFile, readdir, realpath, statfs } from 'node:fs/promises';
+import { access, readFile, readdir, realpath, statfs } from 'node:fs/promises';
 import { cpus, loadavg } from 'node:os';
 import { dirname } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 const STORAGE_PATH = dirname(process.env.DUCKPOND_DB ?? new URL('../../data/duckpond.db', import.meta.url).pathname);
+const MODEL_STORAGE_PATH = process.env.HF_HOME ?? '/var/mnt/modelnvme/ai/huggingface';
 const finite = (v) => Number.isFinite(v) && v >= 0 ? v : null;
 const textFile = async (path) => readFile(path, 'utf8').catch(() => null);
 const numberFile = async (path) => {
@@ -190,11 +191,13 @@ async function diskTemperature(deviceName) {
 }
 
 async function storageSample() {
-  const [fs, device] = await Promise.all([statfs(STORAGE_PATH).catch(() => null), diskDevice(STORAGE_PATH)]);
+  const modelStorage = await access(MODEL_STORAGE_PATH).then(() => true).catch(() => false);
+  const path = modelStorage ? MODEL_STORAGE_PATH : STORAGE_PATH;
+  const [fs, device] = await Promise.all([statfs(path).catch(() => null), diskDevice(path)]);
   const totalBytes = fs ? fs.blocks * fs.bsize : null;
   const freeBytes = fs ? fs.bavail * fs.bsize : null;
   return {
-    label: 'App storage', totalBytes, freeBytes,
+    label: modelStorage ? 'Model storage' : 'App storage', totalBytes, freeBytes,
     usedBytes: totalBytes != null && freeBytes != null ? Math.max(0, totalBytes - freeBytes) : null,
     readBytesPerSec: device?.readBytesPerSec ?? null,
     writeBytesPerSec: device?.writeBytesPerSec ?? null,

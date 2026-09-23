@@ -14,9 +14,9 @@
     hasGradient, sanitizeEffects, snapshotTheme, theme, toggleFavorite,
   } from '../lib/theme.svelte.js';
   import {
-    ALL_PRESETS, ALL_TOKENS, ANIM_MODES, BROWSE_PRESETS, COLOR_GROUPS,
+    ALL_TOKENS, ANIM_MODES, COLOR_GROUPS,
     DEFAULT_EFFECTS, DEFAULT_LAYOUT, FEATURED_PRESETS, FONT_OPTIONS,
-    filterPresets, GLASS_MODES, LAYOUT_OPTIONS, PRESETS, TOKEN_GROUPS,
+    filterPresets, GLASS_MODES, LAYOUT_OPTIONS, loadCatalog, PRESETS, TOKEN_GROUPS,
   } from '../lib/themes.js';
   import { toast } from '../lib/toast.svelte.js';
   import Brush from '@lucide/svelte/icons/brush';
@@ -50,6 +50,9 @@
   let saving = $state(false);
   let saveName = $state('');
   let cssDraft = $state('');
+  let catalog = $state([]);
+  const allPresets = $derived([...PRESETS, ...catalog]);
+  const browsePresets = $derived(allPresets.filter((p) => !p.featured && p.id !== 'pond'));
 
   // gallery filters (Dark / Light → color group). No text search — that's
   // where the password manager kept autofilling.
@@ -81,6 +84,11 @@
       wasOpen = false;
     }
   });
+  $effect(() => {
+    if (!app.themeStudioOpen) return;
+    loadCatalog().then((rows) => { catalog = rows; applyTheme(); })
+      .catch(() => toast('Could not load the imported theme shelf', 'error'));
+  });
   onDestroy(() => {
     // The dialog is lazy-loaded. Closing it unmounts this component before a
     // reactive close effect can always run, so restore an unsaved preview here.
@@ -97,7 +105,7 @@
     if (theme.preset === id) return;
     theme.preset = id;
     theme.colors = {}; // tweaks belong to the theme they were made on
-    const p = ALL_PRESETS.find((x) => x.id === id);
+    const p = allPresets.find((x) => x.id === id);
     if (p) {
       // adopting a preset adopts its whole art direction: effects reset to
       // stock + the preset's signature; preserve only flat custom CSS
@@ -136,7 +144,7 @@
     void theme.favorites; void theme.custom;
     const ids = theme.favorites ?? [];
     return ids.map((id) => {
-      const p = ALL_PRESETS.find((x) => x.id === id);
+      const p = allPresets.find((x) => x.id === id);
       if (p) return p;
       const c = theme.custom.find((x) => x.id === id);
       if (c) return { id: c.id, name: c.name, colors: customResolved(c), blurb: 'favorite', dark: true };
@@ -162,10 +170,10 @@
 
   const filteredBrowse = $derived.by(() => {
     void theme.favorites;
-    let list = BROWSE_PRESETS;
+    let list = browsePresets;
     if (toneFilter === 'favorites') {
       const set = new Set(theme.favorites ?? []);
-      list = ALL_PRESETS.filter((p) => set.has(p.id));
+      list = allPresets.filter((p) => set.has(p.id));
       // also include custom favorites
       for (const c of theme.custom) {
         if (set.has(c.id) && !list.some((p) => p.id === c.id)) {
@@ -180,10 +188,10 @@
   const groupCounts = $derived.by(() => {
     void theme.favorites;
     const mode = toneFilter === 'favorites' ? 'all' : toneFilter;
-    let list = BROWSE_PRESETS;
+    let list = browsePresets;
     if (toneFilter === 'favorites') {
       const set = new Set(theme.favorites ?? []);
-      list = ALL_PRESETS.filter((p) => set.has(p.id));
+      list = allPresets.filter((p) => set.has(p.id));
     }
     const base = filterPresets(list, { mode, group: 'all' });
     const m = { all: base.length };
@@ -415,7 +423,7 @@
       + `--p-raised:${colors['bg-raised']};--p-border:${colors['border-soft']};--p-text:${colors.text};`
       + `--p-dim:${colors['text-dim']};--p-accent:${colors.accent};`;
   }
-  const customResolved = (c) => ({ ...(ALL_PRESETS.find((p) => p.id === c.base) ?? PRESETS[0]).colors, ...c.colors });
+  const customResolved = (c) => ({ ...(allPresets.find((p) => p.id === c.base) ?? PRESETS[0]).colors, ...c.colors });
   const marketResolved = (m) => customResolved({ base: m.theme.base ?? 'pond', colors: m.theme.colors ?? {} });
 
   const resolved = $derived.by(() => {
@@ -524,7 +532,7 @@
                   onclick={() => pickPreset(c.id)}>
                   {@render mock()}
                   <span class="pname">{c.name}</span>
-                  <span class="pblurb">{c.marketId ? 'from the market' : `based on ${ALL_PRESETS.find((p) => p.id === c.base)?.name ?? PRESETS.find((p) => p.id === c.base)?.name ?? '?'}`}</span>
+                  <span class="pblurb">{c.marketId ? 'from the market' : `based on ${allPresets.find((p) => p.id === c.base)?.name ?? '?'}`}</span>
                   <span class="pfav" class:on={favSet.has(c.id)} role="button" tabindex="0"
                     title={favSet.has(c.id) ? 'Remove favorite' : 'Favorite'}
                     onclick={(e) => onHeart(e, c.id)}

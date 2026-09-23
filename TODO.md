@@ -15,6 +15,8 @@ Updated 2026-09-23. This is the actionable checklist for the production redesign
 - [x] Rebuild the sidebar around DuckPond, Chat/Agent, New, searchable mode-specific history, Studio, Models, Settings, and optional pages under More. Preserve keyboard focus and mobile drawer behavior.
 - [x] Make the duck visible in the brand and welcome surface; preserve reduced-motion and hidden-tab pauses.
 - [x] Remove built-in CSS gradient backgrounds, loading shimmers, weather colors, login backgrounds, voice orb effects, and gradient theme choices. Ignore old saved custom CSS that contains a gradient.
+- [x] Load the 1,752 imported themes only when Theme Studio opens or a saved catalog theme needs one. The production first-load JS entry fell from 1,412.92 kB to 330.68 kB before compression; the optional catalog remains 1,082.56 kB and should be curated before release.
+- [ ] Curate the imported theme shelf for useful contrast and coherent visual quality. Preserve existing saved theme IDs through migration or an archive lookup before removing catalog entries.
 - [ ] Review every desktop, tablet and phone screen for spacing, contrast, tap targets, overflow, keyboard traversal, and screen reader labels. Inspect Sidebar, Chat, Agent project pane, Studio, Models, Settings, login and invite.
 - [ ] Review animated duck states during idle, loading, tool work, success, error and Stop. Keep the brand mark still; use motion in the welcome area only where it conveys state.
 - [ ] Remove obsolete Theme Studio scene and background controls/code left after the flat-color migration; migrate old saved themes and document the flat-color rule.
@@ -61,12 +63,14 @@ Implementation staged: authenticated metrics endpoint and a movable, resizable, 
 
 ## 5. Models and downloads
 
-Implementation staged: file lists, license, free storage, rough GGUF memory planning, partial-cache visibility and post-download snapshot checks. Estimates and unusual repository layouts still need real-model review.
+Implementation staged: file lists, license, free storage, rough GGUF memory planning, partial-cache visibility and post-download snapshot checks. A successful transfer now requires a selected weight file, resolvable snapshot links and a full split-GGUF shard set; this still needs real-model and checksum review.
 
 - [x] Rework Model Hub's Installed, Discover and Downloads layout, model metadata, readiness wording and mobile hierarchy. Accept exact pasted Hugging Face repository IDs/URLs.
 - [ ] Verify one server-side installation state for each variant: missing, partial, downloading, downloaded, dependencies missing, ready to load, loaded, and verified by a real task. State mapping is staged; real model checks remain.
 - [ ] Show exact files, companion encoders/VAEs, license, disk cost, runtime compatibility, measured or clearly estimated RAM/VRAM, and the next repair action.
 - [ ] Verify restart recovery, checksum/required-file checks, cancel, retry, duplicate transfer avoidance and partial GGUF handling with real model metadata.
+- [ ] Fetch an authoritative file manifest for each selected revision and verify every required file by size and hash. Handle nested patterns, `*` and `?`, split GGUF shards, optional documentation, gated repositories, stale `main` refs and a changed upstream revision. Do not trust the browser's size estimate as an integrity check.
+- [ ] Reconcile a resumed transfer's selected cached bytes with its progress baseline so ETA and percentage remain accurate when another quant in the same repository is already cached.
 - [ ] Show Use in Chat or Open Studio only when the selected variant has a compatible runtime path; verify load/unload and a real generation before a verified badge.
 - [ ] Calibrate the displayed tokens-per-second estimate with measured local runs; keep estimates visibly labeled until then.
 
@@ -91,3 +95,8 @@ Implementation staged: repeatable background load/unload actions, bridge unload 
 - [ ] Add bounded event/job retention, database backup/restore, per-user quotas, readiness diagnostics and structured failure logs. Pin the Podman coding image and media Python environment.
 - [ ] Validate ownership on jobs, documents, media receipts, artifacts and previews; finish restricted-network map/embed review.
 - [ ] Review worktree diff, prepare rollback, push a reviewed checkpoint to GitHub, update `main`, deploy in a controlled window, and record the observed service health.
+
+## Source control record
+
+- `origin/main` received documentation checkpoint `49dffe0` on 2026-09-23. It did not include redesign source or trigger a source deployment.
+- `origin/codex/production-redesign` last published checkpoint is `f67a936`; it includes the earlier hardware panel, Model Hub, Studio lifecycle and widget cleanup work. Current recovery and download edits need review and a new branch push before release.

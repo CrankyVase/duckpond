@@ -560,7 +560,7 @@ export async function modelVariants(repoId) {
   const enriched = grouped.variants.map((v) => {
     const selectedFiles = entries.filter((file) => includeMatches(v.include, file.path));
     const ggufVariant = selectedFiles.some((file) => /\.gguf$/i.test(file.path));
-    const cachedBytes = snapDir && v.include && !String(v.include).includes('*')
+    const cachedBytes = snapDir && v.include && !/[*?]/.test(String(v.include))
       ? cachedFileBytes(snapDir, v.include)
       : (snapDir ? cachedPatternBytes(snapDir, v.include) : null);
     const draft = draftKind(v.name);
@@ -626,7 +626,8 @@ export async function modelVariants(repoId) {
 // plain path). We match them against the snapshot's real file list.
 export function includeMatches(include, path) {
   if (!include) return true; // whole-repo variant: caller handles separately
-  const re = new RegExp('^' + include.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
+  const re = new RegExp('^' + String(include).replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
   return re.test(path);
 }
 
@@ -652,7 +653,7 @@ function presentCachedFiles(snapDir, include) {
     if (size == null) return;
     out.push({ path: rel, size });
   };
-  if (include && !String(include).includes('*')) {
+  if (include && !/[*?]/.test(String(include))) {
     add(include);
     return out;
   }

@@ -2,7 +2,24 @@
 // tokens (CSS custom properties, sans the -- prefix). Presets are complete;
 // user customization stores per-token OVERRIDES on top of a preset, so a
 // preset can evolve without wiping everyone's tweaks.
-import themeCatalog from './themeCatalog.json';
+let catalog = [];
+let catalogPromise = null;
+
+// Keep the large imported theme shelf out of the first app download. Saved
+// catalog themes are loaded on demand by the theme engine; Theme Studio loads
+// the same chunk when opened.
+export function loadCatalog() {
+  if (!catalogPromise) {
+    catalogPromise = import('./themeCatalog.json').then(({ default: rows }) => {
+      catalog = rows.filter((c) => c.id && c.colors && !PRESETS.some((p) => p.id === c.id));
+      return catalog;
+    }).catch((error) => {
+      catalogPromise = null;
+      throw error;
+    });
+  }
+  return catalogPromise;
+}
 
 // token metadata drives the color editor UI — order here is display order
 export const TOKEN_GROUPS = [
@@ -263,17 +280,8 @@ export const COLOR_GROUPS = [
 /** Default featured theme (original Duck Pond look). */
 export const DEFAULT_PRESET_ID = 'pond';
 
-/** Every selectable preset: handcrafted + catalog. */
-export const ALL_PRESETS = [
-  ...PRESETS,
-  ...themeCatalog.filter((c) => c.id && c.colors && !PRESETS.some((p) => p.id === c.id)),
-];
-
-/** Featured only (shown pinned at top). */
-export const FEATURED_PRESETS = ALL_PRESETS.filter((p) => p.featured || p.id === DEFAULT_PRESET_ID);
-
-/** Everything else, for Dark/Light → color browsing. */
-export const BROWSE_PRESETS = ALL_PRESETS.filter((p) => !p.featured && p.id !== DEFAULT_PRESET_ID);
+/** Built-in featured themes; the imported catalog loads in Theme Studio. */
+export const FEATURED_PRESETS = PRESETS.filter((p) => p.featured || p.id === DEFAULT_PRESET_ID);
 
 export const LAYOUT_OPTIONS = {
   chatWidth: [
@@ -328,7 +336,8 @@ export const DEFAULT_EFFECTS = {
   font: 'default',
 };
 
-export const presetById = (id) => ALL_PRESETS.find((p) => p.id === id) ?? PRESETS[0];
+export const presetById = (id) => PRESETS.find((p) => p.id === id)
+  ?? catalog.find((p) => p.id === id) ?? PRESETS[0];
 
 /** Filter browse presets by mode (all|dark|light), color group, and free-text. */
 export function filterPresets(list, { mode = 'all', group = 'all', q = '' } = {}) {

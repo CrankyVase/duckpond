@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { assertRepoId, mainSnapshotDir } from './hfHub.js';
+import { assertRepoId, includeMatches, mainSnapshotDir } from './hfHub.js';
 
 const HF_CLI = process.env.HF_CLI ?? '/home/cranky/.local/bin/hf';
 const HF_HOME = process.env.HF_HOME ?? '/var/mnt/modelnvme/ai/huggingface';
@@ -75,26 +75,36 @@ function scanProgress(repoId, include) {
 // enough to mark a model usable.
 function verifiedSnapshotBytes(repoId, include) {
   const root = mainSnapshotDir(repoId);
-  if (!root) return { bytes: 0, files: 0 };
-  const pattern = include == null ? null : new RegExp(`^${String(include)
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+  if (!root) return { bytes: 0, files: 0, weights: 0, complete: false };
   let bytes = 0;
   let files = 0;
+  let weights = 0;
+  const shards = new Map();
   const walk = (dir, prefix = '') => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (entry.isDirectory()) { walk(join(dir, entry.name), rel); continue; }
-      if (pattern && !pattern.test(rel)) continue;
+      if (!includeMatches(include, rel)) continue;
       try {
         const size = statSync(join(dir, entry.name)).size;
         if (size <= 0) continue;
         files += 1;
         bytes += size;
+        if (/\.(?:gguf|safetensors|bin|pt|pth|ckpt|h5|onnx|msgpack)$/i.test(rel)) weights += 1;
+        const match = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i.exec(rel);
+        if (match) {
+          const total = Number(match[3]);
+          const key = `${match[1]}:${match[3]}`;
+          if (!shards.has(key)) shards.set(key, { total, parts: new Set() });
+          shards.get(key).parts.add(Number(match[2]));
+        }
       } catch { /* broken snapshot link */ }
     }
   };
-  try { walk(root); } catch { return { bytes, files }; }
-  return { bytes, files };
+  try { walk(root); } catch { return { bytes, files, weights, complete: false }; }
+  const complete = [...shards.values()].every(({ total, parts }) => total > 0 && total <= 1000
+    && parts.size === total && [...parts].every((part) => part >= 1 && part <= total));
+  return { bytes, files, weights, complete };
 }
 
 // Speed/ETA from a time window of disk scans; extra polling tabs share it.
@@ -127,7 +137,7 @@ function spawnWorker(job) {
     else if (error) { job.state = 'error'; job.error = error.message; }
     else if (code === 0) {
       const verified = verifiedSnapshotBytes(job.repoId, job.include);
-      if (!verified.files || (job.totalBytes && verified.bytes < job.totalBytes * 0.99)) {
+      if (!verified.weights || !verified.complete || (job.totalBytes && verified.bytes < job.totalBytes * 0.99)) {
         job.state = 'error';
         job.error = 'Transfer ended without complete model files. Retry to resume the download.';
       } else {
@@ -265,6 +275,16 @@ export function downloadStatus(repoId, include) {
 
 export function startDownload(repoId, { include, variant, totalBytes } = {}) {
   assertRepoId(repoId);
+  if (include != null && (typeof include !== 'string' || include.length > 512
+    || !include.length || include.startsWith('-') || /[\x00-\x1f]/.test(include))) {
+    throw Object.assign(new Error('bad file selection'), { status: 400 });
+  }
+  if (totalBytes != null && (!Number.isSafeInteger(totalBytes) || totalBytes < 0)) {
+    throw Object.assign(new Error('bad download size'), { status: 400 });
+  }
+  if (variant != null && (typeof variant !== 'string' || variant.length > 200)) {
+    throw Object.assign(new Error('bad variant label'), { status: 400 });
+  }
   const key = keyOf(repoId, include);
   const existing = jobs.get(key);
   // Claim/adopt: same key already running → attach, don't double-download.

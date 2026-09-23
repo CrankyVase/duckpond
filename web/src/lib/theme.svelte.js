@@ -6,7 +6,7 @@
 import { api } from './api.js';
 import {
   ALL_TOKENS, ANIM_MODES, DARK_SHADOW, DEFAULT_EFFECTS, DEFAULT_LAYOUT,
-  FONT_OPTIONS, GLASS_MODES, LAYOUT_OPTIONS, presetById,
+  FONT_OPTIONS, GLASS_MODES, LAYOUT_OPTIONS, loadCatalog, presetById,
 } from './themes.js';
 
 const LS_KEY = 'dp_theme';
@@ -134,6 +134,14 @@ export function applyTheme(t = theme) {
   styleEl.textContent = hasGradient(css) ? '' : css;
 }
 
+function loadSavedCatalogPreset(t = theme) {
+  const selected = t.custom.find((c) => c.id === t.preset);
+  const baseId = selected?.base ?? t.preset;
+  if (typeof baseId === 'string' && baseId.startsWith('m-')) {
+    void loadCatalog().then(() => applyTheme(t)).catch(() => { /* keep the built-in fallback */ });
+  }
+}
+
 // snapshot/restore lets the studio preview freely and revert on cancel
 export const snapshotTheme = () => JSON.parse(JSON.stringify({
   preset: theme.preset, colors: theme.colors, layout: theme.layout,
@@ -169,6 +177,7 @@ export function adoptServerTheme(uiTheme) {
     const t = sanitize(typeof uiTheme === 'string' ? JSON.parse(uiTheme) : uiTheme);
     Object.assign(theme, t);
     applyTheme();
+    loadSavedCatalogPreset();
     saveLocal();
   } catch { /* corrupt server theme — local wins */ }
 }
@@ -180,3 +189,4 @@ export async function persistTheme() {
 
 // first paint: theme the login screen from the local mirror
 applyTheme();
+loadSavedCatalogPreset();
