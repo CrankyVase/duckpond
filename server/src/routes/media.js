@@ -3,11 +3,38 @@
 // lock), so there is nothing to stream over. The UI polls /api/media/jobs
 // (active list is cheap) at ~1 Hz while a card is visible.
 import { requireAuth } from '../auth.js';
+import { db } from '../db.js';
+import { readFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import os from 'node:os';
 import { checkUserContent } from '../contentFilter.js';
-import { bridgeModels } from '../imagegen.js';
+import { bridgeModels, IMAGES_DIR, MEDIA_DIR } from '../imagegen.js';
+import { gpuVram } from '../llama.js';
 import { presetEstimates } from '../mediaEta.js';
 import { enhanceMediaPrompt } from '../promptEnhancer.js';
 import { cancelMediaJob, createMediaJob, getMediaJob, listJobs, pruneMediaJobs, mediaQueuePaused, setMediaQueuePaused, retryMediaJob } from '../mediaJobs.js';
+
+let cpuSample = null;
+function cpuUsage() {
+  const cpus = os.cpus();
+  const times = cpus.reduce((sum, cpu) => {
+    for (const value of Object.values(cpu.times)) sum += value;
+    return sum;
+  }, 0);
+  const idle = cpus.reduce((sum, cpu) => sum + cpu.times.idle, 0);
+  const previous = cpuSample;
+  cpuSample = { times, idle };
+  if (!previous || times <= previous.times) return null;
+  return Math.max(0, Math.min(100, (1 - (idle - previous.idle) / (times - previous.times)) * 100));
+}
+function availableRamBytes() {
+  try {
+    const text = readFileSync('/proc/meminfo', 'utf8');
+    const match = text.match(/^MemAvailable:\s+(\d+)\s+kB/m);
+    if (match) return Number(match[1]) * 1024;
+  } catch { /* use the portable free-memory estimate */ }
+  return os.freemem();
+}
 
 export default async function mediaRoutes(app) {
   app.addHook('preHandler', requireAuth);
@@ -20,9 +47,22 @@ export default async function mediaRoutes(app) {
   });
 
   app.get('/api/media/estimates', async (req) => {
-    const size = String(req.query.size ?? '1024x1024');
+    const shape = ['square', 'landscape', 'portrait'].includes(req.query.shape) ? req.query.shape : 'square';
     const n = Math.max(1, Math.min(4, Number(req.query.n ?? 1) || 1));
-    return { ok: true, ...presetEstimates({ size, n }) };
+    const previewEvery = [0, 1, 2, 4, 8].includes(Number(req.query.previewEvery)) ? Number(req.query.previewEvery) : 1;
+    const refCount = Math.max(0, Math.min(4, Number(req.query.refCount ?? 0) || 0));
+    const enhance = req.query.enhance !== '0';
+    return { ok: true, ...presetEstimates({ shape, n, previewEvery, refCount, enhance }) };
+  });
+
+  app.get('/api/media/resources', async () => {
+    const total = os.totalmem();
+    const gpu = await gpuVram().catch(() => null);
+    return {
+      ram: { usedBytes: total - availableRamBytes(), totalBytes: total },
+      cpuPercent: cpuUsage(),
+      vram: gpu,
+    };
   });
 
   app.get('/api/media/jobs', async (req) => {
@@ -38,10 +78,47 @@ export default async function mediaRoutes(app) {
     return { paused: setMediaQueuePaused(req.body.paused) };
   });
 
+  app.get('/api/media/jobs/:id/preview', async (req, reply) => {
+    const preview = db.prepare(`SELECT p.jpeg FROM media_job_previews p
+      JOIN media_jobs j ON j.id = p.job_id WHERE j.id = ? AND j.user_id = ?`)
+      .get(Number(req.params.id), req.user.id);
+    if (!preview) return reply.code(404).send({ error: 'preview not ready' });
+    return reply.header('cache-control', 'private, max-age=30, must-revalidate')
+      .type('image/jpeg').send(preview.jpeg);
+  });
+
   app.get('/api/media/jobs/:id', async (req, reply) => {
     const job = getMediaJob(req.params.id, req.user.id);
     if (!job) return reply.code(404).send({ error: 'not found' });
     return { job };
+  });
+
+  app.delete('/api/media/jobs/:id', async (req, reply) => {
+    const job = db.prepare('SELECT id, status, result_ids FROM media_jobs WHERE id = ? AND user_id = ?')
+      .get(Number(req.params.id), req.user.id);
+    if (!job) return reply.code(404).send({ error: 'Job not found.' });
+    if (job.status === 'queued' || job.status === 'running') {
+      return reply.code(409).send({ error: 'Stop this job before deleting it.' });
+    }
+    let ids = [];
+    try { ids = JSON.parse(job.result_ids ?? '[]'); } catch { /* older job */ }
+    const images = ids.length ? db.prepare(`SELECT id, file FROM images WHERE user_id = ? AND id IN (${ids.map(() => '?').join(',')})`)
+      .all(req.user.id, ...ids) : [];
+    try {
+      for (const image of images) {
+        const dir = /\.(png|webp)$/i.test(image.file) ? IMAGES_DIR : MEDIA_DIR;
+        try { unlinkSync(join(dir, image.file)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      db.transaction(() => {
+        for (const image of images) db.prepare('DELETE FROM images WHERE id = ? AND user_id = ?').run(image.id, req.user.id);
+        db.prepare('DELETE FROM media_jobs WHERE id = ? AND user_id = ?').run(job.id, req.user.id);
+      })();
+      return { ok: true, deleted: images.length };
+    } catch (error) {
+      req.log?.error?.({ err: error }, 'Media job deletion failed');
+      return reply.code(500).send({ error: 'Could not delete this creation. Please try again.' });
+    }
   });
 
   app.post('/api/media/jobs', { bodyLimit: 48 * 1024 * 1024 }, async (req, reply) => {
@@ -82,6 +159,10 @@ export default async function mediaRoutes(app) {
     const filter = checkUserContent(req.user.id, String(prompt ?? ''), 'image');
     if (!filter.ok) return { enhanced: null, model: null, reason: filter.reason };
     const r = await enhanceMediaPrompt({ prompt: String(prompt ?? ''), task, modelId: model });
+    if (r) {
+      const polished = checkUserContent(req.user.id, r.text, 'image');
+      if (!polished.ok) return { enhanced: null, model: r.model, reason: polished.reason };
+    }
     return r ? { enhanced: r.text, model: r.model } : { enhanced: null, model: null };
   });
 
