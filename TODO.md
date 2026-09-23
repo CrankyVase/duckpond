@@ -22,6 +22,8 @@ Updated 2026-09-23. This is the actionable checklist for the production redesign
 
 ## 2. Floating hardware monitor
 
+Implementation staged: authenticated metrics endpoint and a movable, resizable, per-user customizable panel. Keep the checks open until real AMD sensors, phone placement, keyboard movement, stale readings and concurrent Studio/Agent use are observed.
+
 - [ ] Add an authenticated server metrics endpoint with one documented sample shape and timestamps. Include CPU usage, load and temperature; RAM used/available/total; swap; GPU utilization, dedicated VRAM used/total, temperature and device name; SSD used/free/total and read/write activity. Add fan speed, GPU power and SSD temperature when a sensor is available. Mark absent sensors unavailable rather than zero.
 - [ ] Keep binary memory units labeled GiB and disk units labeled accurately. Distinguish dedicated VRAM, shared GPU memory, and system RAM; avoid counting shared memory twice. Support the installed AMD ROCm/Vulkan hardware and expose other vendors through adapters.
 - [ ] Build a small movable, resizable panel with a drag handle, close/minimize control, viewport clamping, keyboard-accessible placement alternative, and a phone layout that does not cover the composer or Stop control. Persist visibility, size and position per user.
@@ -35,13 +37,14 @@ Updated 2026-09-23. This is the actionable checklist for the production redesign
 - [x] Let the browser reattach to a server-owned SSE feed, and poll the saved job status if SSE repeatedly drops. Keep proxy interruption separate from explicit Stop.
 - [x] Replace Agent's default 80-step terminal cap with renewable work windows. Add a completion recheck and repeated-tool loop guard.
 - [x] Add scoped document list/search/read tools and a default-off sequential analysis subagent capability. Keep subagent concurrency at zero by default on this machine.
-- [ ] Add a stable client idempotency key for Chat and Agent submission, with database uniqueness and a duplicate response that returns the original job ID.
-- [ ] Make chat-tied Agent runs safely resumable after Node restart at complete transcript/tool boundaries. Persist approvals, Stop intent, and the task checkpoint; never replay uncertain shell, file, network or publish effects blindly.
-- [ ] Add ordered event IDs and replay from cursor for Chat and Agent, plus a bounded retention policy. Ensure a second device can open a job's timeline and final artifacts.
-- [ ] Persist the Agent objective, constraints, plan/checklist, current step, changed files, verification evidence, failures and remaining work. Show that state in the UI instead of relying on prose alone.
+- [ ] Verify Chat and Agent submission idempotency after a lost POST response and after refresh. Client keys, database uniqueness, and duplicate responses are staged in the redesign branch.
+- [ ] Finish chat-tied Agent recovery after Node restart. Safe run checkpoints and Stop intent are staged, but a resumed run must also settle its original Chat job and final conversation message. Keep uncertain tool effects for manual reconciliation.
+- [ ] Make Chat and Agent event replay durable across restart, with ordered cursors, bounded retention, and a second-device timeline. Agent events persist; Chat has a process-local event ring and durable folded snapshot.
+- [ ] Complete the Agent plan state and UI. Objective, file changes, command evidence and failures are staged; constraints, checklist steps, current step and remaining work still need a reliable update path.
 - [ ] Audit timeouts across Fastify, local runtime, model router, provider, browser, media bridge and Cloudflare. Expose legitimate resource ceilings and recovery paths; make command cancellation reliable.
-- [ ] Resolve inconsistent remote output defaults in `llama.js` and `chatBackend.js`; expose output reserve/configuration where appropriate.
-- [ ] Reproduce history/tree disappearance and partial-answer behavior through model errors, refresh, tab close, process exit and reconnect.
+- [x] Resolve inconsistent remote output defaults in `llama.js` and `chatBackend.js`. Both paths now share a 4096-token default unless the caller sets `max_tokens`.
+- [ ] Verify per-model maximum reply tokens in Settings with local and remote models. The control and server validation are staged; 0 keeps the automatic default.
+- [ ] Reproduce history/tree disappearance and partial-answer behavior through model errors, refresh, tab close, process exit and reconnect. Recovery edits are staged; these scenarios have not been run.
 
 ## 4. Chat and coding quality
 
@@ -58,14 +61,18 @@ Updated 2026-09-23. This is the actionable checklist for the production redesign
 
 ## 5. Models and downloads
 
+Implementation staged: file lists, license, free storage, rough GGUF memory planning, partial-cache visibility and post-download snapshot checks. Estimates and unusual repository layouts still need real-model review.
+
 - [x] Rework Model Hub's Installed, Discover and Downloads layout, model metadata, readiness wording and mobile hierarchy. Accept exact pasted Hugging Face repository IDs/URLs.
-- [ ] Establish one server-side installation state for each variant: missing, partial, downloading, downloaded, dependencies missing, ready to load, loaded, and verified by a real task. Do not equate file presence with working inference.
+- [ ] Verify one server-side installation state for each variant: missing, partial, downloading, downloaded, dependencies missing, ready to load, loaded, and verified by a real task. State mapping is staged; real model checks remain.
 - [ ] Show exact files, companion encoders/VAEs, license, disk cost, runtime compatibility, measured or clearly estimated RAM/VRAM, and the next repair action.
 - [ ] Verify restart recovery, checksum/required-file checks, cancel, retry, duplicate transfer avoidance and partial GGUF handling with real model metadata.
 - [ ] Show Use in Chat or Open Studio only when the selected variant has a compatible runtime path; verify load/unload and a real generation before a verified badge.
 - [ ] Calibrate the displayed tokens-per-second estimate with measured local runs; keep estimates visibly labeled until then.
 
 ## 6. Studio and image lifecycle
+
+Implementation staged: repeatable background load/unload actions, bridge unload guard, cancellation reconciliation, and clear stale ETA. Real generation and VRAM release remain to be observed.
 
 - [x] Show explicit Qwen load/unload controls and simpler Studio resource status. Warm loading starts in the background; generation returns a durable job ID.
 - [x] Keep bridge-side result receipts by job tag, reconcile completed work after service restart, and safely requeue work that never reached the bridge.
