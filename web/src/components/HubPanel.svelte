@@ -1350,9 +1350,13 @@
         <div class="mmlist">
           {#each installedRows as row (localModelKey(row))}
             {@const readiness = modelReadiness(row, mediaModels, mediaAvailable)}
+            {@const installedLogo = row.repoId ? logoFor(row.repoId) : null}
             <div class="mmrow" class:broken={row.broken}>
-              <span class="avatar" style={!row.repoId || avatarFail.has(ownerOf(row.repoId)) ? avatarStyle(row.repoId ? ownerOf(row.repoId) : 'local') : ''}>
-                {#if row.repoId && !avatarFail.has(ownerOf(row.repoId))}
+              <span class="avatar" class:logo={!!installedLogo}
+                style={!installedLogo && (!row.repoId || avatarFail.has(ownerOf(row.repoId))) ? avatarStyle(row.repoId ? ownerOf(row.repoId) : 'local') : ''}>
+                {#if installedLogo}
+                  <img src={installedLogo.path} alt="" />
+                {:else if row.repoId && !avatarFail.has(ownerOf(row.repoId))}
                   <img src="/api/hf/avatar/{ownerOf(row.repoId)}" alt="" loading="lazy"
                     onerror={() => { avatarFail.add(ownerOf(row.repoId)); avatarFail = new Set(avatarFail); }} />
                 {/if}

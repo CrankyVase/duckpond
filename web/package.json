@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test:workspace": "node test/workspaceState.test.mjs && node test/modelReadiness.test.mjs",
-    "test": "node test/hubReadme.test.mjs"
+    "test": "node test/hubReadme.test.mjs && node test/hubLogos.test.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.1.0",
@@ -17,6 +17,7 @@
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@lobehub/icons-static-svg": "^1.95.1",
     "@lucide/svelte": "^1.24.0",
     "html-to-image": "^1.11.13",
     "leaflet": "^1.9.4",

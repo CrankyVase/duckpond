@@ -13,6 +13,8 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Cloud from '@lucide/svelte/icons/cloud';
+  import { logoForModel, logoForProvider } from '../lib/hubLogos.js';
+  import BrandMark from './BrandMark.svelte';
   import Eraser from '@lucide/svelte/icons/eraser';
   import PlugZap from '@lucide/svelte/icons/plug-zap';
   import Plus from '@lucide/svelte/icons/plus';
@@ -379,8 +381,9 @@
     {#if providerView === 'routing'}
       <div class="view-intro"><h2>Model routing</h2><p>Set a fallback order for each provider. If a request fails before a reply starts, DuckPond tries the next available model.</p></div>
       {#each providers as p (p.id)}
+        {@const routeMark = logoForProvider(p.name, p.base_url)}
         <section class="surface">
-          <div class="routing-provider"><Cloud size={18} /><h2>{p.name}</h2><span>{p.enabled ? 'Connected' : 'Disabled'}</span></div>
+          <div class="routing-provider">{#if routeMark}<BrandMark src={routeMark.path} size={22} />{:else}<Cloud size={18} />{/if}<h2>{p.name}</h2><span>{p.enabled ? 'Connected' : 'Disabled'}</span></div>
           {#if routingModels[p.id] === 'error'}
             <p class="hintbar">Couldn't load this model catalog. <button onclick={openRouting}>Retry</button></p>
           {:else if !routingModels[p.id]}<p class="empty">Loading models…</p>
@@ -395,9 +398,10 @@
       <div class="empty">No providers connected yet. Use Add provider to get started.</div>
     {:else}
       {#each providers as p (p.id)}
+        {@const providerMark = logoForProvider(p.name, p.base_url)}
         <section class="surface pcard" class:off={!p.enabled}>
           <div class="phead">
-            <span class="picon"><Cloud size={15} /></span>
+            <span class="picon" class:logo={!!providerMark}>{#if providerMark}<img src={providerMark.path} alt="" />{:else}<Cloud size={15} />{/if}</span>
             <div class="pwho">
               <div class="pname">
                 {p.name}
@@ -577,6 +581,7 @@
                     </thead>
                     <tbody>
                       {#each modelsByProv[p.id] as m (m.model_id)}
+                        {@const rowMark = logoForModel(m.model_id) ?? providerMark}
                         <tr class:muted={!m.enabled} class:hidden-row={m.hidden}>
                           <td class="num">
                             <button class="star" class:on={m.favorite} disabled={!isOwner || rowSaving[`${p.id}:${m.model_id}`]}
@@ -586,7 +591,7 @@
                             </button>
                           </td>
                           <td class="mono mid" title={m.note || m.model_id}>
-                            {m.label || m.model_id}
+                            <span class="mname">{#if rowMark}<BrandMark src={rowMark.path} size={16} />{/if}<span>{m.label || m.model_id}</span></span>
                             {#if m.caps}
                               <span class="capr">
                                 {#each CAPS as c (c.key)}
@@ -714,6 +719,10 @@
     background: var(--bg-raised); border: 1px solid var(--border-soft);
     color: var(--text-dim);
   }
+  .picon.logo { background: #fff; }
+  .picon.logo img { width: 70%; height: 70%; object-fit: contain; }
+  .mname { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; }
+  .mname > span { overflow: hidden; text-overflow: ellipsis; }
   .pwho { flex: 1 1 auto; min-width: 0; }
   .pname { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
   .kind {

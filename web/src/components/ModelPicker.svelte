@@ -5,6 +5,8 @@
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { app, loadModels } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
+  import { logoForModel, logoForProvider } from '../lib/hubLogos.js';
+  import BrandMark from './BrandMark.svelte';
   import Search from '@lucide/svelte/icons/search';
   import { tick } from 'svelte';
   import Check from '@lucide/svelte/icons/check';
@@ -30,6 +32,8 @@
   // Same stripping for a bare id string (fallback when the models list hasn't
   // loaded) — the r1: plumbing prefix should never reach the screen.
   const stripRemote = (id) => (id && /^r\d+:/.test(id) ? id.slice(id.indexOf(':') + 1) : id);
+  const modelMark = (m) => logoForModel(m?.id) ?? logoForProvider(m?.provider?.name);
+  const currentMark = $derived(modelMark(current) ?? logoForModel(app.conv?.model_id));
 
   // USD per 1M tokens, compact: $0.005 / $0.50 / $12.30
   // Coerce everything: a single non-numeric price from a provider must never
@@ -268,6 +272,7 @@
 <div class="picker">
   <button class="current" onclick={() => (app.modelPickerOpen = !app.modelPickerOpen)}
     title="Switch model (Ctrl+K)" aria-expanded={app.modelPickerOpen}>
+    {#if currentMark}<BrandMark src={currentMark.path} size={18} />{/if}
     <span class="dot" style="background:{dot(current?.status)}"></span>
     <span class="name">{dispName(current) || stripRemote(app.conv?.model_id) || 'Pick a model'}</span>
     <span class="chev" class:flip={app.modelPickerOpen}><ChevronDown size={14} /></span>
@@ -287,13 +292,19 @@
         <div class="list" bind:this={listEl} role="listbox" aria-label="Available models">
           {#each groups as g (g.key)}
             {#if groups.length > 1}
-              <div class="gh">{g.label}</div>
+              {@const groupMark = logoForProvider(g.label)}
+              <div class="gh">
+                {#if groupMark}<BrandMark src={groupMark.path} size={14} />{/if}
+                {g.label}
+              </div>
             {/if}
             {#each g.items as { m, i } (m.id)}
+            {@const mark = modelMark(m)}
             <div class="opt" class:hover={i === hoverIdx} class:sel={m.id === app.conv?.model_id}
               onclick={() => pick(m)} onmouseenter={() => (hoverIdx = i)}
               role="option" aria-selected={m.id === app.conv?.model_id} tabindex="-1"
               onkeydown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) { e.stopPropagation(); pick(m); } }}>
+              {#if mark}<BrandMark src={mark.path} size={18} />{/if}
               <span class="dot" style="background:{dot(m.status)}"></span>
               <span class="col">
                 <span class="oname">{dispName(m)}</span>
@@ -423,6 +434,7 @@
   }
   .list { overflow-y: auto; }
   .gh {
+    display: flex; align-items: center; gap: 6px;
     font-size: 10.5px; color: var(--text-faint); font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.08em;
     padding: 10px 10px 4px; user-select: none;

@@ -5,6 +5,8 @@
   import { toast } from '../lib/toast.svelte.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { freshIdea } from '../lib/mediaIdeas.js';
+  import { logoForModel } from '../lib/hubLogos.js';
+  import BrandMark from './BrandMark.svelte';
   import { imgFade, reveal, scrollFade } from '../lib/motion.js';
   import { mediaJobs, pauseMediaQueue, mediaJobsForTask, refreshMediaJobs, submitMediaJob, useMediaJobs, activeMediaJobs } from '../lib/mediaJobs.svelte.js';
   import MediaJobsCard from './MediaJobsCard.svelte';
@@ -175,6 +177,7 @@
   const taskModels = $derived(models.filter((m) => m.task === task));
   const readyModels = $derived(taskModels.filter((m) => m.ready));
   const selected = $derived(readyModels.find((m) => m.id === model) ?? readyModels.find((m) => m.id === defaultModel) ?? readyModels[0]);
+  const selectedLogo = $derived(logoForModel(selected?.id));
   const isH3 = $derived(selected?.id === 'MiniMaxAI/MiniMax-H3');
   const isMusic3 = $derived(selected?.kind === 'minimax_music3' || (selected?.id || '').includes('MiniMax-Music3'));
   $effect(() => {
@@ -553,7 +556,7 @@
               <label class="field"><span>Seed</span><input type="number" min="0" max="4294967295" bind:value={seed} placeholder="Random each time" /><span class="hint">Reuse a seed with the same settings to repeat a result.</span></label>
             </div>
             <div class="option-section"><h4>Model</h4>
-              <label class="field"><span>Image model</span><select bind:value={model} disabled={!readyModels.length}><option value="auto">{readyModels.length ? 'Automatic · Qwen-Image 2.1' : loading ? 'Checking models…' : 'No model ready'}</option>{#each readyModels as m}<option value={m.id}>{m.id.split('/').pop()}</option>{/each}</select></label>
+              <label class="field"><span class="with-logo">Image model {#if selectedLogo}<BrandMark src={selectedLogo.path} size={16} />{/if}</span><select bind:value={model} disabled={!readyModels.length}><option value="auto">{readyModels.length ? 'Automatic · Qwen-Image 2.1' : loading ? 'Checking models…' : 'No model ready'}</option>{#each readyModels as m}<option value={m.id}>{m.id.split('/').pop()}</option>{/each}</select></label>
               {#if selected}<div class="runtime-status"><span>{selected.id.split('/').pop()} · {selected.loaded ? 'Loaded' : 'Loads when needed'}</span>{#if app.user?.role === 'owner' && selected.kind !== 'comfy'}<button class="btn" disabled={unloading} onclick={unloadSelected}>{unloading ? 'Unloading…' : 'Unload'}</button>{/if}</div>{/if}
               {#if taskModels.some((m) => !m.ready)}<details class="readiness"><summary>{taskModels.filter((m) => !m.ready).length} model(s) need attention</summary>{#each taskModels.filter((m) => !m.ready) as m}<div><strong>{m.id.split('/').pop()}</strong><p>{m.reason}</p></div>{/each}</details>{/if}
             </div>
@@ -577,11 +580,11 @@
         </div>
         {#if estimates}<p class="hint">{estimates.calibrated === false ? 'Times are estimates until the engine has run a few images.' : `Measured on this engine · ${estimates.samples} runs`}</p>{/if}
       {/if}
-      <label class="field"><span>Model <span class="local-tag">ON DEVICE</span></span><select bind:value={model} disabled={!readyModels.length}>
+      <label class="field"><span class="with-logo">Model <span class="local-tag">ON DEVICE</span>{#if selectedLogo}<BrandMark src={selectedLogo.path} size={16} />{/if}</span><select bind:value={model} disabled={!readyModels.length}>
         <option value="auto">{readyModels.length ? 'Automatic · best available' : loading ? 'Checking your models…' : 'No ready model'}</option>
         {#each readyModels as m}<option value={m.id}>{m.id.split('/').pop()}</option>{/each}
       </select></label>
-      {#if selected}<div class="model-note"><span class="status-dot"></span><span>{selected.id}</span></div>{/if}
+      {#if selected}<div class="model-note">{#if selectedLogo}<BrandMark src={selectedLogo.path} size={14} />{/if}<span class="status-dot"></span><span>{selected.id}</span></div>{/if}
       {#if selected}
         <div class="runtime-status">
           <span>{selected.device === 'cpu' ? 'CPU · system RAM' : 'GPU + system RAM'} · {selected.loaded ? 'Loaded' : 'Loads when needed'}</span>
@@ -808,6 +811,7 @@
   .prompt-tools { display:flex; justify-content:space-between; align-items:center; margin-top:-7px; }.prompt-tools>span { font-size:10px; color:var(--text-faint); }
   .text-button { display:inline-flex; align-items:center; gap:6px; border:0; background:none; padding:0; font-size:11px; color:var(--accent); }
   .divider { border-top:1px solid var(--border-soft); margin:3px 0; }.model-note { display:flex; align-items:center; gap:6px; font-size:10px; color:var(--text-faint); margin-top:-8px; overflow-wrap:anywhere; }
+  .with-logo { display: inline-flex; align-items: center; gap: 6px; }
   .status-dot { display:inline-block; width:5px; height:5px; border-radius:50%; background:var(--green); flex-shrink:0; }.hint,.optional { font-size:11px; line-height:1.6; color:var(--text-faint); margin:0; }
   .notice { padding:14px; border:1px solid var(--border-soft); border-radius:10px; background:var(--bg-raised); font-size:12px; }.notice p { color:var(--text-dim); line-height:1.6; }
   .refs { display:flex; flex-wrap:wrap; gap:8px; }.ref-thumb { position:relative; padding:0; border:1px solid var(--border-soft); border-radius:8px; overflow:hidden; width:64px; height:64px; background:var(--bg-raised); }.ref-thumb img { width:100%; height:100%; object-fit:cover; display:block; }.ref-thumb span { position:absolute; inset:auto 0 0; font-size:9px; padding:2px 0; background:#000a; color:#fff; }

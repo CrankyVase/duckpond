@@ -3,7 +3,9 @@
   // models — paste an API key, click Add, the catalog syncs itself.
   // Backend: GET /api/providers/presets + POST /api/providers { preset, api_key }.
   import { api } from '../lib/api.js';
+  import { logoForProvider } from '../lib/hubLogos.js';
   import { toast } from '../lib/toast.svelte.js';
+  import BrandMark from './BrandMark.svelte';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import Plus from '@lucide/svelte/icons/plus';
 
@@ -48,9 +50,10 @@
       done — the catalog imports itself, grouped in the picker under the provider's name.</p>
     <div class="presetgrid">
       {#each remaining as pr (pr.key)}
+        {@const presetMark = logoForProvider(pr.key, pr.name, pr.baseUrl)}
         <div class="preset">
           <div class="ptop">
-            <span class="pname">{pr.name}</span>
+            <span class="pname">{#if presetMark}<BrandMark src={presetMark.path} size={18} />{/if}{pr.name}</span>
             {#if pr.freeOnly}<span class="freebadge">free-only import</span>{/if}
             <a class="keylink" href={pr.keyUrl} target="_blank" rel="noreferrer">
               get a key <ExternalLink size={11} />
@@ -97,7 +100,7 @@
     background: color-mix(in srgb, var(--bg-hover) 30%, transparent);
   }
   .ptop { display: flex; align-items: center; gap: 8px; }
-  .pname { font-size: 13px; font-weight: 600; color: var(--text); }
+  .pname { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--text); }
   .freebadge {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
     color: var(--green); border: 1px solid color-mix(in srgb, var(--green) 40%, transparent);
