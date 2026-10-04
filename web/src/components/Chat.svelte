@@ -38,8 +38,15 @@ import ChatFiles from './ChatFiles.svelte';
   let optionsPanel = $state(null), optionsTrigger = $state(null);
   $effect(() => {
     if (!optionsPanel) return;
-    if (composerOptionsOpen) optionsPanel.showModal();
-    else optionsPanel.close();
+    if (composerOptionsOpen) {
+      // Anchor the popover just above the Options button instead of the page centre.
+      const r = (optionsTrigger?.closest('.composer') ?? optionsTrigger)?.getBoundingClientRect();
+      if (r) {
+        optionsPanel.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 436))}px`;
+        optionsPanel.style.bottom = `${Math.max(8, window.innerHeight - r.top + 10)}px`;
+      }
+      optionsPanel.showModal();
+    } else optionsPanel.close();
   });
   $effect(() => {
     if (!composerOptionsOpen) return;
@@ -1242,14 +1249,18 @@ import ChatFiles from './ChatFiles.svelte';
   </div>
   <dialog class="composer-options" id={`${composerId}-options`} aria-labelledby={`${composerId}-options-title`} bind:this={optionsPanel} onclose={() => (composerOptionsOpen = false)}>
     <div class="options-head"><strong id={`${composerId}-options-title`}>Response options</strong><button class="options-close" onclick={() => { composerOptionsOpen = false; optionsTrigger?.focus(); }} aria-label="Close chat options"><X size={16} /></button></div>
-    <div class="option-copy"><Globe size={16} /><div><strong>Web search depth</strong><span>How thoroughly DuckPond searches when a reply needs the web.</span></div></div>
-    <div class="search-choices" role="group" aria-label="Web search depth">
-      {#each ['quick', 'normal', 'ultra'] as mode}
-        <button type="button" class:selected={prefs.researchMode === mode} aria-pressed={prefs.researchMode === mode} onclick={() => setResearch(mode)}>{RESEARCH[mode]}</button>
-      {/each}
+    <div class="opt-row">
+      <div class="option-copy"><Globe size={16} /><div><strong>Web search depth</strong><span>How thoroughly it searches when a reply needs the web.</span></div></div>
+      <div class="search-choices" role="group" aria-label="Web search depth">
+        {#each ['quick', 'normal', 'ultra'] as mode}
+          <button type="button" class:selected={prefs.researchMode === mode} aria-pressed={prefs.researchMode === mode} onclick={() => setResearch(mode)}>{RESEARCH[mode]}</button>
+        {/each}
+      </div>
     </div>
-    <div class="option-copy"><Lightbulb size={16} /><div><strong>Reasoning</strong><span>{thinkingOn ? 'The selected model can think through complex requests.' : 'The selected model replies without its extra reasoning mode.'}</span></div></div>
-    <button type="button" class="reasoning-choice" class:selected={thinkingOn} disabled={!model} aria-pressed={!!thinkingOn} onclick={toggleThinking}>{thinkingOn ? 'On' : 'Off'}</button>
+    <div class="opt-row">
+      <div class="option-copy"><Lightbulb size={16} /><div><strong>Reasoning</strong><span>{thinkingOn ? 'The model thinks through complex requests.' : 'The model replies without extra reasoning.'}</span></div></div>
+      <button type="button" class="reasoning-choice" class:selected={thinkingOn} disabled={!model} aria-pressed={!!thinkingOn} aria-label="Reasoning" onclick={toggleThinking}><span class="knob"></span></button>
+    </div>
   </dialog>
  </div>
  {#if app.conv?.workspace_id}
@@ -1264,12 +1275,12 @@ import ChatFiles from './ChatFiles.svelte';
   .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 28px var(--thread-gutter) 0; width: 100%; box-sizing: border-box; }
   .pad { height: 32px; }
   .agentwork {
-    margin: 14px 0 8px 42px;
+    margin: 14px 0 8px 48px;
     padding: 0;
     border: 0 solid var(--border-soft); border-radius: calc(12px * var(--rf));
     background: var(--bg-card);
   }
-  .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 42px; min-height: 26px; }
+  .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 48px; min-height: 26px; }
   .dimtok { opacity: 0.65; }
   .stream-err {
     color: var(--red); max-width: 100%;
@@ -1395,7 +1406,7 @@ import ChatFiles from './ChatFiles.svelte';
   .send.ready:hover { background: var(--accent-deep); }
   .send.stop { min-width: 38px; padding: 0; background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; box-shadow: none; }
   .imgjob {
-    margin: 14px 0 8px 42px;
+    margin: 14px 0 8px 48px;
     display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
   }
   .imgpreview {
@@ -1602,4 +1613,21 @@ import ChatFiles from './ChatFiles.svelte';
   .tool, .options-trigger { border: none; background: transparent; color: var(--text-dim); }
   @media(max-width:768px) { .empty .main { padding-bottom: 5vh; } .composer { padding: 14px 12px 10px; } }
   @media(max-height:600px) { .empty .main { padding-bottom: 0; } }
+
+  /* ---- redesign: options popover anchored above the composer ---- */
+  .composer-options { display: flex; flex-direction: column; align-items: stretch; gap: 0; position: fixed; inset: auto; margin: 0; width: min(420px, calc(100vw - 16px)); height: auto; padding: 8px 14px 6px; border: 1px solid var(--border); border-radius: 20px; background: var(--bg-sidebar); box-shadow: 0 18px 50px rgba(0, 0, 0, .55); }
+  .options-head { padding: 6px 0 8px; font-size: 13px; }
+  .options-head strong { font-weight: 600; }
+  .opt-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 12px 0; border-top: 1px solid var(--border-soft); }
+  .opt-row .option-copy { flex: 1 1 auto; }
+  .option-copy :global(svg) { color: var(--accent); }
+  .search-choices { flex-shrink: 0; }
+  .search-choices button.selected { background: var(--bg-hover); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+  .reasoning-choice { position: relative; flex-shrink: 0; width: 44px; min-width: 44px; height: 26px; padding: 0; border: 0; border-radius: 999px; background: var(--bg-hover); }
+  .reasoning-choice .knob { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--text-dim); transition: transform 160ms ease, background 160ms ease; }
+  .reasoning-choice.selected { background: var(--accent); }
+  .reasoning-choice.selected .knob { transform: translateX(18px); background: #fff; }
+  .reasoning-choice:hover { background: var(--bg-raised); }
+  .reasoning-choice.selected:hover { background: var(--accent-deep); }
+  @media (max-width: 520px) { .opt-row { flex-wrap: wrap; } .composer-options { left: 8px !important; right: 8px; width: auto; } }
 </style>

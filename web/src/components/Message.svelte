@@ -565,8 +565,8 @@
     .wgroup > :global(*) { max-width: 100%; width: 100%; min-width: 0; }
   }
 
-  .arow { gap: 0; margin: 28px 0 32px; }
-  .avatar { display: none; }
+  .arow { gap: 14px; margin: 28px 0 32px; }
+  .avatar { display: grid; width: 34px; height: 34px; margin-top: 0; background: none; border: 0; }
   .message-heading { margin-bottom: 12px; }
   .message-author { font-size: 12px; color: var(--text-dim); font-weight: 500; }
   .user-heading { display: none; }

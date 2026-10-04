@@ -449,7 +449,7 @@
     </label>
     <nav class="secnav" aria-label="Settings sections">
       <div class="navhead">Settings</div>
-      <input class="section-search" type="search" aria-label="Find a settings section" placeholder="Find a section…" bind:value={sectionQuery} />
+      <input class="section-search" type="search" name="settings-section-filter" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" aria-label="Find a settings section" placeholder="Find a section…" bind:value={sectionQuery} />
       {#each SECTION_GROUPS as group}
         {@const items = SECTIONS.filter(s => group.ids.includes(s.id) && matches(s))}
         {#if items.length}

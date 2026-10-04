@@ -51,19 +51,20 @@
 </div>
 
 <style>
-  .meters { display:flex; align-items:center; gap:14px; flex-shrink:0; min-width:0; }
-  .meter { display:flex; align-items:center; gap:7px; font-size:11px; --c:var(--green); }
+  .meters { display:flex; align-items:center; flex-shrink:0; min-width:0; padding:5px 6px; border:1px solid var(--border-soft); border-radius:999px; background:var(--bg-sidebar); }
+  .meter { display:flex; align-items:center; gap:8px; padding:2px 12px; font-size:11px; --c:var(--green); }
+  .meter + .meter { border-left:1px solid var(--border-soft); }
   .meter.warn { --c:var(--yellow); }
   .meter.hot { --c:var(--red); }
-  .name { color:var(--text-faint); font-weight:500; }
-  .track { width:46px; height:5px; border-radius:3px; background:var(--bg-raised); overflow:hidden; flex-shrink:0; }
-  .fill { display:block; height:100%; border-radius:3px; background:var(--c); transition:width 500ms ease, background 300ms ease; }
-  .val { color:var(--text-dim); font-family:var(--mono); font-size:11px; white-space:nowrap; min-width:0; }
-  .compact { all:unset; cursor:pointer; display:grid; place-items:center; width:26px; height:26px; border-radius:7px; color:var(--text-faint); }
+  .name { color:var(--text-faint); font-size:10px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; }
+  .track { width:54px; height:6px; border-radius:3px; background:var(--bg-hover); overflow:hidden; flex-shrink:0; }
+  .fill { display:block; height:100%; min-width:2px; border-radius:3px; background:var(--c); transition:width 500ms ease, background 300ms ease; }
+  .val { color:var(--text); font-family:var(--mono); font-size:11px; white-space:nowrap; }
+  .compact { all:unset; cursor:pointer; display:grid; place-items:center; width:26px; height:26px; margin-left:2px; border-radius:50%; color:var(--text-faint); }
   .compact:hover { color:var(--text); background:var(--bg-hover); }
   .compact:disabled { cursor:default; }
   .spin { display:grid; animation:spin 1.1s linear infinite; color:var(--accent); }
   @keyframes spin { to { transform:rotate(360deg); } }
-  @media (max-width:1280px) { .val { display:none; } .track { width:40px; } }
-  @media (max-width:900px) { .name { display:none; } .meters { gap:10px; } }
+  @media (max-width:1280px) { .val { display:none; } .track { width:44px; } }
+  @media (max-width:900px) { .name { display:none; } .meter { padding:2px 8px; } }
 </style>
