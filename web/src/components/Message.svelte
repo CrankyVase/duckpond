@@ -4,6 +4,7 @@
   import { mdEnhance } from '../lib/mdEnhance.js';
   import { prefs } from '../lib/prefs.svelte.js';
   import Duck from './Duck.svelte';
+  import LoadStatus from './LoadStatus.svelte';
   import RunReplay from './RunReplay.svelte';
   import SearchTrace from './SearchTrace.svelte';
   import SourcesStrip from './SourcesStrip.svelte';
@@ -230,6 +231,8 @@
           The model spent its whole reply thinking and never answered — its thoughts are above.
           Try regenerating, or set reasoning to <b>off</b> in Options.
         </div>
+      {:else if waiting && streaming && msg.loading}
+        <LoadStatus modelId={msg.loadModel} />
       {:else if waiting}
         <div class="typing" aria-label="Generating reply" aria-live="polite">
           <span></span><span></span><span></span>

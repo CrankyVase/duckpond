@@ -13,8 +13,7 @@ import { smoothScrollTo } from '../lib/motion.js';
 import ChatFiles from './ChatFiles.svelte';
   import Message from './SafeMessage.svelte';
   import RunFeed from './RunFeed.svelte';
-  import LoadStatus from './LoadStatus.svelte';
-  import Welcome from './Welcome.svelte';
+    import Welcome from './Welcome.svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import FileText from '@lucide/svelte/icons/file-text';
   import X from '@lucide/svelte/icons/x';
@@ -1117,7 +1116,7 @@ import ChatFiles from './ChatFiles.svelte';
           </div>
         {/if}
         <Message streaming
-          msg={{ role: 'assistant', tokS: streamingHere.tokS, content: streamingHere.text, thinking: streamingHere.thinking || null, search: streamingHere.search, widgets: streamingHere.widgets, pinned: 0 }} />
+          msg={{ role: 'assistant', loading: streamingHere.loading, loadModel: app.conv?.model_id, tokS: streamingHere.tokS, content: streamingHere.text, thinking: streamingHere.thinking || null, search: streamingHere.search, widgets: streamingHere.widgets, pinned: 0 }} />
         {#if streamingHere.liveTool}
           <div class="agentwork live fade-in">
             <RunFeed events={[]} liveTool={streamingHere.liveTool} />
@@ -1166,8 +1165,6 @@ import ChatFiles from './ChatFiles.svelte';
             <span class="stream-err">interrupted — {streamingHere.error}</span>
           {:else if streamingHere.queued}
             <span class="shimmer">waiting for the GPU… {streamingHere.queued} ahead of you</span>
-          {:else if streamingHere.loading}
-            <LoadStatus modelId={app.conv?.model_id} />
           {:else if streamingHere.pendingApproval}
             <span class="shimmer">waiting for your approval…</span>
           {:else if duckState === 'search'}
