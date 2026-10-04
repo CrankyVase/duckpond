@@ -10,8 +10,8 @@
   // setting — this list is the single source of truth for both the sidebar
   // and the Settings toggle list that controls prefs.pinnedNav.
   export const NAV_ITEMS = [
-    { id: 'hub', label: 'Model Hub', icon: Download },
     { id: 'media', label: 'Media Studio', icon: Clapperboard },
+    { id: 'hub', label: 'Model Hub', icon: Download },
     { id: 'files', label: 'Files', icon: Files },
     { id: 'stats', label: 'Stats', icon: BarChart3 },
     { id: 'providers', label: 'Providers', icon: Cloud },
@@ -25,11 +25,10 @@
   import { prefs } from '../lib/prefs.svelte.js';
   import { chatPath, userSubpath } from '../lib/router.js';
   import {
-    app, closeSidebarIfMobile, loadConversations, newConversation, openConversation,
+    app, closeSidebarIfMobile, loadConversations, newConversation, openConversation, switchMode,
   } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import Duck from './Duck.svelte';
-  import ModeSwitch from './ModeSwitch.svelte';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
@@ -40,17 +39,8 @@
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import X from '@lucide/svelte/icons/x';
   import Settings from '@lucide/svelte/icons/settings';
-
-  // Build stamp — fetched once, never changes while the page is open.
-  let build = $state(null);
-  $effect(() => {
-    api('/api/version').then((b) => { build = b; }).catch(() => { /* no stamp, no harm */ });
-  });
-  const buildTitle = $derived(build
-    ? `v${build.version} · commit ${build.commit ?? 'unknown'}`
-      + `${build.commit_date ? ` · ${new Date(build.commit_date).toLocaleString()}` : ''}`
-      + `\nnode ${build.node}`
-    : '');
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Code from '@lucide/svelte/icons/code';
 
   // Duck Pond Control — owner only. Prod: dash.crankyvase.site · local: :8082
   function controlUrl() {
@@ -70,6 +60,7 @@
 
   async function openChat(id) {
     app.view = 'chat';
+    app.themeStudioOpen = false;
     app.modelPickerOpen = false;
     try { await openConversation(id); closeSidebarIfMobile(); }
     catch (e) { toast(`Could not open conversation: ${e.message}`, 'error'); }
@@ -100,9 +91,21 @@
     moreOpen = false;
   }
 
+  let switchingMode = $state(false);
+  async function goMode(mode) {
+    if (switchingMode) return;
+    switchingMode = true;
+    try {
+      if (app.mode !== mode) await switchMode(mode);
+      goView('chat');
+    } catch (e) { toast(e.message, 'error'); }
+    finally { switchingMode = false; }
+  }
+
   const pinnedItems = $derived(NAV_ITEMS.filter((n) => prefs.pinnedNav.includes(n.id)));
   const overflowItems = $derived(NAV_ITEMS.filter((n) => !prefs.pinnedNav.includes(n.id)));
   let moreOpen = $state(false);
+  const navigationId = $props.id();
   function navHref(id) { return app.user?.id != null ? userSubpath(app.user.id, id) : `/${id}`; }
 
   const groups = $derived.by(() => {
@@ -179,13 +182,13 @@
   <button type="button" class="scrim" aria-label="Close menu"
     onclick={() => (app.sidebarCollapsed = true)}></button>
 {/if}
-<aside class:collapsed={app.sidebarCollapsed}>
+<aside id="workspace-navigation" class:collapsed={app.sidebarCollapsed} aria-label="Duck Pond navigation" inert={app.sidebarCollapsed}>
   <div class="inner">
     <div class="brand">
       <button type="button" class="brand-btn" onclick={goHome}
         title="Home — new chat" aria-label="DuckPond home">
         <span class="mark"><Duck px={0.85} still /></span>
-        <span class="bname">DuckPond</span>
+        <span class="bname">duckpond<span class="brand-dot">.</span></span>
       </button>
       <button type="button" class="ghost collapse-d" onclick={() => (app.sidebarCollapsed = true)}
         title="Hide sidebar" aria-label="Hide sidebar">
@@ -197,27 +200,69 @@
       </button>
     </div>
 
+    <div class="navigation-body">
     <div class="top">
-      <ModeSwitch onpick={closeSidebarIfMobile} />
-      <button class="new" onclick={goNew} title="New chat (Ctrl+Shift+O)">
+      <button class="new" onclick={goNew} title="New chat or task (Ctrl+Shift+O)">
         <SquarePen size={15} />
         <span>New {app.mode === 'agent' ? 'task' : 'chat'}</span>
+        <kbd aria-hidden="true">Ctrl ⇧ O</kbd>
       </button>
     </div>
 
-    <nav>
+    <nav class="pages" aria-label="Main navigation">
+      <button class="page" class:active={app.view === 'chat' && app.mode === 'chat'}
+        aria-pressed={app.view === 'chat' && app.mode === 'chat'} disabled={switchingMode} onclick={() => goMode('chat')}>
+        <MessageSquare size={17} /> Chat
+      </button>
+      <button class="page" class:active={app.view === 'chat' && app.mode === 'agent'}
+        aria-pressed={app.view === 'chat' && app.mode === 'agent'} disabled={switchingMode} onclick={() => goMode('agent')}>
+        <Code size={17} /> Coding
+      </button>
+      {#each pinnedItems as item (item.id)}
+        <a class="page"
+          href={navHref(item.id)}
+          onclick={(e) => { e.preventDefault(); goView(item.id); }}
+          aria-current={app.view === item.id ? 'page' : undefined}
+          class:active={app.view === item.id}>
+          <item.icon size={16} /> {item.label}
+        </a>
+      {/each}
+      {#if overflowItems.length || app.user?.role === 'owner'}
+        <div class="morewrap">
+          <button class="page" class:active={overflowItems.some((item) => item.id === app.view)}
+            aria-expanded={moreOpen} aria-controls={`${navigationId}-more-tools`} onclick={() => (moreOpen = !moreOpen)}>
+            <Ellipsis size={16} /> <span class="nav-title">{overflowItems.find((item) => item.id === app.view)?.label ?? 'More tools'}</span>
+            <span class="more-chevron" class:open={moreOpen}><ChevronDown size={13} /></span>
+          </button>
+          {#if moreOpen}
+            <div class="moredrop" id={`${navigationId}-more-tools`}>
+              {#each overflowItems as item (item.id)}
+                <a class="moreitem" href={navHref(item.id)}
+                  onclick={(e) => { e.preventDefault(); goView(item.id); }}
+                  class:active={app.view === item.id} aria-current={app.view === item.id ? 'page' : undefined}>
+                  <item.icon size={15} /> {item.label}
+                </a>
+              {/each}
+              {#if app.user?.role === 'owner'}
+                <a class="moreitem" href={controlUrl()} rel="noopener" title="Duck Pond Control">
+                  <Gauge size={15} /> Control
+                </a>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </nav>
+
+    <div class="history-heading"><span>Recent {app.mode === 'agent' ? 'tasks' : 'chats'}</span><span class="history-count">{groups.reduce((count, group) => count + group.items.length, 0)}</span></div>
+    <nav class="history" aria-label="Recent conversations">
       {#each groups as g (g.label)}
         <div class="group">{g.label}</div>
         {#each g.items as c (c.id)}
-          <a class="item" class:active={app.conv?.id === c.id} class:renaming={renamingId === c.id}
-            href={app.user?.id != null ? chatPath(app.user.id, c.title, c.id) : '#'}
-            onclick={(e) => { e.preventDefault(); if (renamingId !== c.id) openChat(c.id); }}
-            ondblclick={(e) => startRename(c, e)}
-            role="link">
-            <span class="ci"><MessageSquare size={13} /></span>
+          <div class="history-row" class:active={app.conv?.id === c.id} class:renaming={renamingId === c.id}>
             {#if renamingId === c.id}
-              <input class="rninput" bind:value={renameDraft} use:focusSelect
-                onclick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+              <span class="ci"><MessageSquare size={13} /></span>
+              <input class="rninput" aria-label="Conversation title" bind:value={renameDraft} use:focusSelect
                 onblur={() => commitRename(c)}
                 onkeydown={(e) => {
                   e.stopPropagation();
@@ -225,68 +270,32 @@
                   if (e.key === 'Escape') renamingId = null;
                 }} />
             {:else}
-              <span class="title">{c.title}</span>
-              <button class="act rn" onclick={(e) => startRename(c, e)} title="Rename chat">
+              <a class="item" class:active={app.conv?.id === c.id} aria-current={app.conv?.id === c.id ? 'page' : undefined}
+                href={app.user?.id != null ? chatPath(app.user.id, c.title, c.id) : '#'}
+                onclick={(e) => { e.preventDefault(); openChat(c.id); }}
+                ondblclick={(e) => startRename(c, e)}>
+                <span class="ci"><MessageSquare size={13} /></span>
+                <span class="title" title={c.title}>{c.title}</span>
+              </a>
+              <button class="act rn" onclick={(e) => startRename(c, e)} title="Rename conversation" aria-label={`Rename ${c.title}`}>
                 <Pencil size={12} />
               </button>
-              <button class="act del" onclick={(e) => remove(c.id, e)} title="Delete chat">
+              <button class="act del" onclick={(e) => remove(c.id, e)} title="Delete conversation" aria-label={`Delete ${c.title}`}>
                 <X size={13} />
               </button>
             {/if}
-          </a>
+          </div>
         {/each}
       {:else}
         <div class="none">No {app.mode === 'agent' ? 'tasks' : 'chats'} yet.</div>
       {/each}
     </nav>
-
-    <div class="pages">
-      {#each pinnedItems as item (item.id)}
-        <a class="page"
-          href={navHref(item.id)}
-          onclick={(e) => { e.preventDefault(); goView(item.id); }}
-          aria-current={app.view === item.id ? 'page' : undefined}
-          class:active={app.view === item.id}>
-          <item.icon size={14} /> {item.label}
-        </a>
-      {/each}
-      <a class="page" href={navHref('settings')} class:active={app.view === 'settings'}
+    </div>
+    <div class="utility-nav">
+      <a class="page" href={navHref('settings')} class:active={app.view === 'settings'} aria-current={app.view === 'settings' ? 'page' : undefined}
         onclick={(e) => { e.preventDefault(); goView('settings'); }}>
-        <Settings size={14} /> Settings
+        <Settings size={16} /> Settings
       </a>
-      {#if overflowItems.length}
-        <div class="morewrap">
-          <button class="page" onclick={() => (moreOpen = !moreOpen)}>
-            <Ellipsis size={14} /> More
-          </button>
-          {#if moreOpen}
-            <div class="moredrop">
-              {#each overflowItems as item (item.id)}
-                <a class="moreitem"
-                  href={navHref(item.id)}
-                  onclick={(e) => { e.preventDefault(); goView(item.id); }}
-                  class:active={app.view === item.id}>
-                  <item.icon size={14} /> {item.label}
-                </a>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {/if}
-      {#if app.user?.role === 'owner'}
-        <a class="page control" href={controlUrl()} title="Duck Pond Control — owner/admin only"
-          rel="noopener">
-          <Gauge size={14} /> Control
-        </a>
-      {/if}
-      <!-- Speech Lab hidden 2026-07-15: local Voxtral turned out impossible
-           (vllm-omni has no CPU platform) and the hosted-API fallback was NOT
-           okay with Lewis. Next TTS model: ResembleAI/chatterbox — re-enable
-           this button when that's built.
-      <button class="page" onclick={() => (app.view = 'speech')}>
-        <AudioWaveform size={14} /> Speech Lab
-      </button>
-      -->
     </div>
 
     <div class="bottom">
@@ -298,25 +307,21 @@
       <button class="ghost out" onclick={() => {
         app.themeStudioOpen = true;
         closeSidebarIfMobile();
-      }} title="Theme Studio — customize the look">
+      }} title="Theme Studio — customize the look" aria-label="Open Theme Studio">
         <Palette size={14} />
       </button>
-      <button class="ghost out" onclick={logout} title="Sign out"><LogOut size={14} /></button>
+      <button class="ghost out" onclick={logout} title="Sign out" aria-label="Sign out"><LogOut size={14} /></button>
     </div>
 
-    <!-- Build stamp. The version says what this is; the commit says exactly
-         which build is live, which is the bit that matters when the deploy
-         timer has been running and you want to know if your fix is up yet. -->
-    {#if build}
-      <div class="build" title={buildTitle}>
-        DuckPond v{build.version}{build.codename ? ` “${build.codename}”` : ''}
-        {#if build.commit}<span class="sha">{build.commit}</span>{/if}
-      </div>
-    {/if}
   </div>
 </aside>
 
 <style>
+  .brand-dot { color: var(--text-faint); }
+  .bname { font-size: 18px; letter-spacing: -.7px; font-weight: 600; }
+  .mark { filter: grayscale(1); }
+  .page:disabled { opacity: .5; cursor: wait; }
+
   /* ========== desktop base ========== */
   .scrim {
     display: none;
@@ -325,7 +330,7 @@
     background: transparent;
   }
   aside {
-    width: 232px; flex-shrink: 0; height: 100%; overflow: hidden;
+    width: 256px; flex-shrink: 0; height: 100%; overflow: hidden;
     background: var(--bg-sidebar); border-right: 1px solid var(--border-soft);
     transition: width 220ms ease;
     z-index: 30;
@@ -336,7 +341,7 @@
   }
   :global(html[data-sidebar='right']) aside.collapsed { border-left-color: transparent; }
   .inner {
-    width: 232px; height: 100%;
+    width: 256px; height: 100%;
     display: flex; flex-direction: column;
     min-height: 0;
   }
@@ -344,7 +349,7 @@
 
   .brand {
     display: flex; align-items: center; gap: 6px;
-    padding: 12px 10px 8px 12px;
+    padding: 16px 12px 16px;
     font-weight: 600; font-size: 15px; letter-spacing: -0.01em;
     user-select: none; flex-shrink: 0;
   }
@@ -371,32 +376,35 @@
   .collapse-d:hover { color: var(--text); }
 
   .top {
-    padding: 6px 12px 10px;
+    padding: 4px 14px 16px;
     display: flex; flex-direction: column; gap: 8px;
     flex-shrink: 0;
   }
   .top :global(.modeswitch) { width: 100%; }
   .new {
     width: 100%; display: flex; align-items: center; gap: 9px;
-    padding: 9px 13px; font-size: 13.5px; font-weight: 500;
-    background: var(--bg-raised); box-sizing: border-box;
+    min-height: 42px; padding: 10px 12px; font-size: 13px; font-weight: 500;
+    background: var(--text); color: var(--bg); border-color: var(--text); box-sizing: border-box;
   }
-  .new :global(svg) { color: var(--text-dim); flex-shrink: 0; }
+  .new :global(svg) { color: inherit; flex-shrink: 0; }
+  .new:hover { background: var(--accent-deep); }
+  .new kbd { margin-left: auto; font: 9px var(--mono); color: #555; white-space: nowrap; }
+  .navigation-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .history-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 22px 24px 2px; font-size: 12px; font-weight: 600; color: var(--text-dim); }
+  .history-count { font: 10px var(--mono); color: var(--text-faint); }
 
-  nav {
-    flex: 1 1 auto; min-height: 0;
-    overflow-y: auto; overflow-x: hidden;
-    padding: 0 8px 12px;
+  .history {
+    padding: 0 12px 20px;
     -webkit-overflow-scrolling: touch;
   }
   .group {
     font-size: 10.5px; color: var(--text-faint); font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.08em;
+    text-transform: none; letter-spacing: 0;
     padding: 14px 10px 5px; user-select: none;
   }
   .item {
     display: flex; align-items: center; gap: 8px;
-    padding: 7px 8px 7px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer;
+    flex: 1 1 auto; min-height: 38px; box-sizing: border-box; padding: 8px 4px 8px 10px; border-radius: calc(9px * var(--rf)); cursor: pointer;
     color: var(--text-dim); font-size: 13.5px;
     text-decoration: none; min-width: 0;
     transition: background 110ms ease, color 110ms ease;
@@ -405,11 +413,15 @@
   .item.active { background: var(--bg-raised); color: var(--text); position: relative; }
   /* small accent tick in the nav gutter — instant "you are here" */
   .item.active::before {
-    content: ''; position: absolute; left: -6px; top: 22%; bottom: 22%;
+    content: none; position: absolute; left: -6px; top: 22%; bottom: 22%;
     width: 3px; border-radius: 3px; background: var(--accent);
   }
   .ci { display: grid; place-items: center; color: var(--text-faint); flex-shrink: 0; }
   .item.active .ci { color: var(--text-dim); }
+  .history-row { display: flex; align-items: center; gap: 2px; min-width: 0; padding-right: 4px; border-radius: calc(9px * var(--rf)); }
+  .history-row:hover { background: var(--bg-hover); }
+  .history-row.active { background: var(--bg-raised); }
+  .history-row.renaming { min-height: 38px; padding: 4px 8px 4px 10px; gap: 8px; }
   .title {
     flex: 1 1 auto; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -420,9 +432,9 @@
     color: var(--text-dim); flex-shrink: 0;
     opacity: 0; transition: opacity 120ms ease, background 120ms ease;
   }
-  .item:hover .act { opacity: 0.7; }
+  .history-row:hover .act, .history-row:focus-within .act { opacity: 0.7; }
   .rn:hover { background: var(--bg-raised); color: var(--text); opacity: 1; }
-  .del:hover { background: rgba(192, 96, 79, 0.15); color: var(--red); opacity: 1; }
+  .del:hover { background: var(--bg-hover); color: var(--red); opacity: 1; }
   .rninput {
     flex: 1; min-width: 0;
     background: var(--bg-input); border: 1px solid var(--accent-dim);
@@ -431,44 +443,35 @@
   }
   .none { padding: 18px 12px; color: var(--text-faint); font-size: 12.5px; text-align: center; }
 
-  .item.result { flex-direction: column; align-items: stretch; gap: 3px; padding: 8px 10px; }
-  .rhead { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-  .rtitle {
-    flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--text);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .rdate { font-size: 10.5px; color: var(--text-faint); font-family: var(--mono); flex-shrink: 0; }
-  .rsnip {
-    font-size: 11.5px; color: var(--text-dim); line-height: 1.45;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  }
-
   .pages {
     display: grid; grid-template-columns: 1fr;
-    gap: 2px; padding: 10px 12px 8px;
-    border-top: 1px solid var(--border-soft);
-    flex-shrink: 0;
+    gap: 3px; padding: 0 14px 20px;
+    border-bottom: 1px solid var(--border-soft);
+    flex: 0 0 auto; min-height: auto; overflow: visible;
   }
-  /* owner Control link spans its own full-width row */
-  .page.control { grid-column: 1 / -1; }
+  .utility-nav { padding: 10px 14px 8px; border-top: 1px solid var(--border-soft); flex-shrink: 0; }
+  .utility-nav .page { width: 100%; }
   .page {
     all: unset; cursor: pointer; flex: 1 1 0; min-width: 0;
     display: flex; align-items: center; justify-content: flex-start; gap: 10px;
-    padding: 8px 10px; border-radius: calc(9px * var(--rf));
+    min-height: 36px; padding: 9px 10px; border-radius: calc(9px * var(--rf));
     text-decoration: none; box-sizing: border-box;
-    font-size: 12px; font-weight: 500; color: var(--text-dim);
+    font-size: 13px; font-weight: 450; color: var(--text-dim);
     background: transparent; border: 1px solid transparent;
     transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
   }
   .page:hover { background: var(--bg-hover); color: var(--text); }
-  .page.active { color: var(--text); border-color: var(--border-soft); background: var(--bg-card); box-shadow: inset 2px 0 var(--accent); }
+  .page.active { color: var(--text); border-color: var(--border-soft); background: var(--bg-card); box-shadow: none; }
   .page :global(svg) { color: var(--text-faint); flex-shrink: 0; }
   .page.active :global(svg) { color: var(--text-dim); }
 
   .morewrap { position: relative; min-width: 0; }
   .morewrap > .page { width: 100%; }
+  .nav-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .more-chevron { display: grid; place-items: center; margin-left: auto; transition: transform 150ms ease; }
+  .more-chevron.open { transform: rotate(180deg); }
   .moredrop {
-    position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 30;
+    position: relative; margin: 6px 0 2px; z-index: 30;
     background: var(--bg-card); border: 1px solid var(--border-soft);
     border-radius: calc(9px * var(--rf)); padding: 5px;
     display: flex; flex-direction: column; gap: 2px;
@@ -478,7 +481,7 @@
     all: unset; cursor: pointer; box-sizing: border-box;
     display: flex; align-items: center; gap: 8px;
     padding: 7px 9px; border-radius: calc(7px * var(--rf));
-    font-size: 12px; font-weight: 500; color: var(--text-dim);
+    font-size: 13px; font-weight: 450; color: var(--text-dim);
     text-decoration: none; white-space: nowrap;
     transition: background 110ms ease, color 110ms ease;
   }
@@ -492,23 +495,10 @@
     display: flex; align-items: center; gap: 10px;
     flex-shrink: 0; min-width: 0;
   }
-  .build {
-    padding: 0 14px 9px;
-    font-size: 10px;
-    color: var(--text-faint);
-    letter-spacing: 0.02em;
-    display: flex; align-items: center; gap: 5px;
-    flex-shrink: 0;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .build .sha {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    opacity: 0.75;
-  }
   .avatar {
     width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
     display: grid; place-items: center;
-    background: var(--accent-deep); color: #16110a;
+    background: var(--accent-deep); color: var(--on-accent);
     font-size: 13px; font-weight: 700;
   }
   .who { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
@@ -518,6 +508,7 @@
     padding: 6px; display: grid; place-items: center;
     color: var(--text-dim); flex-shrink: 0;
   }
+  .brand-btn:focus-visible, .new:focus-visible, .page:focus-visible, .moreitem:focus-visible, .item:focus-visible, .act:focus-visible, .collapse-d:focus-visible, .close-m:focus-visible, .out:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   /* ========== phone drawer (must come last so it wins) ========== */
   @media (max-width: 768px) {
@@ -589,7 +580,7 @@
     .bname { font-size: 15px; }
     .collapse-d { display: none; }
 
-    .top { padding: 4px 12px 10px; gap: 8px; }
+    .top { padding: 8px 12px 12px; gap: 8px; }
     .new {
       min-height: 44px;
       padding: 11px 14px;
@@ -597,14 +588,12 @@
     }
     .top :global(.modeswitch) { min-height: 44px; }
 
-    nav {
-      flex: 1 1 auto;
-      min-height: 0;
-      padding: 0 6px 8px;
+    .history {
+      padding: 0 8px 14px;
     }
     .group { padding: 12px 10px 4px; font-size: 10px; }
     .item {
-      padding: 10px 8px 10px 10px;
+      padding: 10px 4px 10px 10px;
       min-height: 44px;
       font-size: 14.5px;
       gap: 10px;
@@ -614,18 +603,18 @@
       opacity: 0.55;
       width: 34px; height: 34px;
     }
-    .item:hover .act,
-    .item .act { opacity: 0.75; }
+    .history-row:hover .act,
+    .history-row .act { opacity: 0.75; }
     .del:active { opacity: 1; background: rgba(192, 96, 79, 0.18); color: var(--red); }
     .rninput { font-size: 16px; padding: 6px 10px; }
 
-    /* 2×2 page tiles (Control spans its own row via .page.control) */
+    /* A single, predictable navigation list in the drawer. */
     .pages {
       display: grid !important;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      padding: 10px 12px 8px;
-      border-top: 1px solid var(--border-soft);
+      grid-template-columns: 1fr;
+      gap: 3px;
+      padding: 0 12px 14px;
+      border-bottom: 1px solid var(--border-soft);
     }
     .page {
       flex: none;
@@ -651,4 +640,5 @@
       padding: 0;
     }
   }
+  @media (prefers-reduced-motion: reduce) { aside, .more-chevron, .brand-btn, .item, .act, .page, .moreitem { transition: none; } }
 </style>

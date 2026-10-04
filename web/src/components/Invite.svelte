@@ -40,7 +40,7 @@
 <div class="wrap">
   <form class="card slide-up" onsubmit={submit}>
     <div class="logo"><Duck px={2} bob interactive /></div>
-    <h1>DuckPond</h1>
+    <h1>duckpond.</h1>
     {#if check === null}
       <p class="hint">Checking your invite…</p>
     {:else if !check.valid}
@@ -64,18 +64,16 @@
 
 <style>
   .wrap {
-    height: 100vh; display: grid; place-items: center;
-    background:
-      radial-gradient(ellipse 60% 45% at 50% 0%, rgba(166, 124, 82, 0.07), transparent),
-      var(--bg);
+    height: 100dvh; overflow-y: auto; padding: 24px 0; display: grid; place-items: center;
+    background: var(--bg);
   }
   .card {
-    width: 330px; display: flex; flex-direction: column; gap: 12px;
+    width: min(380px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 12px;
     background: var(--bg-sidebar); border: 1px solid var(--border);
     border-radius: 18px; padding: 34px 32px 26px;
-    box-shadow: var(--shadow-lg);
+    box-shadow: none;
   }
-  .logo { display: flex; justify-content: center; margin-bottom: 2px; }
+  .logo { filter: grayscale(1); display: flex; justify-content: center; margin-bottom: 2px; }
   h1 { margin: 0; font-size: 22px; text-align: center; font-weight: 600; letter-spacing: -0.01em; }
   .hint { margin: -6px 0 8px; color: var(--text-dim); font-size: 13px; text-align: center; }
   .error { margin: 0; color: var(--red); font-size: 13px; text-align: center; }

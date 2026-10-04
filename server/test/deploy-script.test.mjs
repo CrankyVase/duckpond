@@ -28,20 +28,27 @@ const r=spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:'inher
 `);
   command('curl', `#!/usr/bin/env node
 const {existsSync}=require('node:fs');
+if(process.argv.some(x=>/bridge\\/status|v1\\/progress/.test(x))){console.log(JSON.stringify({active:process.env.TEST_MODE==='worker-busy',status:'unloaded'}));process.exit(0);}
 console.log(JSON.stringify({ok:true,deployment:{supported:process.env.TEST_MODE!=='legacy',busy:process.env.TEST_MODE==='busy',draining:existsSync('.deploy-drain')}}));
+`);
+  command('bridge-python', `#!/usr/bin/env node
+require('node:fs').appendFileSync(process.env.TEST_CALLS,'worker-sync '+process.argv.slice(2).join(' ')+'\\n');
 `);
   for (const name of ['npm','systemctl']) command(name, `#!/usr/bin/env node
 require('node:fs').appendFileSync(process.env.TEST_CALLS,${JSON.stringify(name+' ')}+process.argv.slice(2).join(' ')+'\\n');
 if(${JSON.stringify(name)}==='systemctl'&&process.env.TEST_MODE==='restart-fails')process.exit(1);
 `);
   const run = mode => spawnSync('bash',['deploy.sh'],{cwd:root,encoding:'utf8',timeout:15000,
-    env:{...process.env,DUCKPOND_REPO:root,DUCKPOND_NODE_BIN:bin,TEST_MODE:mode,TEST_CALLS:calls}});
-  for (const mode of ['legacy','busy']) {
+    env:{...process.env,DUCKPOND_REPO:root,DUCKPOND_NODE_BIN:bin,DUCKPOND_BRIDGE_PYTHON:join(bin,'bridge-python'),TEST_MODE:mode,TEST_CALLS:calls}});
+  for (const mode of ['legacy','busy','worker-busy']) {
     const r=run(mode);assert.equal(r.status,0,r.stderr);assert(!existsSync(state));assert(!existsSync(calls));
   }
   let r=run('idle');assert.equal(r.status,0,r.stderr);assert(existsSync(state));
   assert(!existsSync(join(root,'.deploy-drain')));
   const firstCalls=readFileSync(calls,'utf8');assert(firstCalls.includes('restart duckpond.service'));
+  assert(firstCalls.includes('worker-sync bridge/sync_worker.py'));
+  assert(firstCalls.includes('restart duckpond-windows-bridge.service'));
+  assert(!firstCalls.includes('image-gen-bridge-8765.service'));
   mkdirSync(join(root,'web/dist'));writeFileSync(join(root,'web/dist/output.js'),'generated');
   r=run('idle');assert.equal(r.status,0,r.stderr);assert.equal(readFileSync(calls,'utf8'),firstCalls);
   const firstState=readFileSync(state,'utf8');

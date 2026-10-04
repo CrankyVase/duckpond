@@ -1,4 +1,5 @@
 import { estimateAgentPrompt, agentInputLimit, calibratedPromptEstimate, trimAgentToolHistory } from '../agentContext.js';
+import { createRunHarness, EDIT_ONLY_INSTRUCTION, EDIT_ONLY_TOOLS, parseAgentCall, recoveryHint } from '../agentHarness.js';
 import { projectBrowser, closeProjectBrowser, closeBrowsers } from '../projectBrowser.js';
 import { atomicProjectWrite } from '../atomicProjectWrite.js';
 import { toolJournal } from '../toolJournal.js';
@@ -36,7 +37,8 @@ import {
 export const DEFAULT_AGENT_MODEL = process.env.AGENT_MODEL ?? 'qwen3-coder-next-q4-k-m';
 // Bigger projects (games, multi-file app) routinely need more than 30 tool steps.
 // Still a safety rail so a runaway loop can't spin forever.
-const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 80);
+const configuredSteps = Number(process.env.AGENT_MAX_STEPS ?? 80);
+const MAX_STEPS = Number.isFinite(configuredSteps) ? Math.max(1, Math.min(500, Math.floor(configuredSteps))) : 80;
 const MAX_WORKSPACES = 8;
 const APPROVAL_TIMEOUT_MS = 15 * 60 * 1000;
 // After a server restart every "running" row is orphaned (AbortControllers die
@@ -153,6 +155,15 @@ export const GENERATE_IMAGE_TOOL = { type: 'function', function: {
 
 export const AGENT_TOOLS = [
   { type: 'function', function: {
+    name: 'update_plan', description: 'Keep a short visible plan for multi-step coding work. Use pending, in_progress, or completed; mark completed only after the work is done. At most one step may be in_progress. Update when the approach or progress changes.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      steps: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', additionalProperties: false, properties: {
+        title: { type: 'string', minLength: 1, maxLength: 240 }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+      }, required: ['title', 'status'] } },
+      explanation: { type: 'string', maxLength: 1200 },
+    }, required: ['steps'] },
+  } },
+  { type: 'function', function: {
     name: 'start_server', description: 'Start a managed project dev server and return its preview URL. Use Vite with --host 0.0.0.0 --port 3000 --base "$DUCKPOND_PREVIEW_BASE". The environment sets PORT and DUCKPOND_PREVIEW_BASE. Inspect server_status after starting.',
     parameters: { type: 'object', properties: { command: { type: 'string' }, port: { type: 'integer', minimum: 3000, maximum: 3009 } }, required: ['command'] },
   } },
@@ -168,8 +179,8 @@ export const AGENT_TOOLS = [
   { type: 'function', function: { name: 'server_status', description: 'Read project server readiness, preview URL and recent logs.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'stop_server', description: 'Stop the managed project dev server.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: {
-    name: 'search_files', description: 'Find project files by filename or search text across source files. Returns paths and line numbers. Skips dependencies, build output and symlinks.',
-    parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' }, filenames: { type: 'boolean' }, limit: { type: 'integer' } }, required: ['query'] },
+    name: 'search_files', description: 'Find project files by filename or search text across source files. Returns paths and line numbers. Skips dependencies, build output and symlinks. Narrow path after a truncated scan.',
+    parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1 }, path: { type: 'string' }, filenames: { type: 'boolean' }, limit: { type: 'integer', minimum: 1, maximum: 100 }, context_lines: { type: 'integer', minimum: 0, maximum: 3 }, case_sensitive: { type: 'boolean' } }, required: ['query'] },
   } },
   { type: 'function', function: {
     name: 'list_files',
@@ -183,8 +194,8 @@ export const AGENT_TOOLS = [
     description: 'Read a text file from the workspace. For big files, read a window with start_line/max_lines instead of the whole thing.',
     parameters: { type: 'object', properties: {
       path: { type: 'string', description: 'workspace-relative path' },
-      start_line: { type: 'number', description: 'first line to read (1-based, default 1)' },
-      max_lines: { type: 'number', description: 'stop after this many lines (default: all)' },
+      start_line: { type: 'integer', minimum: 1, description: 'first line to read (1-based, default 1)' },
+      max_lines: { type: 'integer', minimum: 0, description: 'stop after this many lines (default: all)' },
     }, required: ['path'] },
   } },
   { type: 'function', function: {
@@ -200,18 +211,19 @@ export const AGENT_TOOLS = [
     description: 'Make targeted edits to an existing file WITHOUT rewriting it: one or more search/replace blocks. Each search string must match the file EXACTLY ONCE — include enough surrounding lines to make it unique, copied verbatim from read_file (whitespace matters). All edits apply in order; if any search fails, nothing is written.',
     parameters: { type: 'object', properties: {
       path: { type: 'string', description: 'workspace-relative path' },
-      edits: { type: 'array', items: { type: 'object', properties: {
-        search: { type: 'string', description: 'exact text to find, with enough context to be unique' },
+      edits: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'object', properties: {
+        search: { type: 'string', minLength: 1, description: 'exact text to find, with enough context to be unique' },
         replace: { type: 'string', description: 'replacement text (can be empty to delete)' },
       }, required: ['search', 'replace'] } },
     }, required: ['path', 'edits'] },
   } },
   { type: 'function', function: {
     name: 'run_command',
-    description: 'Run a shell command inside the project container (cwd /workspace): inspect git, install dependencies, build, or test. Use start_server for persistent dev servers. Commands obey the user permission policy.',
+    description: 'Run a shell command inside the project container: inspect git, install dependencies, build, or test. Set cwd to a project folder when needed; it defaults to /workspace for each call. Use start_server for persistent dev servers. Commands obey the user permission policy.',
     parameters: { type: 'object', properties: {
-      command: { type: 'string', description: 'bash command that should exit (not a server left running)' },
-      timeout_sec: { type: 'number', description: 'kill after N seconds (default 120, max 900)' },
+      command: { type: 'string', minLength: 1, description: 'bash command that should exit (not a server left running)' },
+      cwd: { type: 'string', maxLength: 4096, description: 'workspace-relative working directory, such as server or web (default /workspace)' },
+      timeout_sec: { type: 'number', minimum: 5, maximum: 900, description: 'kill after N seconds (default 120, max 900)' },
     }, required: ['command'] },
   } },
   { type: 'function', function: {
@@ -240,6 +252,8 @@ function agentSystemPrompt(ws) {
     'Rules:',
     '- AGENTIC MEANS TOOLS, NOT TEXT: never deliver code as chat markdown or draft it in your reasoning. Every file is created with write_file or edit_file; the reply text is only short progress notes and the final summary.',
     '- Look before you leap: list or read files before editing them.',
+    '- For multi-step tasks, publish a short update_plan and keep it current. Inspect, implement, and verify in that order; mark steps completed only when their work is done.',
+    '- Treat tool errors as evidence: inspect the cause, change the relevant code or arguments, and retry. Never repeat the same failed call unchanged or route around a denial.',
     '- For changes to an existing file, use edit_file with exact search/replace blocks — never rewrite a whole file to change a few lines. Reserve write_file for new files or total rewrites; write complete content, never fragments or placeholders.',
     '- Big files: read a window with start_line/max_lines instead of the whole file.',
     '- Search source with search_files. Read AGENTS.md and project manifests; use the existing framework and preserve unrelated changes.',
@@ -291,9 +305,18 @@ export async function gateToolCall(run, name, args) {
 }
 
 export async function execTool(run, ws, name, args, abortSignal) {
+  if (run.agent_execution === 'edit' && EDIT_ONLY_TOOLS.has(name)) {
+    return `DENIED: ${name} is unavailable in edit-only mode. Continue reading and editing files; report runtime verification as not performed.`;
+  }
   const denied = await gateToolCall(run, name === 'start_server' ? 'run_command' : name, args);
   if (denied) return denied;
   switch (name) {
+    case 'update_plan': {
+      const checked = parseAgentCall(name, args, AGENT_TOOLS);
+      if (checked.error) return checked.error;
+      emit(run.id, 'plan', { steps: args.steps, explanation: args.explanation ?? '' });
+      return 'Plan updated. Continue working on the active step.';
+    }
     case 'browser': {
       const owner = db.prepare('SELECT role FROM users WHERE id = ?').get(run.user_id)?.role === 'owner';
       const result = await projectBrowser({ id: ws.id, root: wsDir(ws.id), owner }, args, abortSignal);
@@ -423,12 +446,13 @@ export async function execTool(run, ws, name, args, abortSignal) {
       // `curl … | sh` prompts even in the most permissive mode.
       // Builds / installs routinely exceed 60s; allow up to 15 min when asked.
       const timeoutSec = Math.min(Math.max(Number(args.timeout_sec) || 120, 5), 900);
-      const r = await execCmd(ws, cmd, { timeoutSec });
+      const r = await execCmd(ws, cmd, { timeoutSec, cwd: args.cwd ?? '/workspace', signal: abortSignal });
       emit(run.id, 'tool_output', {
-        command: cmd, exitCode: r.exitCode, timedOut: r.timedOut,
+        command: cmd, exitCode: r.exitCode, timedOut: r.timedOut, cancelled: r.cancelled,
         durationMs: r.durationMs, output: r.output, truncated: r.truncated,
+        cwd: r.cwd, outputBytes: r.outputBytes, cleanupConfirmed: r.cleanupConfirmed, cleanupError: r.cleanupError,
       });
-      return `exit ${r.exitCode}${r.timedOut ? ' (TIMED OUT)' : ''}\n${r.output || '(no output)'}`;
+      return `exit ${r.exitCode}${r.cancelled ? ' (CANCELLED)' : r.timedOut ? ' (TIMED OUT)' : ''}\n${r.output || '(no output)'}`;
     }
     case 'screenshot': {
       // Rendered by headless chromium INSIDE the sandbox, so the page gets the
@@ -443,7 +467,7 @@ export async function execTool(run, ws, name, args, abortSignal) {
       const w = Math.min(3000, Math.max(200, Number(args.width) || 1280));
       const h = Math.min(3000, Math.max(200, Number(args.height) || 800));
       const bin = 'command -v chromium || command -v chromium-browser || command -v google-chrome';
-      const probe = await execCmd(ws, bin, { timeoutSec: 15 });
+      const probe = await execCmd(ws, bin, { timeoutSec: 15, signal: abortSignal });
       if (probe.exitCode !== 0) {
         return 'ERROR: no headless chromium in the sandbox, so a screenshot is not possible. '
           + 'Do not claim you looked at the page — read the markup instead, or ask the user to install chromium in the workspace image.';
@@ -451,7 +475,7 @@ export async function execTool(run, ws, name, args, abortSignal) {
       const chrome = probe.output.trim().split('\n')[0];
       const cmd = `mkdir -p "$(dirname '${out}')" && '${chrome}' --headless --disable-gpu --no-sandbox `
         + `--screenshot='${out}' --window-size=${w},${h} ${args.full_page ? '--full-page-screenshot ' : ''}'${target}'`;
-      const r = await execCmd(ws, cmd, { timeoutSec: 90 });
+      const r = await execCmd(ws, cmd, { timeoutSec: 90, signal: abortSignal });
       if (r.exitCode !== 0) return `ERROR: screenshot failed (exit ${r.exitCode})\n${r.output}`;
       emit(run.id, 'diff', { path: out, before: null, after: `(screenshot ${w}×${h})`, created: true });
       return `Saved a ${w}×${h} screenshot to ${out}. It is in the workspace file rail — the user can open it there.`;
@@ -750,6 +774,19 @@ export async function agentLoop({
   run, ws, messages, model, genParams = {}, abortSignal, firstResult = null, tools = AGENT_TOOLS,
   ctxBudget = null,
 }) {
+  const declaredTools = tools;
+  const harness = createRunHarness({ maxSteps: MAX_STEPS, executionMode: run.agent_execution === 'edit' ? 'edit' : 'execute' });
+  if (run.agent_execution === 'edit') {
+    tools = tools.filter(tool => !EDIT_ONLY_TOOLS.has(tool.function?.name));
+    if (messages[0]?.role === 'system') messages[0] = { ...messages[0], content: `${messages[0].content}\n\n${EDIT_ONLY_INSTRUCTION}` };
+    else messages.unshift({ role: 'system', content: EDIT_ONLY_INSTRUCTION });
+  }
+  const finishLoop = result => {
+    const status = result.status === 'final' ? 'done' : result.status === 'aborted' ? 'stopped' : 'error';
+    const summary = harness.summary(status);
+    emit(run.id, 'run_summary', summary);
+    return { ...result, summary };
+  };
   const brief = projectBrief(wsDir(ws.id));
   if (brief) {
     const context = `\n\nProject instructions and task files at the start of this run (read updated files as needed):\n${brief}`;
@@ -760,7 +797,7 @@ export async function agentLoop({
   const canSee = remote ? !!parseCaps(remote.model?.caps_json).vision : modelHasVision(model);
   const callStream = () => streamChat({
     model, messages,
-    params: { tools, tool_choice: 'auto', ...genParams },
+    params: { ...genParams, tools, tool_choice: 'auto' },
     abortSignal,
     onDelta: (text, meta) => {
       if (text) emit(run.id, 'delta', { text }, { store: false });
@@ -784,14 +821,19 @@ export async function agentLoop({
   const maybeCompact = async (reason) => {
     emit(run.id, 'notice', { message: `Context ${reason} — compacting mid-run (progress kept, task continues)…` }, { store: true });
     const ok = await compactAgentLoopMessages({ messages, model, abortSignal, log: null, reason });
+    const currentPlan = harness.summary('running').plan;
+    if (ok && currentPlan.steps.length) messages.push({ role: 'user', content: `Current run plan (preserved across compaction):\n${JSON.stringify(currentPlan)}\nContinue the active step; update_plan when progress changes.` });
     if (!ok) emit(run.id, 'notice', { message: 'Mid-run compaction produced nothing — continuing as-is.' }, { store: false });
     return ok;
   };
   let lastUsed = 0;
   let lastEstimate = 0;
   const inputLimit = agentInputLimit(ctxBudget, genParams.max_tokens ?? genParams.max_completion_tokens);
+  try {
   for (let step = 0; step < MAX_STEPS; step++) {
-    if (abortSignal?.aborted) return { status: 'aborted' };
+    harness.setStep(step);
+    if (abortSignal?.aborted) return finishLoop({ status: 'aborted' });
+    emit(run.id, 'run_progress', harness.progress('thinking'), { store: false });
     trimAgentToolHistory(messages);
     let estimate = estimateAgentPrompt(messages, tools);
     const projected = calibratedPromptEstimate(estimate, lastEstimate, lastUsed);
@@ -817,8 +859,8 @@ export async function agentLoop({
     lastEstimate = estimate;
 
     if (!res.toolCalls?.length) {
-      return { status: 'final', content: res.content, reasoning: res.reasoning,
-               timings: res.timings, usage: res.usage, step };
+      return finishLoop({ status: 'final', content: res.content, reasoning: res.reasoning,
+               timings: res.timings, usage: res.usage, step });
     }
 
     emit(run.id, 'assistant', {
@@ -829,29 +871,42 @@ export async function agentLoop({
     messages.push({ role: 'assistant', content: res.content ?? '', tool_calls: res.toolCalls });
     const screenshots = [];
     for (const tc of res.toolCalls) {
-      if (abortSignal?.aborted) return { status: 'aborted' };
-      let args = null;
-      try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* bad/truncated JSON */ }
+      if (abortSignal?.aborted) return finishLoop({ status: 'aborted' });
+      const { args, error: argumentError } = parseAgentCall(tc.function.name, tc.function.arguments, declaredTools);
       emit(run.id, 'tool_call', { call_id: tc.id, name: tc.function.name, args: args ?? {}, step });
+      emit(run.id, 'run_progress', { ...harness.progress('tool'), lastTool: tc.function.name }, { store: false });
+      const startedAt = Date.now();
       let result;
-      if (args === null) {
-        result = 'ERROR: your tool call arguments were not valid JSON (possibly truncated). Retry the call with complete, well-formed arguments.';
+      let replayed = false;
+      let blocked = false;
+      const callArguments = args ?? { invalid_arguments: tc.function.arguments };
+      const blockedReason = harness.blockReason(tc.function.name, callArguments);
+      if (blockedReason) {
+        result = blockedReason;
+        blocked = true;
+      } else if (argumentError) {
+        result = argumentError;
       } else {
         // Durable receipt precedes the side effect. If dispatch or settlement
         // crashes, recovery records an unknown outcome rather than replaying it.
         const receipt = journal.begin(run.id, tc.id, tc.function.name, args);
-        if (receipt.replay) result = receipt.result;
+        if (receipt.replay) { result = receipt.result; replayed = true; }
         else {
           try { result = await execTool(run, ws, tc.function.name, args, abortSignal); }
           catch (err) { result = `ERROR: ${err.message}`; }
           journal.complete(run.id, tc.id, result);
         }
       }
+      const outcome = harness.record(tc.function.name, callArguments, result, { blocked, replayed });
+      if (outcome === 'success' && tc.function.name === 'update_plan') harness.setPlan(args);
       emit(run.id, 'tool_result', {
         call_id: tc.id, name: tc.function.name, step,
         result: truncateOutput(result, 4000, 2000).text,
+        outcome, durationMs: Math.max(0, Date.now() - startedAt), replayed,
       });
-      messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+      emit(run.id, 'run_progress', harness.progress('thinking'), { store: false });
+      const hint = outcome !== 'success' && !blocked ? `\n\nRecovery guidance: ${recoveryHint(tc.function.name, outcome)}` : '';
+      messages.push({ role: 'tool', tool_call_id: tc.id, content: result + hint });
       if (canSee && tc.function.name === 'browser') {
         try {
           const observation = JSON.parse(result);
@@ -866,7 +921,11 @@ export async function agentLoop({
     }
   }
   emit(run.id, 'error', { message: `hit the ${MAX_STEPS}-step limit without finishing` });
-  return { status: 'steplimit' };
+  return finishLoop({ status: 'steplimit' });
+  } catch (err) {
+    emit(run.id, 'run_summary', harness.summary(abortSignal?.aborted ? 'stopped' : 'error'));
+    throw err;
+  }
 }
 
 async function runAgent(run, ws, hooks = {}) {
@@ -883,8 +942,8 @@ async function runAgent(run, ws, hooks = {}) {
   ];
   let releaseGpu = null;
   try {
-    await ensureRunning(ws);
-    emit(run.id, 'status', { status: 'running', note: 'sandbox up' });
+    if (run.agent_execution !== 'edit') await ensureRunning(ws);
+    emit(run.id, 'status', { status: 'running', note: run.agent_execution === 'edit' ? 'edit-only mode' : 'sandbox up' });
     // hold the single GPU slot for the whole run — queue behind any chat/image job
     releaseGpu = await acquireGpu({
       signal: abort.signal,
@@ -1078,6 +1137,7 @@ export default async function agentRoutes(app) {
     let run;
     try { run = createRun(ws.id, req.user.id, req.body?.model ?? DEFAULT_AGENT_MODEL, task); }
     catch (err) { return reply.code(err.code === 409 ? 409 : 500).send({ error: err.message }); }
+    run.agent_execution = req.body?.agent_execution === 'edit' ? 'edit' : 'execute';
     runAgent(run, ws).catch((err) => app.log.error({ err, run: run.id }, 'agent run crashed'));
     return run;
   });

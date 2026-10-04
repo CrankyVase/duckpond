@@ -15,7 +15,13 @@ with patch.dict(sys.modules, {'torch':fake_torch, 'numpy':SimpleNamespace(), 'st
     import bridge
 
 class BridgeTests(unittest.TestCase):
+    def setUp(self):
+        # Contract fixtures use tiny Picture stubs, not PIL images.
+        self.safety_patch = patch('image_safety.require_safe_image', return_value=0.0)
+        self.safety_patch.start()
+
     def tearDown(self):
+        self.safety_patch.stop()
         bridge.CANCEL_TAGS.clear()
         bridge._loaded.update(id=None,pipe=None,kind=None)
         bridge._tts['backend'] = None
@@ -23,6 +29,13 @@ class BridgeTests(unittest.TestCase):
             bridge.STATE.update(tag=None, active=False, phase=None, step=None, steps=None,
                                 image=None, n=None, enhanced_prompt=None,
                                 started_at=None, eta_seconds=None, elapsed=None)
+    def test_idle_unload_waits_two_minutes_and_skips_a_live_job(self):
+        self.assertFalse(bridge.idle_unload_due(100, 100, 'Qwen/Qwen-Image-2.1', False, 120))
+        self.assertFalse(bridge.idle_unload_due(219, 100, 'Qwen/Qwen-Image-2.1', False, 120))
+        self.assertTrue(bridge.idle_unload_due(220, 100, 'Qwen/Qwen-Image-2.1', False, 120))
+        self.assertFalse(bridge.idle_unload_due(500, 100, 'Qwen/Qwen-Image-2.1', True, 120))
+        self.assertFalse(bridge.idle_unload_due(500, 100, None, False, 120))
+
     def test_unload_releases_only_requested_model(self):
         bridge._loaded.update(id='image', pipe=object(), kind='image')
         handler = object.__new__(bridge.Handler)
@@ -75,6 +88,16 @@ class BridgeTests(unittest.TestCase):
         generator.manual_seed.assert_called_once_with(0)
         self.assertEqual(calls[0][:3], ('test',512,512))
         self.assertEqual(base64.b64decode(result['data'][0]['b64_json']),b'PNG')
+
+    def test_unsafe_image_is_rejected_before_it_can_be_returned(self):
+        class Picture:
+            def save(self, buf, format): buf.write(b'PNG')
+        class Pipe:
+            def __call__(self, prompt, num_inference_steps, width, height, generator=None):
+                return SimpleNamespace(images=[Picture()])
+        with patch.object(bridge, 'resolve_model', return_value=('image', {'kind':'diffusers', 'task':'image'})), patch.object(bridge, 'load_pipeline', return_value=Pipe()), patch('image_safety.require_safe_image', side_effect=ValueError('Image safety check blocked an explicit result')):
+            with self.assertRaisesRegex(ValueError, 'Image safety check blocked'):
+                bridge.run_job({'prompt':'a pond','size':'512x512'}, 'test')
     def test_qwen_true_cfg_and_steps_default(self):
         seen = {}
         class Picture:
@@ -178,6 +201,39 @@ class BridgeTests(unittest.TestCase):
             bridge.run_job({'prompt': 'make it night', 'size': '512x512', 'images_b64': [b64]}, 'test')
         self.assertIsNotNone(seen[0])
         self.assertEqual(getattr(seen[0], 'size', None), (32, 32))
+
+    def test_qwen_multiple_references_follow_canvas_condition_resolution(self):
+        from PIL import Image
+        seen = []
+        class Picture:
+            def save(self, buf, format): buf.write(b'PNG')
+        class Pipe:
+            def __call__(self, prompt, num_inference_steps, width, height, image=None,
+                         output_resolution=None, output_type=None, generator=None):
+                seen.append((image, output_resolution, width, height))
+                return SimpleNamespace(images=[Picture()])
+        buf = io.BytesIO()
+        Image.new('RGB', (32, 32), 'red').save(buf, format='PNG')
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        info = {'kind': 'diffusers', 'task': 'image', 'class': 'QwenImage21Pipeline'}
+        with patch.object(bridge, 'resolve_model', return_value=('image', info)), patch.object(bridge, 'load_pipeline', return_value=Pipe()), patch.object(bridge, 'decode_qwen_final', return_value=Picture()):
+            bridge.run_job({'prompt': 'combine the two photos', 'size': '1024x1024', 'images_b64': [b64, b64]}, 'test')
+        self.assertEqual(len(seen[0][0]), 2)
+        self.assertEqual(seen[0][1:], (768, 1024, 1024))
+
+    def test_seam_color_repair_keeps_detail_and_clean_regions(self):
+        import numpy as real_numpy
+        from PIL import Image
+        pixels = real_numpy.full((256, 384, 3), 100, dtype=real_numpy.uint8)
+        pixels[100:120, 202:208] = (80, 120, 80)
+        base = Image.fromarray(pixels, 'RGB')
+        clean = Image.new('RGB', base.size, (100, 100, 100))
+        vae = SimpleNamespace(tile_sample_min_width=256, tile_sample_min_height=256,
+                              tile_sample_stride_width=192, tile_sample_stride_height=192)
+        with patch.object(bridge, 'np', real_numpy):
+            repaired = bridge._repair_qwen_seams(base, clean, vae)
+        self.assertEqual(repaired.getpixel((20, 20)), (100, 100, 100))
+        self.assertLess(abs(repaired.getpixel((204, 105))[1] - 100), 8)
 
     def test_edit_only_model_requires_a_photo(self):
         with patch.object(bridge, 'resolve_model', return_value=('edit', {'kind': 'diffusers', 'task': 'image', 'needs_image': True})), patch.object(bridge, 'load_pipeline') as load:

@@ -10,6 +10,7 @@
   import { imgFade, reveal, scrollFade } from '../lib/motion.js';
   import { mediaJobs, pauseMediaQueue, mediaJobsForTask, refreshMediaJobs, submitMediaJob, useMediaJobs, activeMediaJobs } from '../lib/mediaJobs.svelte.js';
   import MediaJobsCard from './MediaJobsCard.svelte';
+  import './media-studio.css';
   import ImageIcon from '@lucide/svelte/icons/image';
   import Video from '@lucide/svelte/icons/video';
   import Music from '@lucide/svelte/icons/music';
@@ -22,6 +23,7 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Power from '@lucide/svelte/icons/power';
 
   const TASKS = [
     { id: 'image', label: 'Images', icon: ImageIcon, title: 'Make something worth seeing.', hint: 'Describe the scene, the light, the little details.', example: 'A quiet lakeside cabin at blue hour, warm light in the windows, mist above the water, cinematic photography' },
@@ -34,13 +36,14 @@
   let bridgeOk = $state(false);
   let loading = $state(true);
   let unloading = $state(false);
+  let submitting = $state(false);
   let defaultModel = $state('');
   let model = $state('auto');
   let prompt = $state('');
   let negative = $state('');
   let size = $state('768x768');
   let shape = $state('square');
-  let steps = $state(40);
+  let steps = $state(28);
   let count = $state(1);
   let seed = $state('');
   let clipSeconds = $state(5);
@@ -72,8 +75,8 @@
   };
   let enhance = $state(true); // light-LLM prompt improver, on by default
   let preset = $state('medium');
-  let trueCfg = $state(1);
-  let previewEvery = $state(1);
+  let trueCfg = $state(5);
+  let previewEvery = $state(0);
   let outputFormat = $state('png');
   let imageOptionsOpen = $state(false);
   let estimates = $state(null);
@@ -82,7 +85,7 @@
   let promptImproving = $state(false);
   let promptImproved = $state(false);
   let resourceTimer = null;
-  const PRESET_FALLBACK = { fast: { steps: 20, trueCfg: 1 }, medium: { steps: 40, trueCfg: 1 }, high: { steps: 40, trueCfg: 2.5 }, ultra: { steps: 50, trueCfg: 2.5 }, custom: { steps: 40, trueCfg: 1 } };
+  const PRESET_FALLBACK = { fast: { steps: 20, trueCfg: 4 }, medium: { steps: 28, trueCfg: 5 }, high: { steps: 40, trueCfg: 6 }, ultra: { steps: 50, trueCfg: 6 }, custom: { steps: 28, trueCfg: 5 } };
   const PRESET_SIZES = {
     fast: { square:'512x512', landscape:'640x512', portrait:'512x640' },
     medium: { square:'768x768', landscape:'768x576', portrait:'576x768' },
@@ -109,8 +112,8 @@
   }
   function fmtBytes(bytes) {
     if (!Number.isFinite(Number(bytes))) return '—';
-    const value = Number(bytes) / 1e9;
-    return `${value < 10 ? value.toFixed(1) : Math.round(value)} GB`;
+    const value = Number(bytes) / 1024 ** 3;
+    return `${value.toFixed(1)} GiB`;
   }
   async function refreshResources() {
     try { resources = await api('/api/media/resources'); }
@@ -118,16 +121,18 @@
   }
   async function improvePrompt() {
     if (!prompt.trim() || promptImproving || refs.length) return;
+    const original = prompt, originalTask = task;
     promptImproving = true;
     promptImproved = false;
     error = '';
     try {
       const result = await api('/api/media/enhance', { method: 'POST', body: { prompt: prompt.trim(), task, model: selected?.id ?? model } });
+      if (!mounted || task !== originalTask || prompt !== original || refs.length) return;
       if (!result.enhanced) throw new Error(result.reason ?? 'Prompt improvement is unavailable right now.');
       prompt = result.enhanced;
       enhance = false;
       promptImproved = true;
-    } catch (e) { error = e.message ?? 'Could not improve the prompt.'; }
+    } catch (e) { if (mounted && task === originalTask && prompt === original) error = e.message ?? 'Could not improve the prompt.'; }
     finally { promptImproving = false; }
   }
   function presetSteps(id) { return estimates?.presets?.find((p) => p.id === id)?.steps ?? PRESET_FALLBACK[id]?.steps; }
@@ -150,16 +155,16 @@
       if (id === 'ultra') count = 1;
     }
   }
-  async function loadEstimates() {
+  async function loadEstimates({ quiet = false } = {}) {
     if (task !== 'image') return;
-    estLoading = true;
+    if (!quiet) estLoading = true;
     try {
       const estimateShape = shape === 'photo' ? (refs[0]?.width > refs[0]?.height ? 'landscape' : refs[0]?.width < refs[0]?.height ? 'portrait' : 'square') : shape;
       const params = new URLSearchParams({ shape: estimateShape, n: String(count), previewEvery: String(previewEvery),
         refCount: String(refs.length), enhance: enhance ? '1' : '0' });
       estimates = await api('/api/media/estimates?' + params);
-    } catch { estimates = null; }
-    finally { estLoading = false; }
+    } catch { if (!quiet) estimates = null; }
+    finally { if (!quiet) estLoading = false; }
   }
   const CLIP_SECONDS = [1, 2, 3, 5, 8, 10, 15];
   const SONG_SECONDS = [20, 30, 60, 90, 120, 180];
@@ -176,8 +181,10 @@
   const current = $derived(TASKS.find((t) => t.id === task));
   const taskModels = $derived(models.filter((m) => m.task === task));
   const readyModels = $derived(taskModels.filter((m) => m.ready));
-  const selected = $derived(readyModels.find((m) => m.id === model) ?? readyModels.find((m) => m.id === defaultModel) ?? readyModels[0]);
+  const selected = $derived(model === 'auto' ? (readyModels.find((m) => m.id === defaultModel) ?? readyModels[0]) : readyModels.find((m) => m.id === model));
   const selectedLogo = $derived(logoForModel(selected?.id));
+  const modelInMemory = $derived(!!selected?.loaded);
+  const canUnload = $derived(app.user?.role === 'owner' && !!selected && selected.kind !== 'comfy' && modelInMemory);
   const isH3 = $derived(selected?.id === 'MiniMaxAI/MiniMax-H3');
   const isMusic3 = $derived(selected?.kind === 'minimax_music3' || (selected?.id || '').includes('MiniMax-Music3'));
   $effect(() => {
@@ -185,7 +192,6 @@
       fps = 24;
       if (size !== '608x352' && size !== '1344x768') size = '608x352';
     }
-    if (selected?.defaultSteps && preset === 'custom') steps = selected.defaultSteps;
     if (isMusic3 && audioDuration < 20) audioDuration = 30;
     if (selected?.defaultSpeaker) speaker = selected.defaultSpeaker;
   });
@@ -196,16 +202,18 @@
     void shape; void count; void previewEvery; void enhance; void refs.length; void latestCompletedImage;
     loadEstimates();
   });
+  const completedJobs = $derived(mediaJobs.jobs.filter((j) => j.status === 'done').map((j) => `${j.id}:${j.finished_at}`).sort().join('|'));
+  $effect(() => { if (completedJobs) { void refreshGallery(); void refreshModelStatus(); } });
   const voiceSpeakers = $derived(selected?.speakers?.length ? selected.speakers : Object.keys(SPEAKER_HINT));
   const voiceLanguages = $derived(selected?.languages?.length ? selected.languages : ['Auto', 'English', 'Chinese', 'Japanese', 'Korean', 'German', 'French', 'Spanish', 'Italian']);
-  const maxRefs = $derived(task === 'video' ? 2 : task === 'image' ? Math.min(4, selected?.maxReferences || 4) : (selected?.maxReferences || 10));
+  const maxRefs = $derived(selected?.supportsImage === false ? 0 : task === 'video' ? Math.min(2, selected?.maxReferences ?? 2) : task === 'image' ? Math.min(4, selected?.maxReferences ?? 4) : (selected?.maxReferences ?? 10));
   const creations = $derived(gallery.filter((r) => r.task === task));
   // Background jobs (survive disconnects): cards live in the shared store,
   // filtered per tab. Generating = the server is working; the UI never holds
   // a connection open, so a refresh here costs nothing.
   const jobs = $derived(mediaJobsForTask(task));
   const activeThisTask = $derived(jobs.some((j) => j.status === 'queued' || j.status === 'running'));
-  const showCanvas = $derived(task !== 'image' || jobs.length > 0 || creations.length > 0);
+  const showCanvas = true;
   const generating = $derived(activeMediaJobs().length > 0);
   let jobsApi = null;
 
@@ -252,12 +260,32 @@
     } catch (e) { error = e.message; }
     finally { if (mounted) loading = false; }
   }
+  let galleryRequest = 0;
+  async function refreshGallery() {
+    const request = ++galleryRequest;
+    try {
+      const saved = await api('/api/images');
+      if (!mounted || request !== galleryRequest) return;
+      gallery = saved;
+      if (lightbox && !saved.some((r) => r.id === lightbox.id)) lightbox = null;
+    } catch (e) { if (mounted) toast(e.message ?? 'Could not refresh your library', 'error'); }
+  }
+  async function refreshModelStatus() {
+    try {
+      const result = await api('/api/images/models');
+      if (!mounted) return;
+      bridgeOk = result.available;
+      models = result.models ?? [];
+      defaultModel = result.default_model;
+    } catch { /* The gallery and job history remain available while the engine reconnects. */ }
+  }
   async function unloadSelected() {
     if (!selected || unloading) return;
     unloading = true;
     try {
       await api('/api/images/unload', { method: 'POST', body: { model: selected.id } });
       await load();
+      if (task === 'image') await loadEstimates();
       toast('Model unloaded from memory', 'ok');
     } catch (e) { toast(e.message ?? e.error, 'error'); }
     finally { unloading = false; }
@@ -266,7 +294,7 @@
     load();
     loadEstimates();
     refreshResources();
-    resourceTimer = setInterval(refreshResources, 3000);
+    resourceTimer = setInterval(() => { refreshResources(); loadEstimates({ quiet: true }); }, 3000);
     jobsApi = useMediaJobs();
   });
   onDestroy(() => {
@@ -283,15 +311,16 @@
     negative = '';
     shape = 'square';
     size = next === 'video' ? '608x352' : '768x768';
-    steps = 40;
+    steps = next === 'image' ? 28 : 40;
     count = 1;
     seed = '';
     preset = 'medium';
-    trueCfg = 1;
-    previewEvery = 1;
+    trueCfg = 5;
+    previewEvery = 0;
     outputFormat = 'png';
     imageOptionsOpen = false;
     enhance = true;
+    promptImproved = false;
     fps = 8;
     audioDuration = 10;
     speaker = 'Ryan';
@@ -308,7 +337,11 @@
   function browse() { app.view = 'hub'; }
   function imageShape(next) {
     shape = next;
-    size = presetSize(preset);
+    if (preset === 'custom' && next !== 'photo') {
+      const [w, h] = size.split('x').map(Number);
+      const long = Math.max(w, h), short = w === h ? Math.max(16, Math.round(long * 0.75 / 16) * 16) : Math.min(w, h);
+      size = next === 'square' ? `${Math.min(w,h)}x${Math.min(w,h)}` : next === 'landscape' ? `${long}x${short}` : `${short}x${long}`;
+    } else size = presetSize(preset);
   }
   async function fileToB64(file) {
     const bitmap = await createImageBitmap(file);
@@ -339,12 +372,17 @@
     if (!files.length) return;
     const room = Math.max(0, maxRefs - refs.length);
     if (!room) { error = `This model takes up to ${maxRefs} reference photo${maxRefs === 1 ? '' : 's'}.`; return; }
+    const added = [], originalTask = task, originalModel = selected?.id;
     try {
-      const added = [];
       for (const file of files.slice(0, room)) {
-        if (file.size > 12 * 1024 * 1024) { error = 'Choose photos smaller than 12 MB.'; return; }
+        if (file.size > 12 * 1024 * 1024) throw new Error('Choose photos smaller than 12 MB.');
         added.push(await fileToB64(file));
       }
+      if (!mounted || originalTask !== task || originalModel !== selected?.id) {
+        added.forEach((r) => URL.revokeObjectURL(r.url));
+        return;
+      }
+      if (added.length + refs.length > maxRefs) throw new Error(`This model takes up to ${maxRefs} reference photos.`);
       const firstImagePhoto = task === 'image' && refs.length === 0 && added.length > 0;
       refs = [...refs, ...added];
       if (firstImagePhoto) {
@@ -353,7 +391,10 @@
         enhance = false;
       }
       error = '';
-    } catch { error = 'Could not read that photo.'; }
+    } catch (e) {
+      added.forEach((r) => URL.revokeObjectURL(r.url));
+      if (mounted && originalTask === task) error = e.message ?? 'Could not read that photo.';
+    }
   }
   function dropRef(i) {
     const copy = refs.slice();
@@ -382,8 +423,9 @@
   // Submit as a detached background job — no SSE, no held connection. The
   // server keeps generating through refreshes, tunnel cuts, closed tabs.
   async function generate() {
-    if (!prompt.trim() || !selected) return;
+    if (submitting || loading || !bridgeOk || !prompt.trim() || !selected) return;
     error = '';
+    if (refs.length > maxRefs) { error = `Remove photos: this model takes up to ${maxRefs} references.`; return; }
     if (task === 'image') {
       if (!Number.isInteger(Number(count)) || Number(count) < 1 || Number(count) > (size === '2048x2048' ? 1 : 4)) {
         error = size === '2048x2048' ? 'At 2048 × 2048, choose one image at a time.' : 'Choose 1 to 4 variations.';
@@ -397,7 +439,8 @@
       }
     }
     const chosen = selected;
-    const body = { task, model: chosen.id, prompt: prompt.trim(), n: task === 'tts' ? 1 : count, seed: seed === '' ? null : Number(seed), enhance: enhance && !promptImproved };
+    const originalPrompt = prompt, originalTask = task;
+    const body = { task, model: chosen.id, prompt: prompt.trim(), n: task === 'tts' ? 1 : count, seed: seed === '' ? null : Number(seed), enhance: enhance && (task !== 'image' || !refs.length) };
     if (task === 'image') {
       const effSteps = preset === 'custom' ? steps : (presetSteps(preset) ?? steps);
       const effCfg = preset === 'custom' ? Number(trueCfg) : (presetCfg(preset) ?? Number(trueCfg));
@@ -417,13 +460,21 @@
       if (chosen.cloning && refAudioB64) Object.assign(body, { refAudioB64, refText });
     }
     if ((task === 'image' || task === 'video') && refs.length) body.imagesB64 = refs.map((r) => r.b64);
+    submitting = true;
     try {
       await submitMediaJob(body);
-      prompt = ''; // ready for the next idea — the card carries this one
-      promptImproved = false;
+      if (task === originalTask && prompt === originalPrompt) { prompt = ''; promptImproved = false; }
       toast('Started — keep working or close the tab, it runs on the server', 'ok');
       loadEstimates();
-    } catch (e) { error = e.message; }
+    } catch (e) { if (task === originalTask) error = e.message; }
+    finally { submitting = false; }
+  }
+  function reuseCreation(r) {
+    if (r.task !== task) changeTask(r.task);
+    prompt = r.prompt ?? '';
+    promptImproved = false;
+    lightbox = null;
+    toast('Prompt copied to your workspace', 'ok');
   }
 
   // ---- lightbox: JS-driven open/close + keyboard navigation ----
@@ -457,10 +508,11 @@
   else if (e.key === 'ArrowRight') lightboxStep(1);
   else if (e.key === 'ArrowLeft') lightboxStep(-1);
 }} />
-<div class="media workspace-panel">
-  {#if task !== 'image'}<header class="studio-head">
-    <div><h1>Media Studio</h1><p>Create images, speech, music, and video in one workspace.</p></div>
+<div class="media workspace-panel studio studio-redesign">
+  <header class="studio-head">
+    <div class="studio-title-copy"><h1>Media Studio</h1><p>Images, video, music, and voice. All in one place.</p></div>
     <div class="head-actions">
+      <div class="studio-live-status" class:offline={!bridgeOk}><span></span>{loading ? 'Connecting' : bridgeOk ? 'Local engine online' : 'Engine offline'}</div>
       <button class="subtle" onclick={load} disabled={loading} aria-label="Refresh models and gallery"><RefreshCw size={15} /><span>Refresh</span></button>
       {#if app.user?.role === 'owner'}
         <button class="subtle" aria-pressed={mediaJobs.paused}
@@ -470,7 +522,7 @@
         </button>
       {/if}
     </div>
-  </header>{/if}
+  </header>
   {#if mediaJobs.paused}<p role="status">Media queue paused. New jobs wait without loading a model. Existing running jobs are unchanged.</p>{/if}
   {#if mediaJobs.error}<p role="alert">{mediaJobs.error} <button onclick={refreshMediaJobs}>Retry job status</button></p>{/if}
   <nav class="tasktabs" bind:this={tabsEl} aria-label="Creation type">
@@ -482,7 +534,17 @@
   <div class="workbench" class:image-workbench={task === 'image'} class:empty-image-workbench={task === 'image' && !showCanvas}>
     <section class="controls" use:scrollFade aria-label="Generation settings">
       {#if task === 'image'}
-        <div class="image-intro"><h2>{refs.length ? 'Edit a photo' : 'Create an image'}</h2><p>{refs.length ? 'Tell Qwen exactly what to change. The first photo sets the canvas shape.' : 'Describe what you want to make. Choose a quality level, then create.'}</p></div>
+        <div class="image-intro"><h2>{refs.length ? 'Edit a photo' : 'New image'}</h2><p>{refs.length ? 'Describe what to change. Your first photo sets the canvas.' : 'Describe what you want to create.'}</p></div>
+        <div class="image-model-card">
+          <div class="model-card-head"><span>{#if selectedLogo}<BrandMark src={selectedLogo.path} size={16} />{:else}<ImageIcon size={16} />{/if} Image model</span><small>ON YOUR PC</small></div>
+          <label class="field"><span class="sr-only">Image model</span><select bind:value={model} disabled={!readyModels.length}><option value="auto">{readyModels.length ? `Automatic · ${(readyModels.find((m) => m.id === defaultModel) ?? readyModels[0]).id.split('/').pop()}` : loading ? 'Checking models…' : 'No model ready'}</option>{#each readyModels as m}<option value={m.id}>{m.id.split('/').pop()}</option>{/each}</select></label>
+          {#if selected}
+            <div class="runtime-status memory-row">
+              <span>{selected.id.split('/').pop()} · {modelInMemory ? 'Ready in memory' : 'Loads when needed'}</span>
+              {#if canUnload}<button type="button" class="unload-memory" onclick={unloadSelected} disabled={unloading}><Power size={13} /> {unloading ? 'Unloading…' : 'Unload memory'}</button>{/if}
+            </div>
+          {/if}
+        </div>
 
         <div class="image-group prompt-group">
           <div class="image-group-head"><div><h3>{refs.length ? 'What should change?' : 'Describe your image'}</h3></div></div>
@@ -496,7 +558,7 @@
           {#if /\b(?:film\s+grain|grainy)\b/i.test(prompt)}<p class="image-prompt-tip">Your description asks for grain. Remove that phrase for a smoother image.</p>{/if}
           <div class="image-group-foot">
             <button class="text-button" onclick={() => (prompt = freshIdea('image', prompt))}><Sparkles size={15} /> Give me an idea</button>
-            <label class="image-attach"><ImageIcon size={16} /> Add photos <input class="sr-only" type="file" accept="image/*" multiple={maxRefs > 1} onchange={referencePhotos} disabled={refs.length >= maxRefs} /></label>
+            <label class="image-attach" title={maxRefs ? 'Add reference photos to edit or guide your image' : 'This model does not accept reference photos'}><ImageIcon size={16} /> Add photos <input class="sr-only" type="file" accept="image/*" multiple={maxRefs > 1} onchange={referencePhotos} disabled={!selected || refs.length >= maxRefs} /></label>
             {#if refs.length}<span>{refs.length} of {maxRefs} attached</span>{/if}
           </div>
           {#if refs.length}<div class="refs">{#each refs as r, i}<button type="button" class="ref-thumb" onclick={() => dropRef(i)} aria-label={`Remove ${r.name}`}><img src={r.url} alt="" /><span>Remove</span></button>{/each}</div><p class="image-prompt-tip">{refs.length > 1 ? 'Say which photo supplies each part. The first photo sets the canvas unless you choose another shape.' : 'Name only the change you want. Qwen will receive your original instruction and the photo.'}</p>{/if}
@@ -512,6 +574,8 @@
             <button type="button" class="image-choice" class:active={preset === 'ultra'} aria-pressed={preset === 'ultra'} onclick={() => selectPreset('ultra')}><strong>Ultra</strong><small>{presetSize('ultra').replace('x', ' × ')} · finest detail</small><span>{presetEta('ultra')}</span></button>
           </div>
           <button class="custom-link" class:active={preset === 'custom'} aria-pressed={preset === 'custom'} onclick={() => selectPreset('custom')}>Use my own settings <span aria-hidden="true">↗</span></button>
+          {#if estimates?.loaded === false}<p class="hint">Times include {fmtSecs(estimates.loadMs / 1000)} to load the model. It unloads after 2 minutes of idle time.</p>{/if}
+          <p class="hint">Approximate times for this engine. Custom sizes and photo edits can take longer.</p>
         </div>
 
         <div class="image-group">
@@ -526,14 +590,14 @@
 
         <div class="image-generate-area">
           {#if error}<div class="error" role="alert">{error}</div>{/if}
-          <div class="resource-meters" aria-label="Live system resources">
-            <div class="resource-meter"><div><span>RAM</span><strong>{resources ? `${fmtBytes(resources.ram.usedBytes)} / ${fmtBytes(resources.ram.totalBytes)}` : '—'}</strong></div><div class="resource-track"><i style={`width:${resources?.ram?.totalBytes ? Math.min(100, resources.ram.usedBytes / resources.ram.totalBytes * 100) : 0}%`}></i></div></div>
+          <div class="resource-meters" aria-label="Live Windows resources" title={resources?.host ?? 'Inference PC'}>
+            <div class="resource-meter"><div><span>RAM</span><strong>{resources?.ram ? `${fmtBytes(resources.ram.usedBytes)} / ${fmtBytes(resources.ram.totalBytes)}` : '—'}</strong></div><div class="resource-track"><i style={`width:${resources?.ram?.totalBytes ? Math.min(100, resources.ram.usedBytes / resources.ram.totalBytes * 100) : 0}%`}></i></div></div>
             <div class="resource-meter"><div><span>CPU</span><strong>{resources?.cpuPercent == null ? '—' : `${Math.round(resources.cpuPercent)}%`}</strong></div><div class="resource-track"><i style={`width:${resources?.cpuPercent ?? 0}%`}></i></div></div>
             <div class="resource-meter"><div><span>GPU VRAM</span><strong>{resources?.vram?.totalBytes ? `${fmtBytes(resources.vram.usedBytes)} / ${fmtBytes(resources.vram.totalBytes)}` : '—'}</strong></div><div class="resource-track"><i style={`width:${resources?.vram?.totalBytes ? Math.min(100, resources.vram.usedBytes / resources.vram.totalBytes * 100) : 0}%`}></i></div></div>
           </div>
           <div class="generate-summary">{preset === 'medium' ? 'Balanced' : preset === 'high' ? 'Quality' : preset === 'ultra' ? 'Ultra' : preset === 'fast' ? 'Fast' : 'Custom'} <span>·</span> {size.replace('x', ' × ')} <span>·</span> {count} {Number(count) === 1 ? 'image' : 'images'} <span>·</span> {outputFormat.toUpperCase()}</div>
-          <button class="generate" onclick={generate} disabled={loading || !bridgeOk || !selected || !prompt.trim() || (selected?.needsImage && !refs.length)}><Sparkles size={18} /> {refs.length ? 'Edit photo' : 'Create image'} <span aria-hidden="true">↗</span></button>
-          <p>Runs locally · Jobs continue if you leave · Image safety stays on</p>
+          <button class="generate" onclick={generate} disabled={submitting || loading || !bridgeOk || !selected || !prompt.trim() || (selected?.needsImage && !refs.length)}><Sparkles size={18} /> {submitting ? 'Adding to queue…' : refs.length ? 'Edit photo' : 'Create image'} <span aria-hidden="true">↗</span></button>
+          <p>Made on your PC · Jobs continue while you’re away</p>
         </div>
 
         <details class="image-options" bind:open={imageOptionsOpen}>
@@ -543,21 +607,19 @@
               <label class="image-check"><input type="checkbox" bind:checked={enhance} disabled={refs.length > 0} /><span><strong>Polish my prompt</strong><small>{refs.length ? 'Photo edits use your exact instructions so the change is not rewritten as a new scene.' : 'A fast local model adds visual detail while the image model loads.'}</small></span></label>
             </div>
             <div class="option-section"><h4>Output</h4><div class="option-grid">
-              <label class="field"><span>Exact size</span><select bind:value={size} onchange={(e) => { preset = 'custom'; if (shape === 'photo' && !e.currentTarget.selectedOptions[0]?.textContent?.includes('matches photo')) { const [w, h] = size.split('x').map(Number); shape = w === h ? 'square' : w > h ? 'landscape' : 'portrait'; } }}>{#if refs.length && shape === 'photo'}<option value={size}>{size.replace('x', ' × ')} · matches photo</option>{/if}<option value="512x512">512 × 512 · draft</option><option value="640x512">640 × 512 · draft landscape</option><option value="512x640">512 × 640 · draft portrait</option><option value="768x768">768 × 768 · balanced</option><option value="768x576">768 × 576 · landscape</option><option value="576x768">576 × 768 · portrait</option><option value="1024x1024">1024 × 1024 · quality</option><option value="1024x768">1024 × 768 · landscape</option><option value="768x1024">768 × 1024 · portrait</option><option value="1280x1280">1280 × 1280 · ultra</option><option value="1280x960">1280 × 960 · ultra landscape</option><option value="960x1280">960 × 1280 · ultra portrait</option><option value="2048x2048">2048 × 2048 · very demanding</option></select></label>
+              <label class="field"><span>Exact size</span><select bind:value={size} onchange={(e) => { preset = 'custom'; if (!e.currentTarget.selectedOptions[0]?.textContent?.includes('matches photo')) { const [w, h] = size.split('x').map(Number); shape = w === h ? 'square' : w > h ? 'landscape' : 'portrait'; } }}>{#if refs.length && shape === 'photo'}<option value={size}>{size.replace('x', ' × ')} · matches photo</option>{/if}<option value="512x512">512 × 512 · draft</option><option value="640x512">640 × 512 · draft landscape</option><option value="512x640">512 × 640 · draft portrait</option><option value="768x768">768 × 768 · balanced</option><option value="768x576">768 × 576 · landscape</option><option value="576x768">576 × 768 · portrait</option><option value="1024x1024">1024 × 1024 · quality</option><option value="1024x768">1024 × 768 · landscape</option><option value="768x1024">768 × 1024 · portrait</option><option value="1280x1280">1280 × 1280 · ultra</option><option value="1280x960">1280 × 960 · ultra landscape</option><option value="960x1280">960 × 1280 · ultra portrait</option><option value="2048x2048">2048 × 2048 · very demanding</option></select></label>
               <label class="field"><span>Variations</span><input type="number" min="1" max={size === '2048x2048' ? 1 : 4} bind:value={count} /><span class="hint">{size === '2048x2048' ? 'One at a time at this size.' : 'Each variation adds time.'}</span></label>
-              <label class="field"><span>File type</span><select bind:value={outputFormat}><option value="png">PNG · lossless</option><option value="webp">WebP · smaller file</option></select></label>
-              <label class="field"><span>Live preview</span><select bind:value={previewEvery}><option value={1}>Every step</option><option value={2}>Every 2 steps</option><option value={4}>Every 4 steps</option><option value={8}>Every 8 steps</option><option value={0}>Off · fastest</option></select></label>
-            </div><p class="hint">Larger images and frequent previews take longer. At 2048 × 2048, use one variation and no more than 40 steps. The latest preview stays visible after a refresh.</p></div>
+              <label class="field"><span>File type</span><select bind:value={outputFormat}><option value="png">PNG · lossless</option><option value="webp" disabled={selected?.outputFormats && !selected.outputFormats.includes('webp')}>WebP · smaller file</option></select></label>
+              <label class="field"><span>Live preview</span><select bind:value={previewEvery} disabled={selected?.supportsPreview === false}><option value={1}>Every step</option><option value={2}>Every 2 steps</option><option value={4}>Every 4 steps</option><option value={8}>Every 8 steps</option><option value={0}>Off · fastest</option></select></label>
+            </div><p class="hint">{selected?.supportsPreview === false ? 'Live step progress is available; the finished image appears when rendering completes.' : 'Larger images and frequent previews take longer. The latest preview stays visible after a refresh.'} At 2048 × 2048, use one variation and no more than 40 steps.</p></div>
             <div class="option-section"><h4>Fine tuning</h4><div class="option-grid">
               <label class="field"><span>Steps</span><input type="number" min="1" max="80" bind:value={steps} disabled={preset !== 'custom'} /><span class="hint">How many times Qwen refines the image. Around 40 is a good starting point.</span></label>
-              <label class="field"><span>Prompt guidance</span><input type="number" min="1" max="6" step="0.1" bind:value={trueCfg} disabled={preset !== 'custom'} /><span class="hint">1 is fastest; 2–3 follows your words more closely.</span></label>
+              <label class="field"><span>Prompt guidance</span><input type="number" min="1" max="6" step="0.1" bind:value={trueCfg} disabled={preset !== 'custom'} /><span class="hint">Balanced uses 5; Quality uses 6 for closer prompt and text matching.</span></label>
             </div>{#if preset !== 'custom'}<p class="hint">Select “Use my own settings” above to change steps and guidance.</p>{/if}
               <label class="field"><span>Things to avoid</span><textarea rows="2" bind:value={negative} placeholder="For example: blurry, watermark"></textarea><span class="hint">Used only when prompt guidance is above 1.</span></label>
               <label class="field"><span>Seed</span><input type="number" min="0" max="4294967295" bind:value={seed} placeholder="Random each time" /><span class="hint">Reuse a seed with the same settings to repeat a result.</span></label>
             </div>
-            <div class="option-section"><h4>Model</h4>
-              <label class="field"><span class="with-logo">Image model {#if selectedLogo}<BrandMark src={selectedLogo.path} size={16} />{/if}</span><select bind:value={model} disabled={!readyModels.length}><option value="auto">{readyModels.length ? 'Automatic · Qwen-Image 2.1' : loading ? 'Checking models…' : 'No model ready'}</option>{#each readyModels as m}<option value={m.id}>{m.id.split('/').pop()}</option>{/each}</select></label>
-              {#if selected}<div class="runtime-status"><span>{selected.id.split('/').pop()} · {selected.loaded ? 'Loaded' : 'Loads when needed'}</span>{#if app.user?.role === 'owner' && selected.kind !== 'comfy'}<button class="btn" disabled={unloading} onclick={unloadSelected}>{unloading ? 'Unloading…' : 'Unload'}</button>{/if}</div>{/if}
+            <div class="option-section"><h4>Model availability</h4><button class="text-button" onclick={browse}>Browse Model Hub <ArrowUpRight size={14} /></button>
               {#if taskModels.some((m) => !m.ready)}<details class="readiness"><summary>{taskModels.filter((m) => !m.ready).length} model(s) need attention</summary>{#each taskModels.filter((m) => !m.ready) as m}<div><strong>{m.id.split('/').pop()}</strong><p>{m.reason}</p></div>{/each}</details>{/if}
             </div>
             <div class="option-section"><h4>Workspace</h4><div class="workspace-actions"><button class="subtle" onclick={load} disabled={loading}><RefreshCw size={14} /> Refresh models and images</button>{#if app.user?.role === 'owner'}<button class="subtle" aria-pressed={mediaJobs.paused} onclick={async () => { try { await pauseMediaQueue(!mediaJobs.paused); } catch (e) { toast(e.message, 'error'); } }}>{mediaJobs.paused ? 'Resume queue' : 'Pause queue'}</button>{/if}</div></div>
@@ -571,14 +633,14 @@
       <div class="divider"></div>
       <div class="section-title"><span>02</span> Make it yours</div>
       {#if task === 'image'}
-        <p class="hint">Qwen-Image 2.1 · Fast makes a draft in fewer steps. Balanced uses the model's 40 step recipe. Quality adds guidance for closer prompt and text matching, with extra GPU work.</p>
+        <p class="hint">Qwen-Image 2.1 · Fast uses 20 steps for a draft. Balanced uses 28 steps with prompt guidance. Quality uses 40 steps and stronger guidance for detail and readable text.</p>
         <div class="preset-row" role="group" aria-label="Quality preset">
           <button type="button" class="preset" class:active={preset === 'fast'} aria-pressed={preset === 'fast'} onclick={() => selectPreset('fast')}><span class="preset-label">Fast</span><span class="preset-eta">{presetEta('fast')}</span></button>
           <button type="button" class="preset" class:active={preset === 'medium'} aria-pressed={preset === 'medium'} onclick={() => selectPreset('medium')}><span class="preset-label">Balanced</span><span class="preset-eta">{presetEta('medium')}</span></button>
           <button type="button" class="preset" class:active={preset === 'high'} aria-pressed={preset === 'high'} onclick={() => selectPreset('high')}><span class="preset-label">Quality</span><span class="preset-eta">{presetEta('high')}</span></button>
           <button type="button" class="preset" class:active={preset === 'custom'} aria-pressed={preset === 'custom'} onclick={() => selectPreset('custom')}><span class="preset-label">Custom</span><span class="preset-eta">{presetEta('custom')}</span></button>
         </div>
-        {#if estimates}<p class="hint">{estimates.calibrated === false ? 'Times are estimates until the engine has run a few images.' : `Measured on this engine · ${estimates.samples} runs`}</p>{/if}
+        {#if estimates}<p class="hint">{estimates.loaded === false ? `Times include ${fmtSecs(estimates.loadMs / 1000)} to load the model. It unloads after 2 minutes of idle time.` : estimates.calibrated === false ? 'Times are estimates until the engine has run a few images.' : `Measured on this engine · ${estimates.samples} runs`}</p>{/if}
       {/if}
       <label class="field"><span class="with-logo">Model <span class="local-tag">ON DEVICE</span>{#if selectedLogo}<BrandMark src={selectedLogo.path} size={16} />{/if}</span><select bind:value={model} disabled={!readyModels.length}>
         <option value="auto">{readyModels.length ? 'Automatic · best available' : loading ? 'Checking your models…' : 'No ready model'}</option>
@@ -587,8 +649,8 @@
       {#if selected}<div class="model-note">{#if selectedLogo}<BrandMark src={selectedLogo.path} size={14} />{/if}<span class="status-dot"></span><span>{selected.id}</span></div>{/if}
       {#if selected}
         <div class="runtime-status">
-          <span>{selected.device === 'cpu' ? 'CPU · system RAM' : 'GPU + system RAM'} · {selected.loaded ? 'Loaded' : 'Loads when needed'}</span>
-          {#if app.user?.role === 'owner' && selected.kind !== 'comfy'}<button class="btn" disabled={unloading} onclick={unloadSelected}>{unloading ? 'Unloading…' : 'Unload model'}</button>{/if}
+          <span>{selected.device === 'cpu' ? 'CPU · system RAM' : 'GPU + system RAM'} · {modelInMemory ? 'Ready in memory' : 'Loads when needed'}</span>
+          {#if canUnload}<button type="button" class="unload-memory" onclick={unloadSelected} disabled={unloading}><Power size={13} /> {unloading ? 'Unloading…' : 'Unload memory'}</button>{/if}
         </div>
       {/if}
       {#if !loading && !readyModels.length}
@@ -667,9 +729,9 @@
         </label>{/if}
         {#if task !== 'tts' && selected?.kind !== 'musicgen'}<label class="field"><span>Generation steps</span><input type="number" min="1" max="80" bind:value={steps} disabled={task === 'image' && preset !== 'custom'} />{#if task === 'image'}<span class="hint">Each step refines the image. Fewer steps are faster; around 40 is Qwen's recommended starting point. Select Custom to change this.</span>{/if}</label>{/if}
         {#if task === 'image'}
-          <label class="field"><span>Prompt guidance · True CFG</span><input type="number" min="1" max="6" step="0.1" bind:value={trueCfg} disabled={preset !== 'custom'} aria-label="True CFG" /><span class="hint">1 means no extra guidance and runs fastest. Around 2–3 follows the prompt more closely but needs more compute. High values can look forced.</span></label>
-          <label class="field"><span>Live image preview</span><select bind:value={previewEvery}><option value={4}>Every 4 steps · balanced</option><option value={1}>Every step · most detail</option><option value={2}>Every 2 steps</option><option value={8}>Every 8 steps · faster</option><option value={0}>Off · fastest</option></select><span class="hint">The step counter updates continuously. Image previews decode the current work in progress and can slow generation, especially every step. The latest preview stays visible after refresh.</span></label>
-          <label class="field"><span>Saved image format</span><select bind:value={outputFormat}><option value="png">PNG · lossless, best for editing</option><option value="webp">WebP · smaller file, high quality</option></select><span class="hint">PNG keeps every pixel from the final image. WebP at high quality downloads faster and uses less storage.</span></label>
+          <label class="field"><span>Prompt guidance · True CFG</span><input type="number" min="1" max="6" step="0.1" bind:value={trueCfg} disabled={preset !== 'custom'} aria-label="True CFG" /><span class="hint">1 turns off extra guidance. Balanced uses 5; Quality uses 6. More guidance needs extra GPU work.</span></label>
+          <label class="field"><span>Live image preview</span><select bind:value={previewEvery} disabled={selected?.supportsPreview === false}><option value={4}>Every 4 steps · balanced</option><option value={1}>Every step · most detail</option><option value={2}>Every 2 steps</option><option value={8}>Every 8 steps · faster</option><option value={0}>Off · fastest</option></select><span class="hint">{selected?.supportsPreview === false ? 'Live step progress is available; this model returns the image when rendering completes.' : 'The step counter updates continuously. Frequent image previews take more time.'}</span></label>
+          <label class="field"><span>Saved image format</span><select bind:value={outputFormat}><option value="png">PNG · lossless, best for editing</option><option value="webp" disabled={selected?.outputFormats && !selected.outputFormats.includes('webp')}>WebP · smaller file, high quality</option></select><span class="hint">PNG keeps every pixel from the final image. WebP at high quality downloads faster and uses less storage.</span></label>
         {/if}
         {#if task !== 'tts'}<label class="field"><span>Variations</span><input type="number" min="1" max="4" bind:value={count} /><span class="hint">Generate this many images in one job. Each additional variation takes more time.</span></label>{/if}
         {#if task === 'video'}<label class="field"><span>Frames / second</span><input type="number" min="1" max="60" bind:value={fps} disabled={isH3} /><span class="hint">{isH3 ? 'MiniMax H3 runs at 24 fps.' : 'Used with clip length to set how many frames to generate.'}</span></label>{/if}
@@ -678,21 +740,21 @@
       </div></details>
       <div class="generate-area">
         {#if error}<div class="error" role="alert">{error}</div>{/if}
-        <button class="generate" onclick={generate} disabled={loading || !bridgeOk || !selected || !prompt.trim() || (selected?.needsImage && !refs.length) || (selected?.cloning && refAudioB64 && !refText.trim())}><Sparkles size={17} />{task === 'tts' ? 'Generate voice' : 'Generate'}<span>↗</span></button>
+        <button class="generate" onclick={generate} disabled={submitting || loading || !bridgeOk || !selected || !prompt.trim() || (selected?.needsImage && !refs.length) || (selected?.cloning && refAudioB64 && !refText.trim())}><Sparkles size={17} />{submitting ? 'Adding to queue…' : task === 'tts' ? 'Generate voice' : 'Generate'}<span>↗</span></button>
         <p class="private-note">Runs on your machine, saved to your library.<br />Jobs keep going even if you close this tab.</p>
       </div>
       {/if}
     </section>
     {#if showCanvas}<section class="canvas" class:image-canvas={task === 'image'} use:scrollFade aria-label="Your creations">
-      <div class="canvas-head"><span>{task === 'image' ? 'Your canvas' : 'Your creations'}</span><span>{activeThisTask ? 'Generating now' : creations.length ? `${creations.length} saved` : task === 'image' ? 'Recent activity' : 'A blank canvas, for now'}</span></div>
-      <MediaJobsCard {jobs} onDeleted={async () => { gallery = await api('/api/images'); }} />
+      <div class="canvas-head"><div class="canvas-title"><current.icon size={16} /><span>{task === 'image' ? 'Your canvas' : 'Your creations'}</span></div><div class="gallery-tools"><span class="canvas-state">{activeThisTask ? 'Creating' : creations.length ? `${creations.length} saved` : 'Ready for your first idea'}</span><button class="text-button" onclick={refreshGallery} aria-label="Refresh creations"><RefreshCw size={14} /></button></div></div>
+      <MediaJobsCard {jobs} onDeleted={refreshGallery} />
       {#if creations.length}<div class="gallery">{#each creations as r, i (r.id)}<article class="creation" use:reveal={{ delay: Math.min(i, 7) * 40 }}>
         {#if r.task === 'image'}<button class="image-open" onclick={() => (lightbox = r)} aria-label="View generated image"><img use:imgFade loading="lazy" src={r.url} alt={r.prompt || 'Generated image'} /></button>
         {:else if r.task === 'video'}<video controls preload="metadata" src={r.url} playsinline><track kind="captions" /></video>
         {:else}<div class="audio-art" class:live={playingId === r.id}><current.icon size={28} /><div class="waveform" aria-hidden="true">{#each Array.from({ length: 28 }, (_, i) => i) as i}<i style:height={`${14 + (i * 17 % 39)}px`} style:--i={i}></i>{/each}</div></div><audio controls preload="metadata" src={r.url} onplay={() => (playingId = r.id)} onpause={() => { if (playingId === r.id) playingId = null; }} onended={() => { if (playingId === r.id) playingId = null; }}></audio>{/if}
-        <div class="creation-meta"><p>{r.prompt || 'Your creation'}</p><div><span>{r.model?.split('/').pop() ?? 'Local generation'}</span><a href={r.url} download aria-label="Download creation"><Download size={14} /></a><button onclick={() => remove(r)} aria-label="Delete creation"><Trash2 size={14} /></button></div></div>
+        <div class="creation-meta"><p>{r.prompt || 'Your creation'}</p><div><span>{r.model?.split('/').pop() ?? 'Local generation'}</span><button onclick={() => reuseCreation(r)} aria-label="Reuse prompt" title="Reuse this prompt"><RefreshCw size={14} /></button><a href={r.url} download aria-label="Download creation"><Download size={14} /></a><button onclick={() => remove(r)} aria-label="Delete creation"><Trash2 size={14} /></button></div></div>
       </article>{/each}</div>
-      {:else if !jobs.length}<div class="blank"><div class="canvas-symbol"><current.icon size={30} strokeWidth={1.3} /></div><h2>{current.title}</h2><p>{current.hint}<br />Your creations will collect here.</p><button class="idea" onclick={() => (prompt = freshIdea(task, prompt))} ><Sparkles size={14} /> Start with an idea</button></div>{/if}
+      {:else if !activeThisTask}<div class="blank"><div class="canvas-symbol"><current.icon size={30} strokeWidth={1.3} /></div><h2>No creations yet</h2><p>{current.hint}<br />Your creations will collect here.</p><button class="idea" onclick={() => (prompt = freshIdea(task, prompt))} ><Sparkles size={14} /> Start with an idea</button></div>{/if}
     </section>{/if}
   </div>
 </div>
@@ -721,6 +783,7 @@
   .eyebrow,.group-kicker { font-size:10px; font-weight:700; letter-spacing:.14em; color:var(--text-faint); }
   .image-intro h2 { font-size:27px; letter-spacing:-.7px; line-height:1.15; margin:0 0 5px; font-weight:600; }
   .image-intro p { font-size:13px; line-height:1.5; color:var(--text-dim); margin:0; }
+  .image-intro .memory-row { margin:12px 0 0; justify-content:flex-start; }
   .image-group { padding:0 2px 18px; border-bottom:1px solid var(--border-soft); }
   .image-group-head { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:10px; }
   .image-group-head h3 { font-size:15px; letter-spacing:-.15px; font-weight:600; margin:0; line-height:1.3; }
@@ -791,6 +854,9 @@
   .image-canvas .blank h2 { font-size:26px; }
   .image-canvas .blank p { font-size:13px; line-height:1.7; }
   .runtime-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+  .memory-row { margin: 0 0 12px; }
+  .memory-row > span { min-width: 0; overflow-wrap: anywhere; }
+  .unload-memory { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 12px; padding: 7px 10px; }
   .media { flex:1; min-height:0; width:100%; max-width:1600px; margin:0 auto; padding:16px 36px 24px; display:flex; flex-direction:column; overflow:auto; overscroll-behavior:contain; }
   .studio-head { display:flex; justify-content:space-between; align-items:center; gap:20px; margin-bottom:26px; background:transparent; }
   .head-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-shrink:0; }

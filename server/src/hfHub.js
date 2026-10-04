@@ -14,15 +14,18 @@ import {
   unlinkSync, writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { gpuVram } from './llama.js';
+import { inferenceHardware, usesRemoteHardware } from './inferenceHardware.js';
 import { modelParamsB } from './modelDescribe.js';
 import { downloadBusy } from './downloadManager.js';
 import { modelKind } from './modelKind.js';
+import { DEFAULT_HF_HOME, DEFAULT_HF_CLI, DEFAULT_MODEL_ROOT, DEFAULT_ROUTER_INI } from './paths.js';
 
 const HF_API = 'https://huggingface.co';
-const HF_CLI = process.env.HF_CLI ?? '/home/cranky/.local/bin/hf';
-export const HF_HOME = process.env.HF_HOME ?? '/var/mnt/modelnvme/ai/huggingface';
+const HF_CLI = process.env.HF_CLI ?? DEFAULT_HF_CLI;
+export const HF_HOME = process.env.HF_HOME ?? DEFAULT_HF_HOME;
 // owner/repo, or a bare repo id for legacy no-namespace repos (e.g. "gpt2").
 const REPO_ID_RE = /^[\w.-]+(\/[\w.-]+)?$/;
 
@@ -45,6 +48,11 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
   if (pipelineTag) params.set('pipeline_tag', pipelineTag);
   if (author) params.set('author', author);
   if (filter) params.set('filter', String(filter));
+  // Default Hub listings omit lastModified and GGUF metadata. Request the
+  // dates explicitly so a repository edit never masquerades as a release.
+  for (const field of ['createdAt', 'lastModified', 'downloads', 'likes', 'trendingScore', 'tags', 'pipeline_tag', 'gguf', 'gated', 'private', 'library_name']) {
+    params.append('expand', field);
+  }
   const res = await fetch(`${HF_API}/api/models?${params}`, { signal: AbortSignal.timeout(12_000) });
   if (!res.ok) throw new Error(`huggingface.co ${res.status}`);
   // HF paginates with a Link header (rel="next") carrying an opaque cursor —
@@ -59,6 +67,7 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
     id: m.id,
     likes: m.likes ?? 0,
     downloads: m.downloads ?? 0,
+    trendingScore: Number.isFinite(m.trendingScore) ? m.trendingScore : null,
     pipelineTag: m.pipeline_tag ?? null,
     // pipeline_tag is frequently missing on GGUF-only repos — kind falls
     // back to filename heuristics and defaults to chat rather than hiding
@@ -67,9 +76,13 @@ export async function searchModels(query, { limit = 30, sort, pipelineTag, autho
     gated: !!m.gated,
     private: !!m.private,
     updatedAt: m.lastModified ?? null,
+    createdAt: m.createdAt ?? null,
     tags: m.tags ?? [],
     libraryName: m.library_name ?? null,
-    paramsB: modelParamsB(m.id).totalB,
+    paramsB: m.gguf?.total ? m.gguf.total / 1e9 : modelParamsB(m.id).totalB,
+    contextLength: m.gguf?.context_length ?? null,
+    architecture: m.gguf?.architecture ?? null,
+    baseModel: (m.tags ?? []).find((t) => /^base_model:quantized:/.test(t))?.replace('base_model:quantized:', '') ?? null,
   }));
   return { models, nextCursor };
 }
@@ -230,6 +243,20 @@ const HW = {
 };
 
 async function hardwareSnapshot() {
+  if (usesRemoteHardware()) {
+    const hw = await inferenceHardware().catch(() => null);
+    const gpuTotalBytes = hw?.vram?.totalBytes ?? null;
+    const gpuFreeBytes = hw ? Math.max(0, gpuTotalBytes - hw.vram.usedBytes) : null;
+    const ramTotalBytes = hw?.ram?.totalBytes ?? null;
+    const ramAvailableBytes = hw?.ram?.availableBytes ?? null;
+    return { host: hw?.host ?? 'Windows MR_PC', available: !!hw,
+      gpuTotalBytes, gpuFreeBytes, ramTotalBytes, ramAvailableBytes,
+      gpuTotalGB: gpuTotalBytes == null ? null : gpuTotalBytes / 1024 ** 3,
+      gpuFreeGB: gpuFreeBytes == null ? null : gpuFreeBytes / 1024 ** 3,
+      ramTotalGB: ramTotalBytes == null ? null : ramTotalBytes / 1024 ** 3,
+      ramAvailableGB: ramAvailableBytes == null ? null : ramAvailableBytes / 1024 ** 3,
+      cpuCores: hw?.cpuCores ?? 0, cpuName: hw?.cpuName ?? null, gpuName: hw?.gpuName ?? null };
+  }
   const vram = await gpuVram().catch(() => null);
   let ramTotalBytes = 0;
   let ramAvailableBytes = 0;
@@ -269,23 +296,9 @@ export async function hubHardware() {
   };
 }
 
-// Models that actually fit a 16 GB card at a usable quant. Used for the
-// "Recommended for this GPU" strip — Unsloth's hub leads with what you can
-// run, not whatever HF sorted lastModified.
-const FITS_THIS_GPU = [
-  'unsloth/LFM2-700M-GGUF',
-  'unsloth/Llama-3.2-3B-Instruct-GGUF',
-  'unsloth/gemma-3-4b-it-GGUF',
-  'unsloth/Ministral-3-8B-Instruct-2512-GGUF',
-];
-
 export async function recommendedModels() {
-  const models = [];
-  for (const id of FITS_THIS_GPU) {
-    try { models.push({ ...(await modelInfo(id)), curated: true }); }
-    catch { /* gated / missing — skip */ }
-  }
-  return { models };
+  const { discoverModels } = await import('./modelDiscovery.js');
+  return discoverModels({ feed: 'recommended' });
 }
 
 const readmeCache = new Map(); // repoId -> { text, at }
@@ -312,14 +325,15 @@ export async function modelReadme(repoId) {
 }
 
 // ---------------------------------------------------------------------------
-// Fit tiers — same buckets & thresholds Unsloth Studio ships (verified
-// against their bundle: fits ≤ 97% VRAM, marginal ≤ VRAM, partial ≤
-// VRAM + 50% RAM, else oom), computed on the server from live rocm-smi +
+// Fit tiers: fits ≤ 97% VRAM, marginal ≤ VRAM, partial ≤ VRAM +
+// 90% available RAM, else oom, computed from live rocm-smi +
 // meminfo. Reported RAM headroom is what's actually *available*, not total.
 // ---------------------------------------------------------------------------
-export function fitTier(sizeBytes, { gpuTotalGB, ramAvailableGB, ramTotalGB }) {
+export function fitTier(sizeBytes, { gpuTotalGB, ramAvailableGB, ramTotalGB, available }) {
+  if (available === false || (!gpuTotalGB && !ramAvailableGB && !ramTotalGB)) return 'unknown';
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return 'unknown';
   const sizeGB = sizeBytes / 1024 ** 3;
-  const ramGB = ramTotalGB ?? ramAvailableGB ?? 0;
+  const ramGB = ramAvailableGB ?? ramTotalGB ?? 0;
   if (!gpuTotalGB || gpuTotalGB <= 0) {
     return ramGB && sizeGB <= ramGB * 0.5 ? 'ram' : 'oom';
   }
@@ -377,8 +391,10 @@ export function estimateTps(sizeBytes, repoIdOrName, { gpuFreeGB, ramAvailableGB
 const QUANT_RE = /(?:^|[-_.])(I?Q\d(?:[_-]?(?:K|MS|S|M|L|XS|XXS|XL|NL|[0-9]))*|TQ\d(?:[_-]?[012])*|MXFP4(?:[_-]?[012])*|BF16|F16|F32|UD[_-][\w-]+)/i;
 const SHARD_RE = /[_-]?\d{5}$/;
 export function quantLabel(filename) {
-  const base = String(filename).split('/').pop();
-  const m = base.match(QUANT_RE);
+  const parts = String(filename).split('/');
+  const base = parts.pop();
+  // Some publishers put the quant token only in the enclosing directory.
+  const m = base.match(QUANT_RE) ?? parts.reverse().map((part) => part.match(QUANT_RE)).find(Boolean);
   if (!m) return null;
   let q = m[1].toUpperCase().replace(/-/g, '_');
   if (/^UD_/.test(q)) {
@@ -427,67 +443,52 @@ export function draftKind(filename) {
 // the raw file tree into selectable variants with real sizes, the same shape
 // whether the repo is quant-per-file, quant-per-subfolder, or neither.
 export function groupVariants(entries) {
-  const total = entries.reduce((s, e) => s + e.size, 0);
-  const rootFiles = [];
-  const dirs = new Map();
-  for (const e of entries) {
-    const slash = e.path.indexOf('/');
-    if (slash === -1) { rootFiles.push(e); continue; }
-    const dir = e.path.slice(0, slash);
-    if (!dirs.has(dir)) dirs.set(dir, { name: dir, size: 0, files: 0, ggufFiles: 0, include: `${dir}/*` });
-    const d = dirs.get(dir);
-    d.size += e.size; d.files += 1;
-    if (/\.gguf$/i.test(e.path)) d.ggufFiles += 1;
-  }
-  if (dirs.size) {
-    const isQuantDirs = entries.some((e) => /\.gguf$/i.test(e.path));
-    // Some GGUF repos (unsloth's GLM-5.3-Flash-GGUF, e.g.) ship a junk
-    // "Shard_Rewrite/" folder of tiny placeholder stub files that end in
-    // .gguf_file, not .gguf — not a real quant, but small enough to win
-    // "pick the smallest" and become the default. Drop any subfolder with
-    // zero actual .gguf files inside it before ranking.
-    const dirList = isQuantDirs ? [...dirs.values()].filter((d) => d.ggufFiles > 0) : [...dirs.values()];
-    const sorted = dirList.sort((a, b) => a.size - b.size);
-    // Root-level GGUFs sitting NEXT TO quant subfolders (MTP/EAGLE draft
-    // heads, mmproj vision adapters, the odd standalone quant) used to
-    // vanish entirely in this branch — only subfolders became variants, so
-    // on Unsloth-style repos there was no way to download the draft file at
-    // all. List each one as its own variant, appended after the quant
-    // subfolders so the main quants stay first; the draft tag + the
-    // recommendation filter keep them from ever being the default pick.
-    const rootGgufs = rootFiles
-      .filter((e) => /\.gguf$/i.test(e.path))
-      .map((e) => ({ name: e.path, size: e.size, include: e.path }));
-    // Subfolders full of GGUF quants (Unsloth's pattern) are genuine
-    // alternatives — picking the smallest is a safe default. Subfolders of
-    // anything else (diffusers-style pipelines: language_model/, vae/,
-    // scheduler/) are REQUIRED components that must all download together —
-    // defaulting to just the smallest one would silently hand back a broken
-    // partial model, so default to the whole repo instead and still let
-    // someone pick a single subfolder deliberately from the dropdown.
-    const variants = isQuantDirs
-      ? [...sorted, ...rootGgufs]
-      : [{ name: 'Everything (all components)', size: total, include: null }, ...sorted, ...rootGgufs];
-    return { kind: 'dirs', total, variants };
-  }
-
-  const ggufs = rootFiles.filter((e) => /\.gguf$/i.test(e.path));
+  const total = entries.reduce((s, e) => s + (Number.isFinite(e.size) && e.size > 0 ? e.size : 0), 0);
+  const ggufs = entries.filter((e) => /\.gguf$/i.test(e.path));
   if (ggufs.length) {
+    // Group by exact path, including the folder. A directory may contain
+    // several unrelated quants; its combined size is not a runnable model.
     const groups = new Map();
     for (const e of ggufs) {
       const shard = e.path.match(/^(.*)-(\d{5})-of-(\d{5})\.gguf$/i);
-      if (shard) {
-        const [, base, , total3] = shard;
-        const key = `${base}::${total3}`;
-        if (!groups.has(key)) {
-          groups.set(key, { name: `${base.split('/').pop()}.gguf (${Number(total3)} shards)`, size: 0, include: `${base}-*-of-${total3}.gguf` });
-        }
-        groups.get(key).size += e.size;
-      } else {
-        groups.set(e.path, { name: e.path, size: e.size, include: e.path });
+      const key = shard ? `${shard[1]}::${shard[3]}` : e.path;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          name: shard ? `${shard[1]}.gguf (${Number(shard[3])} shards)` : e.path,
+          size: 0,
+          include: shard ? `${shard[1]}-*-of-${shard[3]}.gguf` : e.path,
+          files: 0, complete: true, expectedFiles: shard ? Number(shard[3]) : 1,
+          indices: new Set(),
+        });
       }
+      const group = groups.get(key);
+      const index = shard ? Number(shard[2]) : 1;
+      if (!Number.isFinite(e.size) || e.size <= 0 || index < 1 || index > group.expectedFiles || group.indices.has(index)) group.complete = false;
+      group.indices.add(index);
+      group.files += 1;
+      group.size += Number.isFinite(e.size) && e.size > 0 ? e.size : 0;
     }
-    return { kind: 'gguf', total, variants: [...groups.values()].sort((a, b) => a.size - b.size) };
+    const variants = [...groups.values()].map(({ indices, ...v }) => ({
+      ...v, complete: v.complete && v.expectedFiles > 0 && indices.size === v.expectedFiles,
+    })).sort((a, b) => a.size - b.size);
+    return { kind: ggufs.some((e) => e.path.includes('/')) ? 'dirs' : 'gguf', total, variants };
+  }
+  const dirs = new Map();
+  for (const entry of entries) {
+    const slash = entry.path.indexOf('/');
+    if (slash < 0) continue;
+    const dir = entry.path.slice(0, slash);
+    if (!dirs.has(dir)) dirs.set(dir, { name: dir, size: 0, files: 0, include: `${dir}/*` });
+    const group = dirs.get(dir);
+    group.size += Number.isFinite(entry.size) && entry.size > 0 ? entry.size : 0;
+    group.files += 1;
+  }
+  if (dirs.size) {
+    // Non-GGUF pipelines need every component by default.
+    return { kind: 'dirs', total, variants: [
+      { name: 'Everything (all components)', size: total, include: null },
+      ...[...dirs.values()].sort((a, b) => a.size - b.size),
+    ] };
   }
 
   return { kind: 'flat', total, variants: [{ name: 'everything', size: total, include: null }] };
@@ -500,8 +501,8 @@ export function groupVariants(entries) {
 export function isCompanionVariant(v, all) {
   if (v?.draft) return true;
   const n = String(v?.name ?? '');
-  if (/mmproj/i.test(n)) return true;
-  const real = (all ?? []).filter((x) => !x.draft && !/mmproj/i.test(x.name ?? ''));
+  if (/mmproj|imatrix/i.test(n) || DRAFT_RE.test(n.replace(/\//g, '-'))) return true;
+  const real = (all ?? []).filter((x) => x.complete !== false && !x.draft && !/mmproj|imatrix/i.test(x.name ?? '') && !DRAFT_RE.test(String(x.name ?? '').replace(/\//g, '-')));
   const max = Math.max(0, ...real.map((x) => x.size || 0));
   if (max >= 8 * 1024 ** 3 && (v.size || 0) < max * 0.08) return true;
   return false;
@@ -515,8 +516,9 @@ const RUNNABLE_FIT = new Set(['fits', 'marginal', 'partial', 'ram']);
 const FIT_PREF = { fits: 0, marginal: 1, partial: 2, ram: 3 };
 export function recommendVariant(variants, gpuFreeGB) {
   if (!variants.length) return { pick: null, recommended: false };
-  const pool = variants.filter((v) => !isCompanionVariant(v, variants));
-  const real = pool.length ? pool : variants;
+  const real = variants.filter((v) => v.complete !== false && v.size > 0
+    && (!/\.gguf/i.test(v.name ?? '') || v.size >= 32 * 1024 ** 2) && !isCompanionVariant(v, variants));
+  if (!real.length) return { pick: null, recommended: false };
   const runnable = real.filter((v) => RUNNABLE_FIT.has(v.fit));
   if (runnable.length) {
     const pick = runnable.reduce((a, b) => {
@@ -531,13 +533,46 @@ export function recommendVariant(variants, gpuFreeGB) {
   return { pick: smallest, recommended: false };
 }
 
-export async function modelVariants(repoId) {
+const treeCache = new Map();
+const pendingTrees = new Map();
+const TREE_TTL = 15 * 60 * 1000;
+
+// Cache public file metadata only; hardware and installed state are always
+// sampled separately. Follow pagination so split GGUFs are sized together.
+export async function modelFileTree(repoId) {
   assertRepoId(repoId);
-  const res = await fetch(`${HF_API}/api/models/${repoId}/tree/main?recursive=true`, { signal: AbortSignal.timeout(15_000) });
-  if (res.status === 404) throw Object.assign(new Error('not found'), { status: 404 });
-  if (!res.ok) throw new Error(`huggingface.co ${res.status}`);
-  const tree = await res.json();
-  const entries = tree.filter((e) => e.type === 'file').map((e) => ({ path: e.path, size: e.size ?? 0 }));
+  const hit = treeCache.get(repoId);
+  if (hit && Date.now() - hit.at < TREE_TTL) return hit.entries;
+  if (pendingTrees.has(repoId)) return pendingTrees.get(repoId);
+  const pending = (async () => {
+    const entries = [];
+    let url = `${HF_API}/api/models/${repoId}/tree/main?recursive=true&limit=1000`;
+    const signal = AbortSignal.timeout(20_000);
+    for (let page = 0; url && page < 20; page += 1) {
+      const res = await fetch(url, { signal });
+      if (res.status === 404) throw Object.assign(new Error('not found'), { status: 404 });
+      if (!res.ok) throw new Error(`huggingface.co ${res.status}`);
+      const tree = await res.json();
+      entries.push(...tree.filter((e) => e.type === 'file').map((e) => ({ path: e.path, size: e.size ?? 0 })));
+      const next = (res.headers.get('link') ?? '').match(/<([^>]+)>;\s*rel="next"/);
+      url = null;
+      if (next) {
+        const nextUrl = new URL(next[1], HF_API);
+        if (nextUrl.origin !== HF_API || nextUrl.pathname !== `/api/models/${repoId}/tree/main`) throw new Error('Invalid model file pagination');
+        url = nextUrl.href;
+      }
+    }
+    if (url) throw new Error('Model file listing is too large to size safely');
+    if (treeCache.size >= 100) treeCache.delete(treeCache.keys().next().value);
+    treeCache.set(repoId, { entries, at: Date.now() });
+    return entries;
+  })().finally(() => pendingTrees.delete(repoId));
+  pendingTrees.set(repoId, pending);
+  return pending;
+}
+
+export async function modelVariants(repoId) {
+  const entries = await modelFileTree(repoId);
   const grouped = groupVariants(entries);
 
   const hw = await hardwareSnapshot();
@@ -550,7 +585,7 @@ export async function modelVariants(repoId) {
       : (v.include && snapDir ? cachedPatternBytes(snapDir, v.include) : null);
     const draft = draftKind(v.name);
     const baseQuant = quantLabel(v.name) ?? (grouped.kind === 'gguf' ? 'GGUF' : null);
-    const downloaded = cachedBytes != null && cachedBytes >= v.size * 0.999;
+    const downloaded = v.complete !== false && cachedBytes != null && cachedBytes >= v.size * 0.999;
     const path = downloaded ? resolveVariantPath(repoId, v.include) : null;
     return {
       ...v,
@@ -558,8 +593,8 @@ export async function modelVariants(repoId) {
       draft,
       cachedBytes,
       downloaded,
-      fit: fitTier(v.size, hw),
-      tps: estimateTps(v.size, repoId, hw),
+      fit: v.complete === false ? 'incomplete' : fitTier(v.size, hw),
+      tps: v.complete === false ? null : estimateTps(v.size, repoId, hw),
       routerAlias: path ? (aliases.get(path) ?? null) : null,
     };
   });
@@ -588,7 +623,7 @@ export async function modelVariants(repoId) {
 
 // Variant include patterns are glob-ish (`dir/*`, `base-*-of-00003.gguf`, a
 // plain path). We match them against the snapshot's real file list.
-function includeMatches(include, path) {
+export function includeMatches(include, path) {
   if (!include) return true; // whole-repo variant: caller handles separately
   const re = new RegExp('^' + include.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
   return re.test(path);
@@ -662,14 +697,28 @@ export function upsertRouterPreset(modelPath, { alias, ctxSize = 32768 } = {}) {
   if (!existsSync(ROUTER_INI)) {
     throw Object.assign(new Error(`router preset ini missing (${ROUTER_INI})`), { status: 500 });
   }
-  const id = alias || aliasFromPath(path);
   const raw = readFileSync(ROUTER_INI, 'utf8');
+  const sections = raw.split(/(?=^\[)/m).map((block) => ({
+    block,
+    name: block.match(/^\[([^\]]+)\]/)?.[1],
+    model: block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim(),
+  }));
+  // A second repository can use the same GGUF filename. Keep the first
+  // model's alias and give the new one a stable path-based suffix.
+  const existing = sections.find((s) => s.model === path)?.name;
+  let id = alias || existing || aliasFromPath(path);
+  const occupied = (name) => sections.some((s) => s.name === name && s.model !== path);
+  if (occupied(id) && alias) {
+    throw Object.assign(new Error(`model name ${id} is already in use`), { status: 409 });
+  }
+  if (occupied(id)) {
+    const hash = createHash('sha256').update(path).digest('hex').slice(0, 10);
+    id = `${id.slice(0, 68)}-${hash}`;
+  }
   const kept = [];
-  for (const block of raw.split(/(?=^\[)/m)) {
-    const a = block.match(/^\[([^\]]+)\]/)?.[1];
-    const model = block.match(/^model\s*=\s*(.+)$/m)?.[1]?.trim();
-    if (a === id || model === path) continue;
-    kept.push(block);
+  for (const section of sections) {
+    if (section.name === id || section.model === path) continue;
+    kept.push(section.block);
   }
   const section = [
     `[${id}]`,
@@ -733,7 +782,7 @@ export function deleteVariant(repoId, { include } = {}) {
 // anything outside HF_HOME.
 // ---------------------------------------------------------------------------
 
-const ROUTER_INI = process.env.LLAMA_ROUTER_INI ?? '/home/lewis/llama-router-bazzite-vulkan.ini';
+const ROUTER_INI = process.env.LLAMA_ROUTER_INI ?? DEFAULT_ROUTER_INI;
 
 function dirSize(dir) {
   let total = 0;
@@ -785,6 +834,7 @@ export function deleteModelRepoByPath(modelPath) {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_MODEL_ROOTS = [
+  DEFAULT_MODEL_ROOT,
   join(HF_HOME, 'hub'),
   process.env.HOME ? join(process.env.HOME, 'llm-models') : null,
   process.env.HOME ? join(process.env.HOME, 'llm-models-local') : null,

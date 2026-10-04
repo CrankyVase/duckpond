@@ -66,9 +66,12 @@
   // search-result snippet without opening the page, so merge steps + fetched pages
   const citeSources = $derived.by(() => {
     if (!search) return [];
-    const all = [...(search.sources ?? [])];
-    for (const st of search.steps ?? []) for (const site of st.sites) all.push(site);
-    return all;
+    const all = Array.isArray(search.sources) ? [...search.sources] : [];
+    for (const step of Array.isArray(search.steps) ? search.steps : []) {
+      for (const site of Array.isArray(step.sites) ? step.sites : []) all.push(site);
+    }
+    // A failed fetch with no previously seen snippet is not a recorded source.
+    return all.filter(site => site?.url && !(site.status === 'error' && !site.read && !site.snippet));
   });
   // same set the inline citation pills draw from, deduped for the sources strip
   const dedupedSources = $derived.by(() => {
@@ -141,45 +144,49 @@
   </div>
 {:else if msg.role === 'user'}
   <div class="urow fade-in" class:pinned={msg.pinned}>
+    <div class="message-heading user-heading"><span class="message-author">You</span></div>
     {#if editing}
       <div class="editbox">
-        <textarea bind:value={draft} rows={Math.min(10, draft.split('\n').length + 1)}
+        <textarea aria-label="Edit your message" bind:value={draft} rows={Math.min(10, draft.split('\n').length + 1)}
           onkeydown={(e) => {
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveEdit();
             if (e.key === 'Escape') editing = false;
           }}></textarea>
         <div class="edit-actions">
-          <button class="primary" onclick={saveEdit}>Send</button>
-          <button onclick={() => (editing = false)}>Cancel</button>
-          <span class="hint">creates a new branch — the original stays</span>
+          <button type="button" class="primary" onclick={saveEdit}>Send edit</button>
+          <button type="button" onclick={() => (editing = false)}>Cancel</button>
+          <span class="hint">Creates a new branch · Ctrl/⌘ + Enter to send</span>
         </div>
       </div>
     {:else}
       <div class="ububble">{msg.content}</div>
-      <div class="actions right" class:show={hasBranches || last}>
+      <div class="actions right" class:show={hasBranches || last} role="group" aria-label="Your message actions">
         {#if hasBranches}
           <span class="branch">
-            <button class="ic" disabled={sibIdx <= 0} onclick={() => onbranch?.(siblings[sibIdx - 1])} title="Previous version">‹</button>
+            <button type="button" class="ic" disabled={sibIdx <= 0} onclick={() => onbranch?.(siblings[sibIdx - 1])} title="Previous version" aria-label="Previous message version">‹</button>
             <span class="bn">{sibIdx + 1}/{siblings.length}</span>
-            <button class="ic" disabled={sibIdx >= siblings.length - 1} onclick={() => onbranch?.(siblings[sibIdx + 1])} title="Next version">›</button>
+            <button type="button" class="ic" disabled={sibIdx >= siblings.length - 1} onclick={() => onbranch?.(siblings[sibIdx + 1])} title="Next version" aria-label="Next message version">›</button>
           </span>
         {/if}
-        <button class="ic" onclick={copyMsg} title={copied ? 'Copied' : 'Copy'}><Copy size={14} /></button>
-        <button class="ic" onclick={startEdit} title="Edit (branches)"><Pencil size={14} /></button>
-        <button class="ic" class:on={msg.pinned} onclick={() => onpin?.(msg)} title={msg.pinned ? 'Unpin' : 'Pin — survives compaction'}>
+        <button type="button" class="ic" onclick={copyMsg} title={copied ? 'Copied' : 'Copy'} aria-label={copied ? 'Message copied' : 'Copy your message'}><Copy size={14} /></button>
+        <button type="button" class="ic" onclick={startEdit} title="Edit (branches)" aria-label="Edit your message in a new branch"><Pencil size={14} /></button>
+        <button type="button" class="ic" class:on={msg.pinned} onclick={() => onpin?.(msg)} title={msg.pinned ? 'Unpin' : 'Pin — survives compaction'} aria-label={msg.pinned ? 'Unpin your message' : 'Pin your message'} aria-pressed={!!msg.pinned}>
           {#if msg.pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
         </button>
-        <button class="ic danger" onclick={() => ondelete?.(msg)} title="Delete (and everything after it)"><Trash2 size={14} /></button>
+        <button type="button" class="ic danger" onclick={() => ondelete?.(msg)} title="Delete (and everything after it)" aria-label="Delete your message and everything after it"><Trash2 size={14} /></button>
       </div>
     {/if}
   </div>
 {:else}
   <div class="arow fade-in" class:pinned={msg.pinned} class:live={streaming}>
-    <div class="avatar"><Duck px={0.8} mood={streaming ? mood : 'idle'} /></div>
+    <div class="avatar"><Duck px={0.8} mood={streaming ? mood : 'idle'} still={!streaming && !last} interactive={streaming || last} /></div>
     <div class="abody">
+      <div class="message-heading">
+        <span class="message-author">Dumpling</span>
+        {#if modelLabel}<span class="stat model" title="Answered by {modelLabel}">{modelLabel}</span>{/if}
+      </div>
       {#if search}
         <SearchTrace {search} />
-        {#if dedupedSources.length}<SourcesStrip sources={dedupedSources} />{/if}
       {/if}
       {#if msg.thinking}
         {#if streaming && !msg.content}
@@ -189,13 +196,13 @@
           </div>
           <div class="tbody live" bind:this={thinkEl}>{msg.thinking}<span class="dp-caret think" aria-hidden="true"></span></div>
         {:else}
-          <button class="tbar" class:open={showThinking} onclick={() => (showThinking = !showThinking)}>
+          <button type="button" class="tbar" class:open={showThinking} onclick={() => (showThinking = !showThinking)} aria-expanded={showThinking} aria-controls={`thinking-${msg.id ?? 'live'}`}>
             <Brain size={13} />
             <span>Thought process</span>
             <span class="tchev" class:flip={showThinking}><ChevronRight size={13} /></span>
           </button>
           {#if showThinking}
-            <div class="tbody fade-in">{msg.thinking}</div>
+            <div class="tbody fade-in" id={`thinking-${msg.id ?? 'live'}`}>{msg.thinking}</div>
           {/if}
         {/if}
       {/if}
@@ -207,7 +214,7 @@
       {#if allThinking && !streaming}
         <div class="nocontent">
           The model spent its whole reply thinking and never answered — its thoughts are above.
-          Try regenerating, or set reasoning to <b>off</b> (lightbulb below).
+          Try regenerating, or set reasoning to <b>off</b> in Options.
         </div>
       {:else if waiting}
         <div class="typing" aria-label="Generating reply" aria-live="polite">
@@ -233,16 +240,17 @@
         {/if}
       {/if}
 
+      {#if dedupedSources.length}<div class="message-sources"><SourcesStrip sources={dedupedSources} /></div>{/if}
       {#if !streaming}
-        <div class="actions" class:show={hasBranches || last}>
+        <div class="actions" class:show={hasBranches || last} role="group" aria-label="Response actions">
           {#if hasBranches}
             <span class="branch">
-              <button class="ic" disabled={sibIdx <= 0} onclick={() => onbranch?.(siblings[sibIdx - 1])} title="Previous version">‹</button>
+              <button type="button" class="ic" disabled={sibIdx <= 0} onclick={() => onbranch?.(siblings[sibIdx - 1])} title="Previous version" aria-label="Previous response version">‹</button>
               <span class="bn">{sibIdx + 1}/{siblings.length}</span>
-              <button class="ic" disabled={sibIdx >= siblings.length - 1} onclick={() => onbranch?.(siblings[sibIdx + 1])} title="Next version">›</button>
+              <button type="button" class="ic" disabled={sibIdx >= siblings.length - 1} onclick={() => onbranch?.(siblings[sibIdx + 1])} title="Next version" aria-label="Next response version">›</button>
             </span>
           {/if}
-          <button class="ic" onclick={copyMsg} title={copied ? 'Copied' : 'Copy'}><Copy size={14} /></button>
+          <button type="button" class="ic" onclick={copyMsg} title={copied ? 'Copied' : 'Copy'} aria-label={copied ? 'Response copied' : 'Copy response'}><Copy size={14} /></button>
           <!-- Read-aloud hidden 2026-07-15 with the rest of TTS; comes back
                with the ResembleAI/chatterbox build.
           <button class="ic" class:on={speech.playingId === msg.id}
@@ -252,14 +260,11 @@
             {#if speech.playingId === msg.id}<Square size={13} />{:else}<Volume2 size={14} />{/if}
           </button>
           -->
-          <button class="ic" onclick={() => onregenerate?.(msg)} title="Regenerate (branches)"><RotateCcw size={14} /></button>
-          <button class="ic" class:on={msg.pinned} onclick={() => onpin?.(msg)} title={msg.pinned ? 'Unpin' : 'Pin — survives compaction'}>
+          <button type="button" class="ic" onclick={() => onregenerate?.(msg)} title="Regenerate (branches)" aria-label="Regenerate response in a new branch"><RotateCcw size={14} /></button>
+          <button type="button" class="ic" class:on={msg.pinned} onclick={() => onpin?.(msg)} title={msg.pinned ? 'Unpin' : 'Pin — survives compaction'} aria-label={msg.pinned ? 'Unpin response' : 'Pin response'} aria-pressed={!!msg.pinned}>
             {#if msg.pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
           </button>
-          <button class="ic danger" onclick={() => ondelete?.(msg)} title="Delete (and everything after it)"><Trash2 size={14} /></button>
-          {#if modelLabel}<span class="stat model" title="Answered by {modelLabel}">{modelLabel}</span>{/if}
-          {#if msg.tok_per_sec}<span class="stat">{msg.tok_per_sec.toFixed(1)} tok/s</span>{/if}
-          {#if msg.tokens_out}<span class="stat">{msg.tokens_out} tok</span>{/if}
+          <button type="button" class="ic danger" onclick={() => ondelete?.(msg)} title="Delete (and everything after it)" aria-label="Delete response and everything after it"><Trash2 size={14} /></button>
         </div>
       {/if}
     </div>
@@ -268,14 +273,15 @@
 
 <style>
   /* ---------- user ---------- */
-  .urow { display: flex; flex-direction: column; align-items: flex-end; margin: 14px 0 4px; }
+  .urow { display: flex; flex-direction: column; align-items: flex-end; margin: 24px 0 12px; }
   .ububble {
-    max-width: 68%;
+    max-width: min(78%, 64ch);
     background: var(--bg-card);
     /* warm edge — defined, not glowing */
     border: 1px solid color-mix(in srgb, var(--accent-dim) 22%, var(--border-soft));
     border-radius: calc(16px * var(--rf)) calc(16px * var(--rf)) calc(5px * var(--rf)) calc(16px * var(--rf));
-    padding: 10px 16px;
+    padding: 13px 17px;
+    line-height: 1.65;
     white-space: pre-wrap;
     word-break: break-word;
   }
@@ -286,13 +292,17 @@
     padding: 2px 14px;
   }
   .urow.pinned .ububble { box-shadow: inset 0 0 0 1px var(--accent-dim); }
-  .editbox { width: 78%; }
-  .editbox textarea { width: 100%; resize: vertical; }
-  .edit-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .editbox { width: 78%; min-width: 0; }
+  .editbox textarea { width: 100%; resize: vertical; line-height: 1.65; min-height: 96px; }
+  .edit-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
   .edit-actions .hint { font-size: 12px; color: var(--text-faint); }
 
   /* ---------- assistant ---------- */
-  .arow { display: flex; gap: 12px; margin: 18px 0 4px; }
+  .arow { display: flex; gap: 12px; margin: 26px 0 14px; }
+  .message-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin-bottom: 10px; line-height: 1.4; }
+  .message-author { flex-shrink: 0; font-size: 12px; font-weight: 650; }
+  .user-heading { justify-content: flex-end; margin-bottom: 7px; padding-right: 3px; }
+  .message-heading .stat { margin-left: 0; min-width: 0; }
   :global(html[data-density='compact']) .arow { margin-top: 10px; }
   :global(html[data-density='compact']) .urow { margin-top: 8px; }
   :global(html[data-density='spacious']) .arow { margin-top: 28px; }
@@ -304,6 +314,18 @@
     border-radius: calc(9px * var(--rf)); margin-top: 2px;
   }
   .abody { flex: 1; min-width: 0; }
+  .abody > .md { line-height: 1.75; }
+  .abody :global(.md p) { margin: 0.75em 0; }
+  .abody :global(.md > :first-child) { margin-top: 0; }
+  .abody :global(.md > :last-child) { margin-bottom: 0; }
+  .abody :global(.md li) { margin: 0.3em 0; }
+  .abody :global(.md h1), .abody :global(.md h2), .abody :global(.md h3) { margin-top: 1.5em; margin-bottom: 0.6em; }
+  .abody :global(.md pre) { margin: 20px 0; padding: 49px 16px 16px; max-width: 100%; min-width: 0; }
+  .abody :global(.md pre code) { line-height: 1.65; }
+  .abody :global(.codebar) { min-height: 39px; box-sizing: border-box; padding: 6px 10px 6px 15px; gap: 12px; }
+  .abody :global(.codebar .codeactions) { gap: 6px; flex-shrink: 0; }
+  .abody :global(.codebar .copy) { min-height: 27px; box-sizing: border-box; display: inline-flex; align-items: center; padding: 3px 9px; }
+  .message-sources { margin-top: 16px; }
   .arow.pinned .abody { border-left: 2px solid var(--accent-dim); padding-left: 12px; }
 
   /* ---------- thinking (constrained, never blows out the page) ---------- */
@@ -332,12 +354,8 @@
     white-space: pre-wrap; word-break: break-word;
   }
   .tbody.live { max-height: 190px; }
-  .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 1.6s linear infinite;
-  }
+  .shimmer { color: var(--text-dim); animation: statusPulse 1.6s ease-in-out infinite; }
+  @keyframes statusPulse { 50% { opacity: .5; } }
   @keyframes shimmer { to { background-position: -200% 0; } }
 
   .nocontent {
@@ -402,23 +420,26 @@
   /* ---------- shared action row ---------- */
   .actions {
     display: flex; align-items: center; gap: 2px;
-    margin-top: 6px; min-height: 24px;
+    flex-wrap: wrap;
+    margin-top: 12px; min-height: 32px;
     opacity: 0; transition: opacity 160ms ease;
   }
   .actions.right { justify-content: flex-end; }
   .urow:hover .actions, .arow:hover .actions,
+  .urow:focus-within .actions, .arow:focus-within .actions,
   .urow.pinned .actions, .arow.pinned .actions,
   .actions.show { opacity: 1; }
   .ic {
     all: unset; cursor: pointer;
     display: grid; place-items: center;
-    width: 26px; height: 24px; border-radius: calc(6px * var(--rf));
+    width: 32px; height: 30px; border-radius: calc(6px * var(--rf));
     color: var(--text-dim);
     opacity: 0.8; transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
   }
   .ic.on { color: var(--accent); opacity: 1; }
   .ic:hover { background: var(--bg-hover); opacity: 1; }
   .ic:disabled { opacity: 0.25; cursor: default; }
+  .ic:focus-visible, .tbar:focus-visible, .abody :global(.codebar .copy:focus-visible) { outline: 2px solid currentColor; outline-offset: 3px; }
   .ic.danger:hover { background: rgba(192, 96, 79, 0.14); color: var(--red); }
   .ic.pulse { animation: icpulse 0.9s ease infinite; }
   @keyframes icpulse { 50% { opacity: 0.35; } }
@@ -428,7 +449,7 @@
     background: var(--bg-raised); border: 1px solid var(--border-soft);
     border-radius: calc(7px * var(--rf)); padding: 0 2px; margin-right: 4px;
   }
-  .branch .ic { width: 20px; height: 20px; font-size: 13px; color: var(--text-dim); }
+  .branch .ic { width: 28px; height: 28px; font-size: 13px; color: var(--text-dim); }
   .bn { padding: 0 2px; }
   .stat { font-family: var(--mono); font-size: 11px; color: var(--text-faint); margin-left: 8px; }
   .stat.model {
@@ -468,16 +489,17 @@
 
   @media (max-width: 768px) {
     .ububble {
-      max-width: min(94%, 100%);
-      padding: 10px 12px;
+      max-width: 94%;
+      padding: 12px 14px;
       font-size: 15px;
     }
     .arow {
-      gap: 8px;
-      margin: 12px 0 2px;
+      gap: 0;
+      margin: 24px 0 10px;
       max-width: 100%;
     }
-    .avatar { width: 26px; height: 26px; }
+    .avatar { display: none; }
+    .message-heading { margin-bottom: 9px; }
     .abody { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
     /* always show actions on touch (no hover) — keep compact so they don't wrap messily */
     .actions {
@@ -488,11 +510,12 @@
       row-gap: 2px;
     }
     .ic {
-      width: 36px;
-      height: 34px;
+      width: 44px;
+      height: 42px;
       border-radius: calc(8px * var(--rf));
     }
     .ic:active { background: var(--bg-hover); }
+    .branch .ic { width: 36px; height: 40px; }
     .stat { font-size: 10.5px; margin-left: 4px; }
     .tbody { max-height: 180px; font-size: 12.5px; }
     .wgroup {
@@ -510,6 +533,7 @@
     .abody :global(.md) { max-width: 100%; }
     .abody :global(.md pre) {
       font-size: 12px;
+      padding: 49px 12px 14px;
       max-width: 100%;
       overflow-x: auto;
     }
@@ -524,4 +548,29 @@
     .avatar { display: none; }
     .arow { gap: 0; }
   }
+  @container chatpane (max-width: 560px) {
+    .arow { gap: 0; margin: 24px 0 10px; }
+    .avatar { display: none; }
+    .ububble { max-width: 94%; padding: 12px 14px; }
+    .message-heading { margin-bottom: 9px; }
+    .abody { max-width: 100%; }
+    .editbox { width: 100%; }
+    .edit-actions .hint { width: 100%; }
+    .actions { opacity: 1; gap: 2px; row-gap: 2px; }
+    .ic { width: 44px; height: 42px; }
+    .branch .ic { width: 36px; height: 40px; }
+    .abody :global(.md pre) { padding: 49px 12px 14px; }
+    .abody :global(.md table) { display: block; overflow-x: auto; max-width: 100%; }
+    .wgroup { max-width: 100%; }
+    .wgroup > :global(*) { max-width: 100%; width: 100%; min-width: 0; }
+  }
+
+  .arow { gap: 0; margin: 28px 0 32px; }
+  .avatar { display: none; }
+  .message-heading { margin-bottom: 12px; }
+  .message-author { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+  .user-heading { display: none; }
+  .ububble { background: var(--bg-card); border: 1px solid var(--border); border-radius: 18px 18px 5px 18px; padding: 12px 18px; }
+  .abody > .md { font-size: 15px; line-height: 1.8; }
+  .actions { margin-top: 14px; }
 </style>

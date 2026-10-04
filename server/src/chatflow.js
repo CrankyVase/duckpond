@@ -11,6 +11,7 @@ import {
 import { checkUserContent } from './contentFilter.js';
 import { generateViaBridge, stepsForQuality } from './imagegen.js';
 import { fetchPageStructured, searchWebStructured, sourceLabel } from './websearch.js';
+import { COMPACT_PROMPT, compactTranscript } from './compaction.js';
 import { corePrompt } from './settings.js';
 import { diffusionModelFile, generateDiffusion } from './diffusiongen.js';
 import { costFor, modelRowForRemoteId, recordEvent } from './costs.js';
@@ -19,6 +20,8 @@ import {
   insertMessage, setLeaf, stripFakeImages,
 } from './chatkit.js';
 import { slugify, withToolsPolicy, wsNameFrom } from './chatpolicy.js';
+import { createNormalToolLedger, createReadAhead, createUsageAccumulator, parseNormalToolCall, terminalChatParams } from './normalChatHarness.js';
+import { repoInfo as ghRepoInfo, listFiles as ghListFiles, readFile as ghReadFile } from './github.js';
 
 // ---------- per-turn stream wiring (watchdog, loop detector, speculator) ----------
 // Returns the onDelta for streamChat plus the arm/disarm controls. The thinking
@@ -54,6 +57,7 @@ export function makeTurnDelta({ send, abort, log, thinkTimeoutMs, spec }) {
     return count >= REPEAT_COUNT;
   };
   const onDelta = (chunk, meta) => {
+    if (abort.signal.aborted) return;
     if (meta?.reasoning) {
       armThink();
       reasoningTail = (reasoningTail + meta.reasoning).slice(-REPEAT_SCAN * 2);
@@ -64,7 +68,7 @@ export function makeTurnDelta({ send, abort, log, thinkTimeoutMs, spec }) {
       }
       send({ type: 'thinking', text: meta.reasoning });
     }
-    if (meta?.toolFrag) { disarmThink(); spec.onFrag(meta.toolFrag); send({ type: 'tool_delta', ...meta.toolFrag }); }
+    if (meta?.toolFrag) { disarmThink(); reasoningTail = ''; spec?.onFrag(meta.toolFrag); send({ type: 'tool_delta', ...meta.toolFrag }); }
     if (chunk) { disarmThink(); reasoningTail = ''; send({ type: 'delta', text: chunk }); }
     const now = Date.now();
     if (meta?.timings && (meta.final || now - lastTick >= 500)) {
@@ -134,6 +138,7 @@ export async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
   if (conv._settings.system_prompt?.trim()) sysParts.push(conv._settings.system_prompt);
 
   let finalText = '';
+  let outcome = 'done';
   try {
     const r = await generateDiffusion({
       modelFile,
@@ -146,7 +151,7 @@ export async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
       onFrame: ({ n, steps, text, phase }) => send({ type: 'diffusion_step', n, steps, text, phase }),
     });
     finalText = (r.text || '').trim() || '_(the diffusion model produced no text)_';
-    if (r.stopped) finalText += '\n\n> stopped';
+    if (r.stopped) { finalText += '\n\n> stopped'; outcome = 'stopped'; }
   } catch (err) {
     log?.error({ err }, 'diffusion turn failed');
     if (!abort.signal.aborted) send({ type: 'error', message: String(err.message ?? err) });
@@ -155,7 +160,7 @@ export async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
 
   const asst = insertMessage(conv.id, promptLeaf.id, 'assistant', finalText, { modelId: conv.model_id });
   setLeaf(conv.id, asst.id);
-  send({ type: 'done', msg: asst });
+  send({ type: 'done', msg: asst, outcome });
 
   // cheap local auto-title (no router model to ask) from the first user words
   if (conv.title === 'New chat') {
@@ -174,28 +179,38 @@ export async function runDiffusionTurn({ conv, promptLeaf, send, abort, log }) {
 export async function runInlineSearch({
   conv, userId, userLoc, promptMessages, firstResult, params, searchTools, imgPrefs, caps, send, abort, onDelta, log, spec,
 }) {
-  const MAX_READS = caps?.reads ?? 200;      // hard cap on fetch_page calls
-  const MAX_SEARCHES = caps?.searches ?? 40; // and on web_search calls
-  const MAX_ROUNDS = caps?.rounds ?? 80;     // safety net on the whole loop (batches of ~3 reads)
+  const boundedLimit = (value, fallback, maximum) => Number.isFinite(Number(value)) ? Math.max(1, Math.min(maximum, Math.floor(Number(value)))) : fallback;
+  const MAX_READS = boundedLimit(caps?.reads ?? 200, 200, 200);
+  const MAX_SEARCHES = boundedLimit(caps?.searches ?? 40, 40, 40);
+  const MAX_ROUNDS = boundedLimit(caps?.rounds ?? 80, 80, 120);
 
   const messages = [...promptMessages];
   const steps = [];          // [{ query, sites:[{title,url,domain,read}] }]
   const sources = [];        // pages actually read → citation list
   const seen = new Set();
   let reads = 0, searches = 0;
+  let images = 0;
   const reasons = [];        // reasoning from every round → full think→search→think chain
-  let timings = firstResult.timings, usage = firstResult.usage;
+  let timings = firstResult.timings;
+  const usage = createUsageAccumulator(firstResult.usage);
+  const ledger = createNormalToolLedger({ maxCalls: Math.min(500, MAX_READS + MAX_SEARCHES + 24) });
+  const readAhead = createReadAhead({ concurrency: 3, maxEntries: 12, signal: abort.signal });
+  const failures = [];
   const mdImgs = [];
   const mdWidgets = [];      // ```duckwidget``` blocks appended to the final message
+  let searchStarted = false;
+  const beginSearch = () => {
+    if (!searchStarted) { searchStarted = true; send({ type: 'search', phase: 'begin' }); }
+  };
 
-  const addSite = (title, url, read, snippet) => {
-    const step = steps[steps.length - 1];
+  const addSite = (title, url, read, snippet, step = steps[steps.length - 1]) => {
     if (!step) return;
     let site = step.sites.find((s) => s.url === url);
     if (!site) { site = { title, url, domain: sourceLabel(url), read: false, snippet: snippet || '' }; step.sites.push(site); }
     if (read) site.read = true;
     if (title && (!site.title || site.title === site.url)) site.title = title;
     if (snippet && !site.snippet) site.snippet = snippet;
+    return site;
   };
   const addSource = (title, url) => {
     if (seen.has(url)) return;
@@ -203,69 +218,139 @@ export async function runInlineSearch({
     sources.push({ title: title || url, url, domain: sourceLabel(url) });
   };
 
-  send({ type: 'search', phase: 'begin' });
-
   let res = firstResult;
   let finalText = '';
+  try {
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    if (abort.signal.aborted) break;
+    abort.signal.throwIfAborted();
     const calls = res.toolCalls ?? [];
     if (res.reasoning) reasons.push(res.reasoning);
     if (!calls.length) { finalText = res.content ?? ''; break; }
 
     messages.push({ role: 'assistant', content: res.content ?? '', tool_calls: calls });
+    const prepared = calls.map((tc, index) => {
+      const { name, args, error } = parseNormalToolCall(tc, searchTools);
+      if (!error && name === 'generate_image') { args.prompt = args.prompt.trim(); args.size ??= '1024x1024'; }
+      if (!error && name === 'web_search') { args.query = args.query.trim().slice(0, 300).replace(/\s+/g, ' '); for (const key of Object.keys(args)) if (key !== 'query') delete args[key]; }
+      if (!error && name === 'fetch_page') { args.url = args.url.trim().split('#')[0]; for (const key of Object.keys(args)) if (key !== 'url') delete args[key]; }
+      return { tc, name, args, error, queryId: tc.id ?? `${round}:${index}` };
+    });
+    // Read-only calls in one model batch do not depend on each other's output.
+    // Reserve only the remaining search/read budgets, then consume every result
+    // in original order so transcript semantics and citation association stay stable.
+    let searchesAhead = Math.max(0, MAX_SEARCHES - searches);
+    let readsAhead = Math.max(0, MAX_READS - reads);
+    const scheduled = new Set();
+    const toolBudget = ledger.stats();
+    for (const call of prepared.slice(0, toolBudget.maxCalls - toolBudget.calls)) {
+      if (call.error || ledger.has(call.name, call.args)) continue;
+      const value = call.name === 'web_search' ? call.args.query : call.name === 'fetch_page' ? call.args.url : null;
+      if (!value) continue;
+      const key = `${call.name}\0${value}`;
+      if (scheduled.has(key) || (call.name === 'web_search' ? searchesAhead : readsAhead) <= 0) continue;
+      const pending = readAhead.start(key, async signal => {
+        const guess = spec?.take(call.name, value);
+        const early = guess ? await guess : null;
+        signal.throwIfAborted();
+        if (early?.ok) return early.r;
+        return call.name === 'web_search' ? searchWebStructured(value, { signal }) : fetchPageStructured(value, { signal });
+      });
+      if (pending) { scheduled.add(key); if (call.name === 'web_search') searchesAhead -= 1; else readsAhead -= 1; }
+    }
 
-    for (const tc of calls) {
-      let args = null;
-      try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* truncated */ }
-      const name = tc.function.name;
+    for (const { tc, name, args, error, queryId } of prepared) {
+      abort.signal.throwIfAborted();
+      const receipt = ledger.begin(name, args ?? { invalid_arguments: tc.function?.arguments });
       let result;
 
-      if (args === null) {
-        result = 'ERROR: tool arguments were not valid JSON (maybe truncated). Retry with complete JSON.';
+      if (receipt.error) {
+        result = receipt.error;
+      } else if (receipt.replayed) {
+        result = receipt.result;
+      } else if (error) {
+        result = error;
       } else if (name === 'web_search') {
-        if (searches >= MAX_SEARCHES) {
+        const query = String(args.query ?? '').trim().slice(0, 300);
+        if (!query) {
+          result = 'ERROR: web_search requires a non-empty query.';
+        } else if (searches >= MAX_SEARCHES) {
           result = 'Search limit reached — answer now with what you have, citing the pages you read.';
         } else {
           searches += 1;
-          const query = String(args.query ?? '').slice(0, 300);
-          steps.push({ query, sites: [] });
-          send({ type: 'search', phase: 'query', query });
+          beginSearch();
+          const queryStep = { id: queryId, query, status: 'searching', sites: [] };
+          steps.push(queryStep);
+          send({ type: 'search', phase: 'query', query, query_id: queryId, status: 'searching' });
           try {
-            const sp = spec?.take('web_search', query);
+            const prefetched = readAhead.take(`web_search\0${query}`);
+            const sp = prefetched ?? spec?.take('web_search', query);
             const early = sp ? await sp : null;
-            if (early?.ok) log?.info({ query }, 'speculative web_search hit');
-            const { results, text } = early?.ok ? early.r : await searchWebStructured(query);
-            for (const r of results) { addSite(r.title, r.url, false, r.content); send({ type: 'search', phase: 'site', title: r.title, url: r.url, domain: sourceLabel(r.url), read: false, snippet: r.content }); }
+            abort.signal.throwIfAborted();
+            if (prefetched && !early.ok) throw early.err;
+            if (early?.ok) log?.info({ query }, prefetched ? 'batch web_search read-ahead hit' : 'speculative web_search hit');
+            const { results, text } = early?.ok ? early.r : await searchWebStructured(query, { signal: abort.signal });
+            for (const r of results) { addSite(r.title, r.url, false, r.content, queryStep).status = 'found'; send({ type: 'search', phase: 'site', query_id: queryId, title: r.title, url: r.url, domain: sourceLabel(r.url), read: false, snippet: r.content, status: 'found' }); }
+            queryStep.status = 'complete'; delete queryStep.error;
+            send({ type: 'search', phase: 'query_done', query_id: queryId, status: 'complete' });
             result = text;
-          } catch (err) { result = `ERROR: search failed: ${err.message}`; log?.warn?.({ err }, 'web_search failed'); }
+          } catch (err) {
+            abort.signal.throwIfAborted(); queryStep.status = 'error'; queryStep.error = String(err?.message ?? err ?? 'request failed').slice(0, 300);
+            send({ type: 'search', phase: 'query_done', query_id: queryId, status: 'error', error: queryStep.error });
+            result = `ERROR: search failed: ${queryStep.error}`; log?.warn?.({ err }, 'web_search failed');
+          }
         }
       } else if (name === 'fetch_page') {
-        if (reads >= MAX_READS) {
+        const url = String(args.url ?? '').trim();
+        if (!url) {
+          result = 'ERROR: fetch_page requires a non-empty URL.';
+        } else if (reads >= MAX_READS) {
           result = `Page-read limit (${MAX_READS}) reached — stop reading and answer now, citing the pages you read.`;
         } else {
           reads += 1;
-          const url = String(args.url ?? '');
-          send({ type: 'search', phase: 'reading', url, domain: sourceLabel(url) });
+          beginSearch();
+          let queryStep = [...steps].reverse().find(step => step.sites.some(site => site.url === url));
+          queryStep ??= steps.at(-1)?.status !== 'error' ? steps.at(-1) : null;
+          if (!queryStep) {
+            queryStep = { id: queryId, query: url, status: 'reading', sites: [] };
+            steps.push(queryStep);
+            send({ type: 'search', phase: 'query', query: url, query_id: queryId, status: 'reading' });
+          }
+          queryStep.status = 'reading';
+          send({ type: 'search', phase: 'reading', query_id: queryStep.id, url, domain: sourceLabel(url) });
           try {
-            const sp = spec?.take('fetch_page', url);
+            const prefetched = readAhead.take(`fetch_page\0${url}`);
+            const sp = prefetched ?? spec?.take('fetch_page', url);
             const early = sp ? await sp : null;
-            if (early?.ok) log?.info({ url }, 'speculative fetch_page hit');
-            const { title, text } = early?.ok ? early.r : await fetchPageStructured(url);
-            addSite(title, url, true);
+            abort.signal.throwIfAborted();
+            if (prefetched && !early.ok) throw early.err;
+            if (early?.ok) log?.info({ url }, prefetched ? 'batch fetch_page read-ahead hit' : 'speculative fetch_page hit');
+            const { title, text } = early?.ok ? early.r : await fetchPageStructured(url, { signal: abort.signal });
+            const site = addSite(title, url, true, '', queryStep); site.status = 'read'; delete site.error;
             addSource(title, url);
-            send({ type: 'search', phase: 'site', title, url, domain: sourceLabel(url), read: true });
+            send({ type: 'search', phase: 'site', query_id: queryStep.id, title, url, domain: sourceLabel(url), read: true, status: 'read' });
+            queryStep.status = 'complete'; delete queryStep.error;
+            send({ type: 'search', phase: 'query_done', query_id: queryStep.id, status: 'complete' });
             result = title ? `# ${title}\n${text}` : text;
-          } catch (err) { result = `ERROR: couldn't read page: ${err.message}`; }
+          } catch (err) {
+            abort.signal.throwIfAborted(); const error = String(err?.message ?? err ?? 'request failed').slice(0, 300);
+            const site = addSite(url, url, false, '', queryStep); site.status = 'error'; site.error = error;
+            send({ type: 'search', phase: 'site', query_id: queryStep.id, title: site.title, url, domain: sourceLabel(url), read: false, status: 'error', error });
+            queryStep.status = 'error'; queryStep.error = error;
+            send({ type: 'search', phase: 'query_done', query_id: queryStep.id, status: 'error', error });
+            result = `ERROR: couldn't read page: ${error}`;
+          }
         }
       } else if (name === 'generate_image') {
         if (!imgPrefs.allowed || !args?.prompt?.trim()) {
           result = 'ERROR: image generation is not available or needs a prompt.';
+        } else if (images >= 2) {
+          result = 'ERROR: image limit reached for this turn. At most two image jobs may run; finish your answer with the results available.';
         } else {
           const blocked = checkUserContent(userId, args.prompt, 'image');
           if (!blocked.ok) {
             result = `ERROR: ${blocked.reason} Tell the user briefly; do not retry the same prompt.`;
           } else {
+          images += 1;
           send({ type: 'image_job', prompt: args.prompt });
           try {
             const r = await generateViaBridge({
@@ -276,28 +361,46 @@ export async function runInlineSearch({
                 : { type: 'image_progress', phase: ev.phase, step: ev.step, steps: ev.steps, image: ev.image, n: ev.n }),
               signal: abort.signal,
             });
+            abort.signal.throwIfAborted();
+            if (!r.images?.length) throw new Error('The image service returned no images');
             const caption = r.model_used ? `\n*generated by ${r.model_used}*` : '';
             mdImgs.push(r.images.map((im) => `![generated image](${im.url})${caption}`).join('\n\n'));
             send({ type: 'image_done' });
             result = 'Image generated and shown to the user. Mention it briefly; do not repeat the prompt.';
-          } catch (err) { send({ type: 'image_done' }); result = `ERROR: image generation failed: ${err.message}`; }
+          } catch (err) { send({ type: 'image_done' }); abort.signal.throwIfAborted(); result = `ERROR: image generation failed: ${err.message}`; }
           }
         }
       } else if (WIDGET_BUILDERS[name]) {
         try {
           const wg = await WIDGET_BUILDERS[name](args, { userLoc, userId });
+          abort.signal.throwIfAborted();
           send({ type: 'widget', widget: wg });
           mdWidgets.push('```duckwidget\n' + JSON.stringify(wg) + '\n```');
-          const where = wg.data.place || wg.data.label || wg.data.title || wg.data.name || wg.data.query || 'it';
+          const where = wg.data?.place || wg.data?.label || wg.data?.title || wg.data?.name || wg.data?.query || 'it';
           result = `The ${wg.type} card for ${where} is now shown to the user, right below your reply. Add ONE short sentence about it in plain text — no links, ids, coordinates, and critically no markdown image syntax like ![...](...); the card is not a photo you need to embed, it is already rendered.`;
-        } catch (err) { result = `ERROR: ${err.message}. Tell the user briefly.`; }
+        } catch (err) { abort.signal.throwIfAborted(); result = `ERROR: ${err.message}. Tell the user briefly.`; }
       } else if (MEMORY_TOOL_NAMES.has(name)) {
         try { result = await execMemoryTool(name, args, { userId, convId: conv.id }); }
-        catch (err) { result = `ERROR: memory unavailable right now (${err.message})`; }
+        catch (err) { abort.signal.throwIfAborted(); result = `ERROR: memory unavailable right now (${err.message})`; }
+      } else if (['github_repo_info', 'github_list_files', 'github_read_file'].includes(name)) {
+        try {
+          if (name === 'github_repo_info') {
+            const repo = await ghRepoInfo(userId, args.repo);
+            result = `${repo.full_name} · default branch ${repo.default_branch} · ${repo.private ? 'private' : 'public'}${repo.language ? ` · ${repo.language}` : ''}`;
+          } else if (name === 'github_list_files') {
+            const entries = await ghListFiles(userId, args.repo, { ref: args.ref, path: args.path ?? '' });
+            result = entries.length ? entries.map(entry => entry.type === 'dir' ? `${entry.path}/` : `${entry.path} (${entry.size}b)`).join('\n') : '(empty)';
+          } else {
+            result = (await ghReadFile(userId, args.repo, args.path, { ref: args.ref })).content;
+          }
+        } catch (err) { abort.signal.throwIfAborted(); result = `ERROR: GitHub read failed: ${err.message}`; }
       } else {
-        result = `Tool "${name}" is not available here. Use web_search, fetch_page, show_weather, show_map, or just answer.`;
+        result = `ERROR: Tool "${name}" is not available here. Use one of the offered tools, or answer with the evidence available.`;
       }
 
+      abort.signal.throwIfAborted();
+      if (receipt && !receipt.replayed && !receipt.error) result = ledger.complete(receipt.key, result);
+      if (/^(ERROR:|DENIED\b)/i.test(String(result))) failures.push(String(result).slice(0, 500));
       messages.push({ role: 'tool', tool_call_id: tc.id, content: String(result) });
     }
 
@@ -306,12 +409,15 @@ export async function runInlineSearch({
     // so the model is forced to finalize.
     send({ type: 'reset_text' });
     spec?.newRound();
-    const capped = reads >= MAX_READS || round === MAX_ROUNDS - 1;
+    abort.signal.throwIfAborted();
+    const toolStats = ledger.stats();
+    const capped = reads >= MAX_READS || searches >= MAX_SEARCHES || toolStats.limitReached || toolStats.blockedCalls > 0 || round === MAX_ROUNDS - 1;
     res = await streamChat({
       model: conv.model_id, messages,
-      params: capped ? params : { ...params, tools: searchTools, tool_choice: 'auto' },
+      params: capped ? terminalChatParams(params) : { ...params, tools: searchTools, tool_choice: 'auto' },
       abortSignal: abort.signal, onDelta, onEvent: fallbackNotice(send),
     });
+    usage.add(res.usage);
     // live context accounting: the round's real prompt size (usage when the
     // backend reports it, timings.prompt_n as the local llama.cpp fallback)
     const usedNow = res.usage?.prompt_tokens ?? res.timings?.prompt_n ?? null;
@@ -320,65 +426,14 @@ export async function runInlineSearch({
   }
 
   timings = res.timings ?? timings;
-  usage = res.usage ?? usage;
-  const text = [stripFakeImages(finalText), mdImgs.join('\n\n'), mdWidgets.join('\n\n')].filter(Boolean).join('\n\n');
-  send({ type: 'search', phase: 'done' });
-  return { text, reasoning: reasons.join('\n\n'), timings, usage, search: { steps, sources } };
-}
-
-// ---------- follow-up prompt chips (after a reply lands) ----------
-
-/** Ask the warm model for 3 short clickable next-messages. Non-fatal helper. */
-export async function generateFollowups({ model, userText, replyText, abortSignal }) {
-  const { content } = await streamChat({
-    model,
-    messages: [{
-      role: 'user',
-      content:
-        'You write short follow-up prompts the USER might click to continue this chat.\n'
-        + 'Output EXACTLY 3 lines. Nothing else — no numbers, no bullets, no quotes, no intro.\n'
-        + 'Each line is one complete message the user would send next (question or request).\n'
-        + 'Rules: under 70 characters each; specific to THIS exchange (not generic filler like '
-        + '"tell me more"); useful and distinct from each other; same language as the user.\n\n'
-        + `---\nUser: ${String(userText).slice(0, 900)}\n\nAssistant: ${String(replyText).slice(0, 1400)}\n---`,
-    }],
-    params: {
-      max_tokens: 220,
-      temperature: 0.55,
-      chat_template_kwargs: { enable_thinking: false },
-    },
-    abortSignal,
-  });
-  return parseFollowupLines(content);
-}
-
-function parseFollowupLines(raw) {
-  if (!raw) return [];
-  // drop thinking-style fences / leading labels if a model ignores instructions
-  let text = String(raw)
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/<\/?think>/gi, ' ');
-  const lines = text.split('\n')
-    .map((l) => l.trim())
-    .map((l) => l
-      .replace(/^[-*•]+\s+/, '')
-      .replace(/^\d+[\).:\-]\s*/, '')
-      .replace(/^["'“”]+|["'“”]+$/g, '')
-      .trim())
-    .filter((l) => l.length >= 8 && l.length <= 120)
-    .filter((l) => !/^(here|follow|suggestion|option|prompt)/i.test(l))
-    .filter((l) => !/^(none|n\/a)$/i.test(l));
-  // de-dupe case-insensitively, keep order
-  const seen = new Set();
-  const out = [];
-  for (const l of lines) {
-    const k = l.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(l);
-    if (out.length >= 3) break;
-  }
-  return out;
+  const cleanFinal = stripFakeImages(finalText);
+  const fallback = !cleanFinal?.trim() && !mdImgs.length && !mdWidgets.length
+    ? failures.length ? `I could not finish this request. ${failures.at(-1).replace(/^(ERROR:|DENIED:)\s*/i, '')}` : 'The model finished without an answer. Please try again.'
+    : '';
+  const text = [cleanFinal, fallback, mdImgs.join('\n\n'), mdWidgets.join('\n\n')].filter(Boolean).join('\n\n');
+  if (searchStarted) send({ type: 'search', phase: 'done' });
+  return { text, reasoning: reasons.join('\n\n'), timings, usage: usage.value(), messages, search: { steps, sources } };
+  } finally { readAhead.dispose(); }
 }
 
 // ---------- auto-compaction (cost saver) ----------
@@ -392,24 +447,14 @@ function parseFollowupLines(raw) {
 // the model the same instructions. Coding runs are the case that hurts: a
 // generic "goals/decisions" summary makes the model restart the task or ask
 // what to do — the brief must carry the build state so it RESUMES mid-code.
-export const COMPACT_PROMPT = 'Compress this chat history into a context brief for a language model '
-  + 'that must CONTINUE this conversation seamlessly, mid-task if a task is running. '
-  + 'Keep: the user\'s goals, decisions made, key facts (names, numbers, file paths, code identifiers), '
-  + 'and any work in progress — files created or edited (with paths), commands run and their outcomes, '
-  + 'errors hit and fixes applied. '
-  + 'Terse bullet points under the headings: Goal / Decisions / Facts / Work done / Open items. '
-  + 'End with the single NEXT ACTION if work is unfinished. '
-  + 'No preamble, no commentary.';
-
 export async function autoCompactMessages(messages, auxModel, abortSignal, log) {
   const KEEP = 8;
   const sys = messages[0]?.role === 'system' ? messages[0] : null;
   const rest = sys ? messages.slice(1) : [...messages];
-  const textOf = (m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''));
   const middle = rest.slice(0, Math.max(0, rest.length - KEEP))
     .filter((m) => m.role === 'user' || m.role === 'assistant');
   if (middle.length < 4) return null;
-  const transcript = middle.map((m) => `${m.role.toUpperCase()}: ${textOf(m)}`).join('\n\n').slice(0, 60_000);
+  const transcript = compactTranscript(middle);
   try {
     const { content: summary, usage } = await streamChat({
       model: auxModel,
@@ -444,6 +489,8 @@ export async function runAgentTurn({
 let loopMessages = promptMessages;
 let firstResult = res;
 let runId = null;
+const agentTools = filterTools(imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'), disabledTools);
+const agentToolNames = new Set(agentTools.map((t) => t.function.name));
 // gate call: start_project(name, plan) creates the workspace; the
 // rest of the gate step is recorded AFTER the subscription below so
 // the chips/diff show up live, not just in the replay
@@ -456,6 +503,7 @@ if (gateCall) {
   db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(wsRow.id, conv.id);
 }
 const run = createRun(wsRow.id, req.user.id, conv.model_id, promptLeaf.content);
+run.agent_execution = conv._settings.agent_execution === 'edit' ? 'edit' : 'execute';
 runId = run.id;
 bindRunAbort(run.id, abort);
 send({ type: 'agent_start', run, workspace: wsRow });
@@ -493,9 +541,9 @@ if (gateCall) {
   if (gargs.plan?.trim()) {
     await execTool(run, wsRow, 'write_file', { path: 'PLAN.md', content: gargs.plan.trim() + '\n' });
   }
-  const gateResult = `Project workspace "${wsRow.name}" created${gargs.plan?.trim() ? ' and your plan saved as PLAN.md' : ''}. You now have list_files, read_file, write_file and run_command — implement the plan, then verify it by running it.`;
+  const gateResult = `Project workspace "${wsRow.name}" created${gargs.plan?.trim() ? ' and your plan saved as PLAN.md' : ''}. Available tools: ${[...agentToolNames].join(', ') || 'none'}. Implement and verify the plan with the tools available.`;
   emitRunEvent(run.id, 'tool_result', { call_id: gateCall.id, name: 'start_project', step: -1, result: gateResult });
-  loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
+  loopMessages = withToolsPolicy(buildPrompt(conv, promptLeaf.id), wsRow, imgPrefs.allowed, userLoc, disabledTools, new Set(), agentToolNames);
   loopMessages.push({ role: 'assistant', content: res.content ?? '', tool_calls: [gateCall] });
   loopMessages.push({ role: 'tool', tool_call_id: gateCall.id, content: gateResult });
   firstResult = null; // the loop streams fresh with the full toolset
@@ -508,7 +556,7 @@ try {
   result = await agentLoop({
     run, ws: wsRow, messages: loopMessages, model: conv.model_id,
     genParams: params, abortSignal: abort.signal, firstResult,
-    tools: filterTools(imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'), disabledTools),
+    tools: agentTools,
     ctxBudget: Number(conv._settings.ctx_size) > 0 ? Number(conv._settings.ctx_size) : null,
   });
 } catch (err) {
@@ -549,9 +597,13 @@ return {
 // into the chat, then let the model add a short comment. Returns
 // { text, reasoning, timings, usage }.
 export async function runImageTurn({
-  conv, req, res, promptMessages, imgPrefs, params, send, abort, onDelta, log,
+  conv, req, res, promptMessages, imgPrefs, params, send, abort, onDelta, log, tools = AGENT_TOOLS.filter(tool => tool.function.name === 'generate_image'),
 }) {
-  let { reasoning, timings, usage } = res;
+  let { reasoning, timings } = res;
+  const usage = createUsageAccumulator(res.usage);
+  const ledger = createNormalToolLedger({ maxCalls: 32 });
+  const failures = [];
+  let imageJobs = 0;
   let text = '';
 // pure image turn — no workspace, no run. Generate on the bridge with
 // the live preview streaming into the chat, then let the model add a
@@ -560,17 +612,28 @@ export async function runImageTurn({
 const followup = [...promptMessages,
   { role: 'assistant', content: res.content ?? '', tool_calls: res.toolCalls }];
 const mdImgs = [];
-for (const call of res.toolCalls.slice(0, 2)) {
-  let args = null;
-  try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* truncated */ }
+for (const call of res.toolCalls) {
+  abort.signal.throwIfAborted();
+  const { name, args, error } = parseNormalToolCall(call, tools);
+  if (!error && name === 'generate_image') { args.prompt = args.prompt.trim(); args.size ??= '1024x1024'; }
+  const receipt = ledger.begin(name, args ?? { invalid_arguments: call.function?.arguments });
   let toolResult;
-  if (!args?.prompt?.trim()) {
-    toolResult = 'ERROR: generate_image needs a prompt argument (complete visual description). Retry with well-formed JSON.';
+  if (receipt.error) {
+    toolResult = receipt.error;
+  } else if (receipt.replayed) {
+    toolResult = receipt.result;
+  } else if (error) {
+    toolResult = error;
+  } else if (name !== 'generate_image' || !imgPrefs.allowed || !args.prompt) {
+    toolResult = 'ERROR: this turn can only generate images when that offered tool is available and has a non-empty prompt.';
+  } else if (imageJobs >= 2) {
+    toolResult = 'ERROR: at most two image jobs may run in one turn. No image was generated for this additional call.';
   } else {
     const blocked = checkUserContent(req.user.id, args.prompt, 'image');
     if (!blocked.ok) {
       toolResult = `ERROR: ${blocked.reason} Tell the user briefly; do not retry the same prompt.`;
     } else {
+    imageJobs += 1;
     send({ type: 'image_job', prompt: args.prompt });
     try {
       const r = await generateViaBridge({
@@ -581,6 +644,8 @@ for (const call of res.toolCalls.slice(0, 2)) {
           : { type: 'image_progress', phase: ev.phase, step: ev.step, steps: ev.steps, image: ev.image, n: ev.n }),
         signal: abort.signal,
       });
+      abort.signal.throwIfAborted();
+      if (!r.images?.length) throw new Error('The image service returned no images');
       const caption = r.model_used ? `\n*generated by ${r.model_used}*` : '';
       const md = r.images.map((im) => `![generated image](${im.url})${caption}`).join('\n\n');
       mdImgs.push(md);
@@ -591,27 +656,37 @@ for (const call of res.toolCalls.slice(0, 2)) {
     } catch (err) {
       req.log.error({ err }, 'in-chat image generation failed');
       send({ type: 'image_done' });
+      abort.signal.throwIfAborted();
       toolResult = `ERROR: image generation failed: ${err.message}. Tell the user.`;
     }
     }
   }
+  abort.signal.throwIfAborted();
+  if (receipt && !receipt.replayed && !receipt.error) toolResult = ledger.complete(receipt.key, toolResult);
+  if (/^(ERROR:|DENIED\b)/i.test(String(toolResult))) failures.push(String(toolResult).slice(0, 500));
   followup.push({ role: 'tool', tool_call_id: call.id, content: toolResult });
 }
 // brief commentary pass — no tools, so it can't chain another job
 let fin = { content: '' };
 try {
+  abort.signal.throwIfAborted();
   fin = await streamChat({
-    model: conv.model_id, messages: followup, params,
+    model: conv.model_id, messages: followup, params: terminalChatParams(params),
     abortSignal: abort.signal, onDelta, onEvent: fallbackNotice(send),
   });
+  usage.add(fin.usage);
 } catch (err) {
+  abort.signal.throwIfAborted();
   if (!mdImgs.length) throw err;
   req.log.warn({ err }, 'image follow-up commentary failed; keeping the image');
 }
-text = [stripFakeImages(res.content), mdImgs.join('\n\n'), stripFakeImages(fin.content)]
+const finalComment = stripFakeImages(fin.content);
+const fallback = !finalComment?.trim() && !mdImgs.length
+  ? failures.length ? `I could not generate the image. ${failures.at(-1).replace(/^(ERROR:|DENIED:)\s*/i, '')}` : 'The model finished without an answer or an image. Please try again.'
+  : '';
+text = [fallback ? '' : stripFakeImages(res.content), mdImgs.join('\n\n'), finalComment, fallback]
   .filter(Boolean).join('\n\n');
-reasoning = fin.reasoning ?? reasoning;
+reasoning = [reasoning, fin.reasoning].filter(Boolean).join('\n\n');
 timings = fin.timings ?? timings;
-usage = fin.usage ?? usage;
-  return { text, reasoning, timings, usage };
+  return { text, reasoning, timings, usage: usage.value(), messages: followup };
 }

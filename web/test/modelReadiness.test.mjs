@@ -9,4 +9,6 @@ const row = {repoId:'owner/model'};
 assert.equal(modelReadiness(row,[{id:'owner/model',ready:false,reason:'Missing encoder'}]).detail,'Missing encoder');
 assert.equal(modelReadiness(row,[{id:'owner/model',ready:true}]).label,'Runtime available');
 assert.equal(modelReadiness(row,[{id:'different/model',ready:true}]).state,'downloaded');
+assert.match(modelReadiness({ source:'hf-cache', kind:'gguf', task:'chat' }).detail, /Use in chat/);
+assert.equal(modelReadiness({ source:'media-components', kind:'components', task:'video' }).label, 'Media files on disk');
 console.log('Installed model identity and evidence-based readiness passed');

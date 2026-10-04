@@ -1,4 +1,5 @@
-// Scheduling policy only: no Svelte, DOM, text interpretation, tool arguments or audio.
+// Scheduling policy only: no Svelte, DOM, tool arguments or audio.
+import { animationTimeline } from './duck-player.js';
 // dur is a minimum; the brain rounds it up to complete sprite cycles.
 export const BEATS = {
   blink:    { dur: 300, cd: 3000, w: () => 2 },
@@ -47,6 +48,31 @@ export const BEATS = {
   skate:    { dur: 4500, cd: 75000, w: (m) => m.energy * 0.5 },
   cook:     { dur: 5000, cd: 75000, w: (m) => 0.2 + m.contentment * 0.3, then: [['nom', 0.5]] },
   magic:    { dur: 4000, cd: 90000, w: (m) => m.curiosity * m.energy * 0.5, then: [['bubbles', 0.35]] },
+  bow:      { dur: 1900, cd: 65000, w: (m) => m.affection * 0.12 },
+  salute:   { dur: 1700, cd: 65000, w: (m) => m.energy * 0.12 },
+  peek:     { dur: 2500, cd: 75000, w: (m) => m.curiosity * 0.22 },
+  doze:     { dur: 6000, cd: 70000, w: (m) => m.energy < 0.35 ? 0.6 : 0, then: [['wake', 0.7]] },
+  wake:     { dur: 2300, cd: 45000, w: () => 0 },
+  heartgift:{ dur: 2400, cd: 75000, w: (m) => m.affection * m.contentment * 0.15 },
+  butterfly:{ dur: 3500, cd: 85000, w: (m) => m.curiosity * 0.25 },
+  paperplane:{ dur: 2800, cd: 80000, w: (m) => m.energy * 0.22 },
+  meditate: { dur: 6000, cd: 90000, w: (m) => (1 - m.energy) * m.contentment * 0.25 },
+  feather:  { dur: 3000, cd: 85000, w: (m) => m.curiosity * 0.18 },
+  telescope:{ dur: 3300, cd: 90000, w: (m) => m.curiosity * 0.22 },
+  stretchwings:{ dur: 2500, cd: 55000, w: (m) => (1 - m.energy) * 0.25 },
+  swim:     { dur: 4000, cd: 90000, w: (m) => m.contentment * 0.18, then: [['dive', 0.2]] },
+  dive:     { dur: 2200, cd: 90000, w: () => 0, then: [['shakeoff', 0.5]] },
+  walk:     { dur: 2400, cd: 85000, w: (m) => m.energy * 0.12 },
+  nod:      { dur: 1700, cd: 35000, w: (m) => m.affection * 0.08 },
+  nope:     { dur: 1700, cd: 45000, w: () => 0 },
+  shy:      { dur: 2200, cd: 65000, w: (m) => m.affection * (1 - m.energy) * 0.1 },
+  cheer:    { dur: 2600, cd: 75000, w: (m) => m.energy > 0.8 ? m.contentment * 0.12 : 0 },
+  tippytoe: { dur: 2200, cd: 70000, w: (m) => m.curiosity * 0.18 },
+  puddlejump:{ dur: 3000, cd: 85000, w: (m) => m.energy * 0.15, then: [['shakeoff', 0.4]] },
+  leaf:     { dur: 3400, cd: 85000, w: (m) => m.curiosity * 0.2 },
+  kite:     { dur: 5200, cd: 90000, w: (m) => m.energy * m.contentment * 0.16 },
+  drum:     { dur: 4300, cd: 90000, w: (m) => m.energy * 0.16, then: [['dance', 0.25]] },
+  lantern:  { dur: 5500, cd: 90000, w: (m) => m.contentment * 0.2 },
   // Reactions only. In particular, ending a stream does not imply approval.
   startle:  { dur: 900, cd: 15000, w: () => 0, then: [['look', 0.5]] },
   facepalm: { dur: 1800, cd: 30000, w: () => 0, then: [['shakeoff', 0.4]] },
@@ -55,15 +81,15 @@ export const BEATS = {
   wait:     { dur: 3000, cd: 30000, w: () => 0 },
 };
 
-const QUIET = new Set(['blink', 'look', 'curious', 'think', 'read', 'write', 'listen', 'eureka']);
+const QUIET = new Set(['blink', 'look', 'curious', 'think', 'read', 'write', 'listen', 'eureka', 'meditate', 'feather', 'telescope']);
 export const MAX_CHAIN = 3;
 
 export function timeBias(name, hour) {
   const night = hour < 6 || hour >= 21;
-  if (name === 'stargaze' || name === 'campfire') return night ? 3 : 0.15;
+  if (['stargaze', 'campfire', 'telescope', 'lantern'].includes(name)) return night ? 3 : 0.15;
   if (name === 'coffee') return hour >= 6 && hour < 11 ? 3 : night ? 0.1 : 0.5;
   if (name === 'cook' || name === 'nom') return [7, 8, 12, 13, 18, 19].includes(Math.floor(hour)) ? 2 : 0.6;
-  if (['sunny', 'garden', 'camera', 'skate'].includes(name)) return night ? 0.1 : 1.5;
+  if (['sunny', 'garden', 'camera', 'skate', 'butterfly', 'paperplane', 'kite'].includes(name)) return night ? 0.1 : 1.5;
   if (name === 'sleep' || name === 'yawn') return night ? 2 : 0.5;
   return 1;
 }
@@ -100,7 +126,8 @@ export function chooseChain(beat, context) {
 
 export function beatDuration(name, animations) {
   const animation = animations[name];
-  const cycle = animation?.frames?.length * animation?.ms;
+  if (!animation?.frames?.length) return 0;
+  const cycle = animationTimeline(animation).durationMs;
   if (!(cycle > 0) || !Number.isFinite(cycle)) return 0;
   const minimum = BEATS[name]?.dur ?? cycle;
   return animation.loop === false ? Math.max(minimum, cycle) : Math.ceil(minimum / cycle) * cycle;
@@ -112,8 +139,9 @@ export function advanceVisibleTime(now, elapsed, hidden) {
 }
 
 const TOOL_ACTIVITY = {
-  start_project: 'thinkhard', list_files: 'read', read_file: 'read',
+  start_project: 'thinkhard', update_plan: 'write', search_files: 'search', list_files: 'read', read_file: 'read',
   write_file: 'write', edit_file: 'write', run_command: 'code',
+  start_server: 'code', stop_server: 'code', server_status: 'read', browser: 'search',
   web_search: 'search', fetch_page: 'read', generate_image: 'image', screenshot: 'camera',
   github_repo_info: 'search', github_list_files: 'read', github_read_file: 'read',
   github_pull: 'code', github_create_branch: 'code', github_commit: 'code', github_open_pr: 'write',
@@ -132,7 +160,8 @@ export function activeTool(stream) {
 }
 
 function streamFailed(stream) {
-  return !!(stream?.error || stream?.events?.some((event) => event.type === 'error'));
+  return !!(stream?.error || stream?.duckOutcome === 'error' || stream?.duckStatus === 'error'
+    || stream?.events?.some((event) => event.type === 'error'));
 }
 
 export function observeStream(previous, stream) {
@@ -142,14 +171,15 @@ export function observeStream(previous, stream) {
   // Object identity covers a live turn; a known run ID also covers reattachment.
   // Conversation identity alone would leak a failure into the next queued turn.
   const sameRun = !!(previous?.stream && stream && (previous.stream === stream
-    || (previous.stream.convId === stream.convId && stream.run?.id != null
-      && previous.stream.run?.id === stream.run.id)));
+    || (previous.stream.convId === stream.convId && ((stream.jobId != null && previous.stream.jobId === stream.jobId)
+      || (stream.run?.id != null && previous.stream.run?.id === stream.run.id)))));
+  const old = previous?.stream;
+  const outcome = old?.duckOutcome ?? old?.duckStatus;
   return {
     stream,
     failed: !!stream && (streamFailed(stream) || (sameRun && oldFailed)),
-    // Chat's done event also saves aborted/error partials. No success signal is
-    // exposed in app state, so an unclassified ending gets a neutral reaction.
-    reaction: previous?.stream && !stream ? (oldFailed ? 'facepalm' : 'shrug') : null,
+    reaction: old && !stream ? (oldFailed ? 'facepalm'
+      : outcome === 'done' ? old.duckCue ?? 'nod' : 'shrug') : null,
   };
 }
 
@@ -166,8 +196,9 @@ export function activeContext(app, voice = {}, speech = {}, failed = false) {
     const tool = activeTool(stream);
     if (tool) return Object.hasOwn(TOOL_ACTIVITY, tool) ? TOOL_ACTIVITY[tool] : 'thinkhard';
     if (voice.open && voice.state === 'speaking') return 'talk';
-    // Agent text may be old step narration, and token counts include reasoning.
-    // Only inspect presence of reply/thinking buffers, never their meaning.
+    // Explicit arrival phases win over old buffers and agent step narration.
+    if (stream.duckPhase === 'reply') return 'talk';
+    if (stream.duckPhase === 'thinking') return 'thinkhard';
     return stream.run ? 'thinkhard' : stream.text ? 'talk' : stream.thinking ? 'thinkhard' : 'think';
   }
   if (voice.open) {

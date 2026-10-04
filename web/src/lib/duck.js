@@ -1,3 +1,8 @@
+import { createExpressionAnimations } from './duck-expressions.js';
+import { createPlaytimeAnimations } from './duck-playtime.js';
+import { createExtraAnimations, EXTRA_NAMES, EXTRA_METADATA } from './duck-extra.js';
+import { createMomentAnimations, MOMENT_NAMES, MOMENT_METADATA } from './duck-moments.js';
+
 // The DuckPond mascot — a detailed 32×32 pixel-art call duck.
 //
 // Everything here is authored as small character grids and *composited* by the
@@ -1088,7 +1093,7 @@ Object.assign(ANIM, {
   swim:      { frames: [swimFrame(0), swimFrame(1), swimFrame(2)], ms: 420, loop: true, css: 'sway' },
   dive:      { frames: [dive1, dive2], ms: 520, loop: true, css: 'bob' },
   splash:    { frames: [splashUp, splashDown, splashUp], ms: 240, loop: true, css: 'bob' },
-  shakeoff:  { frames: [shakeLeft, shakeRight, shakeLeft], ms: 170, loop: true, css: 'shake' },
+  shakeoff:  { frames: [shakeLeft, shakeRight, shakeLeft], ms: 170, loop: true, css: '' },
 
   // creative
   image:     { frames: [paintF1, paintF2, paintF3], ms: 460, loop: true, css: '' },
@@ -1242,3 +1247,48 @@ const mowB = compose(STAND, [gripWing, 18, 15], ...mowHandle, ...mowerBody, ...m
 
 ANIM.walk = { frames: [walkA, walkB, walkC, walkB], ms: 150, loop: true, css: '' };
 ANIM.mow  = { frames: [mowA, mowB], ms: 240, loop: true, css: '' };
+
+// Connect all authored scene libraries to the renderer and the shared brain.
+const sceneParts = { compose, STAND, SIT, BODY, WING, CODE_SHELL, eraseLaptop };
+const expressions = createExpressionAnimations(sceneParts);
+const playtime = createPlaytimeAnimations(sceneParts);
+Object.assign(ANIM, expressions, playtime, createExtraAnimations(sceneParts), createMomentAnimations(sceneParts));
+export const NEW_ANIMATION_NAMES = Object.freeze([...Object.keys(expressions), ...Object.keys(playtime), ...EXTRA_NAMES, ...MOMENT_NAMES]);
+
+const categories = {
+  'Everyday': ['idle', 'blink', 'look', 'curious', 'preen', 'stretch', 'yawn', 'sleep', 'nom', 'coffee', 'doze', 'wake', 'meditate', 'feather', 'stretchwings'],
+  'Expressions': ['happy', 'quack', 'wink', 'love', 'giggle', 'startle', 'sneeze', 'eureka', 'facepalm', 'shrug', 'approve', 'bow', 'salute', 'peek', 'heartgift'],
+  'At work': ['code', 'think', 'thinkhard', 'talk', 'search', 'image', 'error', 'read', 'write', 'wait', 'sweep', 'listen', 'camera', 'phone'],
+  'Playtime': ['propeller', 'party', 'king', 'wizard', 'chef', 'dance', 'hop', 'guitar', 'game', 'vibe', 'cook', 'magic', 'balloon', 'bubbles', 'skate', 'paperplane'],
+  'Outdoors': ['swim', 'dive', 'splash', 'shakeoff', 'fishing', 'garden', 'walk', 'mow', 'rain', 'snow', 'sunny', 'stargaze', 'campfire', 'butterfly', 'telescope'],
+};
+const labels = { thinkhard: 'Think hard', shakeoff: 'Shake off', nom: 'Nibble', stargaze: 'Stargaze', facepalm: 'Facepalm' };
+const descriptions = {
+  idle: 'A quiet moment between ideas.', blink: 'A tiny blink, then eyes wide open.', look: 'Checking what is happening nearby.',
+  curious: 'A curious glance at something new.', preen: 'Keeping those feathers in order.', stretch: 'A good stretch after sitting awhile.',
+  yawn: 'Big yawn, little duck.', sleep: 'Dreaming quietly with sleepy bubbles.', nom: 'A little snack break.',
+  code: 'Tapping away at a tiny laptop.', think: 'Turning an idea over.', thinkhard: 'Concentrating on a tricky problem.',
+  talk: 'A lively little conversation.', search: 'Looking closely for a clue.', image: 'Painting a new idea on an easel.',
+  error: 'A moment of confusion while work pauses.', read: 'Following the pages of a little book.', write: 'Putting an idea on paper.',
+  wait: 'Waiting patiently for the next step.', sweep: 'Tidying the workspace.', listen: 'Leaning in to listen.',
+  eureka: 'An idea appears, then a pleased little recovery.', facepalm: 'A gentle, exasperated facepalm.', shrug: 'A small, open-ended shrug.',
+  approve: 'A pleased nod of approval.', camera: 'Lifting a camera, taking a picture, and settling back.',
+  rain: 'Sheltering under an umbrella with imaginary raindrops.', snow: 'Wrapped in a scarf among falling snowflakes.',
+  sunny: 'Cooling off with a fan and sunglasses.', balloon: 'A balloon lifts Dumpling from the ground.',
+  bubbles: 'Blowing soap bubbles and watching them rise.', stargaze: 'Looking up into an imaginary night sky.',
+  campfire: 'A quiet pause beside a little campfire.', skate: 'Keeping balance on a tiny skateboard.',
+  cook: 'Stirring up something delicious.', magic: 'A little spell, a little sparkle.',
+};
+const previewFrames = {
+  idle: 0, blink: 0, wink: 1, startle: 0, yawn: 1, sneeze: 1, wave: 2, talk: 2,
+  bow: 4, salute: 3, peek: 4, doze: 2, wake: 4, heartgift: 4, butterfly: 4,
+  paperplane: 4, meditate: 2, feather: 5, telescope: 4, stretchwings: 4,
+};
+export const ANIMATION_INFO = Object.freeze(Object.fromEntries(Object.keys(ANIM).map((name) => [name, Object.freeze({
+  label: labels[name] ?? name.charAt(0).toUpperCase() + name.slice(1),
+  category: Object.entries(categories).find(([, items]) => items.includes(name))?.[0] ?? 'Playtime',
+  description: descriptions[name] ?? `Dumpling's ${name} gesture.`,
+  ...EXTRA_METADATA[name], ...MOMENT_METADATA[name],
+  previewFrame: Math.min(ANIM[name].frames.length - 1, Math.max(0, MOMENT_METADATA[name]?.previewFrame ?? previewFrames[name] ?? Math.floor(ANIM[name].frames.length / 2))),
+  isNew: NEW_ANIMATION_NAMES.includes(name),
+})])));

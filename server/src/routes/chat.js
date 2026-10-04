@@ -8,7 +8,7 @@ import { countInputTokens, isModelLoaded, streamChat } from '../llama.js';
 import { estimateTokens } from '../providers.js';
 import { createWorkspaceRow, stopRunsForWorkspace } from './agent.js';
 import {
-  attachListener, getLiveJob, stopLiveJob,
+  attachListener, getLiveJob, hasActiveJob, stopLiveJob,
 } from '../liveJobs.js';
 // remote providers + cost saver (feat/remote-providers)
 import { auxModelFor, isRemoteId } from '../chatBackend.js';
@@ -19,7 +19,7 @@ import {
   buildPrompt, convForUser, insertMessage, pathToRoot, setLeaf,
 } from '../chatkit.js';
 import { registerChatPost } from './chatPost.js';
-import { COMPACT_PROMPT } from '../chatflow.js';
+import { COMPACT_PROMPT, compactTranscript } from '../compaction.js';
 
 // ---------- routes ----------
 
@@ -81,7 +81,7 @@ export default async function chatRoutes(app) {
     if (!conv) return reply.code(404).send({ error: 'not found' });
     const { title, model_id, active_leaf_id, settings, workspace_id } = req.body ?? {};
     if (workspace_id !== undefined) {
-      if (getLiveJob(conv.id)?.status === 'running') return reply.code(409).send({ error: 'Stop the active task before changing projects' });
+      if (hasActiveJob(conv.id)) return reply.code(409).send({ error: 'Stop the active task before changing projects' });
       if (conv.mode !== 'agent' || !db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(workspace_id, req.user.id)) return reply.code(400).send({ error: 'Select a project you own in Agent mode' });
       db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(workspace_id, conv.id);
     }
@@ -146,6 +146,7 @@ export default async function chatRoutes(app) {
     if (!conv) return reply.code(404).send({ error: 'not found' });
     const job = getLiveJob(conv.id);
     if (!job || job.userId !== req.user.id) return reply.code(204).send();
+    if (req.query?.jobId && req.query.jobId !== job.id) return reply.code(204).send();
 
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -167,8 +168,9 @@ export default async function chatRoutes(app) {
     const write = (obj) => {
       if (reply.raw.writableEnded || reply.raw.destroyed) return;
       try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
-      // done / stream_end — hang up so the client promise resolves
-      if (obj?.type === 'done' || obj?.type === 'stream_end') closeLive();
+      // Keep the tail through follow-up events emitted after the saved reply.
+      // The worker closes it with stream_end once its cleanup is complete.
+      if (obj?.type === 'stream_end') closeLive();
     };
     unsub = attachListener(job, write);
     // finished jobs only needed the resume snapshot — close immediately
@@ -232,7 +234,7 @@ export default async function chatRoutes(app) {
 
     const remote = isRemoteId(conv.model_id);
     const auxModel = remote ? await auxModelFor(conv.model_id, req.log) : conv.model_id;
-    const transcript = toCompact.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+    const transcript = compactTranscript(toCompact);
     const { content: summary, usage: compactUsage } = await streamChat({
       model: auxModel,
       messages: [{

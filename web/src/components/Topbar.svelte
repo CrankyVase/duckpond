@@ -9,7 +9,6 @@
   import Cloud from '@lucide/svelte/icons/cloud';
   import Download from '@lucide/svelte/icons/download';
   import Files from '@lucide/svelte/icons/files';
-  import MessageSquare from '@lucide/svelte/icons/message-square';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
   import PiggyBank from '@lucide/svelte/icons/piggy-bank';
   import Settings2 from '@lucide/svelte/icons/settings-2';
@@ -25,137 +24,65 @@
     settings: { label: 'Settings', icon: Settings2 },
   };
   const viewMeta = $derived(VIEWS[app.view] ?? null);
+  const workspaceTitle = $derived(app.conv?.title && !(app.mode === 'agent' && app.conv.title === 'New chat')
+    ? app.conv.title : app.mode === 'agent' ? 'New task' : 'New chat');
 
   const vram = $derived(app.gpu?.totalBytes
-    ? `${(app.gpu.usedBytes / 1e9).toFixed(1)} / ${(app.gpu.totalBytes / 1e9).toFixed(0)} GB`
+    ? `${(app.gpu.usedBytes / 1024 ** 3).toFixed(1)} / ${(app.gpu.totalBytes / 1024 ** 3).toFixed(1)} GiB`
     : null);
-  const vramPct = $derived(app.gpu?.totalBytes ? app.gpu.usedBytes / app.gpu.totalBytes : 0);
+
 </script>
 
-<header>
+<header class:chat-toolbar={app.view === 'chat'}>
   {#if app.sidebarCollapsed}
-    <button class="ghost iconb" onclick={() => (app.sidebarCollapsed = false)}
-      title="Show menu" aria-label="Menu">
-      <PanelLeft size={18} />
+    <button class="ghost iconb menu-toggle" onclick={() => (app.sidebarCollapsed = false)}
+      title="Show menu" aria-label="Show navigation" aria-expanded={!app.sidebarCollapsed} aria-controls="workspace-navigation">
+      <PanelLeft size={19} />
     </button>
   {/if}
   {#if app.view === 'chat'}
-    <!-- sidebar owns the switcher when it's visible; this is the fallback -->
-    {#if app.sidebarCollapsed}<ModeSwitch compact />{/if}
-    <div class="mid">
-      <ModelPicker />
-    </div>
+    <div class="model-control"><ModelPicker /></div>
+    <span class="workspace-title" title={workspaceTitle}>{workspaceTitle}</span>
+    {#if app.sidebarCollapsed}<div class="mode-control"><ModeSwitch compact /></div>{/if}
+    <details class="system-status">
+      <summary title="Context and memory usage">Usage</summary>
+      <div class="status-popover">
+        <ContextBar />
+        {#if vram}<span class="vram">VRAM <strong>{vram}</strong></span>{/if}
+      </div>
+    </details>
   {:else}
-    <button class="ghost iconb backchat" onclick={() => {
-      app.view = 'chat';
-      app.themeStudioOpen = false;
-    }} title="Back to chat">
-      <MessageSquare size={16} />
-    </button>
-    <span class="viewtitle">
-      {#if viewMeta}<viewMeta.icon size={14} /> {viewMeta.label}{/if}
-    </span>
+    <span class="viewtitle">{#if viewMeta}<viewMeta.icon size={16} /> {viewMeta.label}{/if}</span>
     <div class="spacer"></div>
   {/if}
-  {#if vram}
-    <span class="vram desk" class:hot={vramPct > 0.9}
-      title="GPU VRAM used / total — {Math.round(vramPct * 100)}%">
-      <span class="vlabel">VRAM</span>
-      <span class="meter"><span class="fill" style="width:{Math.min(100, vramPct * 100)}%"></span></span>
-      <span class="vnum">{vram}</span>
-    </span>
-  {/if}
-  {#if app.view === 'chat'}
-    <div class="desk ctxwrap"><ContextBar /></div>
-  {/if}
-  <button class="ghost iconb" class:onview={app.view === 'settings'}
+  <button class="ghost iconb settings-toggle" class:onview={app.view === 'settings'}
     onclick={() => { app.view = 'settings'; app.themeStudioOpen = false; }}
-    title="Settings" aria-label="Settings">
-    <Settings2 size={18} />
-  </button>
+    title="Settings" aria-label="Settings"><Settings2 size={18} /></button>
 </header>
 
 <style>
-  header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 16px;
-    min-height: 60px;
-    border-bottom: 1px solid var(--border-soft);
-    background: var(--bg);
-    flex-shrink: 0;
-    min-width: 0;
-    width: 100%;
-    max-width: 100%;
-    box-sizing: border-box;
-  }
-  .mid {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-  }
-  .mid :global(.picker) { width: 100%; max-width: 420px; min-width: 0; }
-  .spacer { flex: 1; min-width: 4px; }
-  .iconb {
-    padding: 7px;
-    display: grid;
-    place-items: center;
-    border-radius: 9px;
-    flex-shrink: 0;
-  }
-  .iconb.onview { color: var(--accent); background: var(--accent-glow); }
-  .viewtitle {
-    display: inline-flex; align-items: center; gap: 7px;
-    font-size: 13px; font-weight: 600; color: var(--text-dim); padding-left: 2px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    min-width: 0;
-  }
-  .viewtitle :global(svg) { color: var(--text-faint); flex-shrink: 0; }
-  .vram {
-    display: inline-flex; align-items: center; gap: 7px;
-    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
-    padding: 5px 11px; border-radius: 999px;
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    white-space: nowrap; user-select: none; flex-shrink: 0;
-  }
-  .vram.hot { color: var(--red); }
-  .vlabel { color: var(--text-faint); letter-spacing: 0.05em; }
-  .meter {
-    width: 38px; height: 4px; border-radius: 2px; overflow: hidden;
-    background: var(--bg-hover); display: inline-block; flex-shrink: 0;
-  }
-  .fill {
-    display: block; height: 100%; border-radius: 2px;
-    background: var(--accent); transition: width 400ms ease, background 300ms ease;
-  }
-  .vram.hot .fill { background: var(--red); }
-  .ctxwrap { flex-shrink: 0; }
-
-  @media (max-width: 768px) {
-    header {
-      gap: 2px;
-      padding: 4px 6px;
-      /* safe-area only on the top chrome — not doubled on body */
-      padding-top: max(4px, env(safe-area-inset-top));
-      padding-left: max(6px, env(safe-area-inset-left));
-      padding-right: max(6px, env(safe-area-inset-right));
-      min-height: 48px;
-      max-width: 100vw;
-      overflow: hidden;
-    }
-    .iconb {
-      width: 40px; height: 40px; min-width: 40px; min-height: 40px;
-      padding: 0;
-    }
-    /* VRAM + context eat too much horizontal space on phones */
-    .desk { display: none !important; }
-    .backchat { display: none; }
-    .mid { flex: 1 1 0; min-width: 0; overflow: hidden; }
-    .viewtitle {
-      font-size: 14px; flex: 1; min-width: 0;
-      overflow: hidden; text-overflow: ellipsis;
-    }
+  header { display:flex; align-items:center; gap:16px; padding:12px 24px; height:64px; flex-shrink:0; min-width:0; background:var(--bg); border-bottom:1px solid var(--border-soft); }
+  .model-control { min-width:0; max-width:340px; flex:0 1 auto; }
+  .model-control :global(.picker) { min-width:0; width:100%; }
+  .workspace-title { flex:1; min-width:0; color:var(--text-faint); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:center; padding-inline:16px; }
+  .mode-control { flex-shrink:0; }
+  .iconb { display:grid; place-items:center; width:34px; height:34px; flex-shrink:0; padding:0; border-radius:8px; color:var(--text-dim); }
+  .iconb:hover, .iconb.onview { background:var(--bg-hover); color:var(--text); }
+  .viewtitle { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:500; }
+  .viewtitle :global(svg) { color:var(--text-faint); }
+  .spacer { flex:1; }
+  .system-status { position:relative; flex-shrink:0; font-size:11px; color:var(--text-dim); }
+  summary { cursor:pointer; padding:7px 10px; border:1px solid var(--border-soft); border-radius:7px; }
+  .status-popover { position:absolute; right:0; top:calc(100% + 12px); z-index:35; display:grid; gap:14px; min-width:240px; padding:18px; border:1px solid var(--border); border-radius:12px; background:var(--bg-card); box-shadow:var(--shadow-lg); }
+  .vram { display:flex; justify-content:space-between; gap:14px; }
+  .vram strong { font-weight:500; color:var(--text); font-family:var(--mono); }
+  @media(max-width:1100px) { .workspace-title { text-align:right; } }
+  @media(max-width:768px) {
+    header { gap:8px; padding:8px 12px; padding-top:max(8px, env(safe-area-inset-top)); height:auto; min-height:58px; flex-wrap:wrap; }
+    .model-control { flex:1; max-width:none; }
+    .workspace-title, .system-status { display:none; }
+    .mode-control { display:none; }
+    .mode-control :global(.modeswitch) { width:100%; max-width:280px; }
+    .iconb { width:38px; height:38px; }
   }
 </style>

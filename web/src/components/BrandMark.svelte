@@ -14,6 +14,7 @@
     height: var(--brand, 18px);
     flex-shrink: 0;
     object-fit: contain;
+    filter: grayscale(1);
     background: #fff;
     border-radius: 5px;
     padding: 2px;

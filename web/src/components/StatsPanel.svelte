@@ -88,8 +88,8 @@
         </div>
       </section>
 
-      <section class="surface">
-        <h2 class="subhead">Generation speed — average vs last 7 days</h2>
+      <details class="surface detail-surface">
+        <summary>Generation speed <span>Average and last 7 days</span></summary>
         <div class="bars">
           {#each perModel as m (m.model_id)}
             {@const wa = Math.max(2, (BAR_W * (m.avg_tok_s ?? 0)) / maxTokS)}
@@ -111,10 +111,10 @@
             </div>
           {/each}
         </div>
-      </section>
+      </details>
 
-      <section class="surface">
-        <h2 class="subhead">All models</h2>
+      <details class="surface detail-surface">
+        <summary>All model details <span>Requests, tokens, and speed</span></summary>
         <div class="tablewrap">
           <table>
             <thead>
@@ -134,7 +134,7 @@
             </tbody>
           </table>
         </div>
-      </section>
+      </details>
     {/if}
   {/if}
 </div>
@@ -184,6 +184,11 @@
     border-radius: calc(14px * var(--rf));
     padding: 16px 18px; margin-bottom: 16px;
   }
+  .detail-surface { padding: 0; }
+  .detail-surface summary { cursor: pointer; padding: 18px; font-size: 13px; font-weight: 600; }
+  .detail-surface summary span { margin-left: 8px; font-size: 11.5px; font-weight: 400; color: var(--text-faint); }
+  .detail-surface[open] { padding-bottom: 18px; }
+  .detail-surface[open] > :not(summary) { margin-left: 18px; margin-right: 18px; }
   .subhead {
     font-size: 11px; font-weight: 600; color: var(--text-faint);
     text-transform: uppercase; letter-spacing: 0.08em;
@@ -296,22 +301,25 @@
   }
 
   .stats { max-width: 1180px; }
-  .head { margin-bottom: 30px; }
+  .head { margin-bottom: 20px; }
   .title p { margin-top: 8px; line-height: 1.6; }
   .empty { margin: 20px 0; padding: 64px 24px; border: 1px dashed var(--border); border-radius: calc(10px * var(--rf)); line-height: 1.7; }
   @media(max-width: 768px) { .stats { padding: 24px 16px; } .title h1 { font-size: 25px; } }
-  .totals { gap: 0; border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); margin-bottom: 28px; overflow: hidden; background: var(--bg); }
-  .card { border: 0; border-right: 1px solid var(--border-soft); border-radius: 0; background: none; padding: 24px; }
+  .totals { gap: 0; border: 1px solid var(--border-soft); border-radius: calc(10px * var(--rf)); margin-bottom: 18px; overflow: hidden; background: var(--bg); }
+  .card { border: 0; border-right: 1px solid var(--border-soft); border-radius: 0; background: none; padding: 20px; }
   .card:last-child { border-right: 0; }
   .card:hover { transform: none; }
   .cardlabel { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 400; color: var(--text-dim); margin-bottom: 16px; }
   .cardval { font-family: var(--sans); font-size: 32px; font-weight: 500; letter-spacing: -.035em; }
   .card.hero { background: none; border-color: var(--border-soft); }
   .cardval.saved { color: var(--text); }
-  .surface { padding: 24px; background: var(--bg); border-radius: calc(10px * var(--rf)); margin-bottom: 24px; }
+  .surface { padding: 20px; background: var(--bg); border-radius: calc(10px * var(--rf)); margin-bottom: 16px; }
   .subhead { font-size: 15px; text-transform: none; letter-spacing: -.01em; color: var(--text); font-weight: 550; margin-bottom: 22px; }
   th { padding: 12px 14px; font-size: 10px; background: var(--bg-raised); }
   td { padding: 14px; }
   .barrow { padding-top: 10px; padding-bottom: 10px; }
   @media(max-width: 768px) { .totals { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); } .card { padding: 18px; border-bottom: 1px solid var(--border-soft); min-width: 0; } .cardval { font-size: 28px; } .surface { padding: 18px; } }
+  .detail-surface { padding:0; }
+  .detail-surface[open] { padding-bottom:18px; }
+  @media(max-width:768px) { .detail-surface summary span { display:block; margin:5px 0 0 18px; } }
 </style>

@@ -98,7 +98,7 @@ export function listLooseDiffusionModels(knownIds = new Set()) {
     .filter((m) => !knownIds.has(m.id));
 }
 
-export const diffusionAvailable = () => existsSync(BIN);
+export const diffusionAvailable = () => !process.env.INFERENCE_HARDWARE_URL && BIN !== '/usr/bin/false' && existsSync(BIN);
 
 function buildArgs({ modelFile, prompt, systemPrompt, tokens, steps }) {
   if (process.env.DIFFUSION_EXTRA_ARGS) {
@@ -126,6 +126,7 @@ function buildArgs({ modelFile, prompt, systemPrompt, tokens, steps }) {
 export async function generateDiffusion({
   modelFile, prompt, systemPrompt = '', tokens = 128, steps = 64, onFrame, signal, log,
 }) {
+  if (process.env.INFERENCE_HARDWARE_URL) throw new Error('Diffusion chat needs a Windows runtime; Fedora model execution is disabled');
   if (!existsSync(BIN)) throw new Error(`diffusion binary not found at ${BIN} — see notes/BUILD-DIFFUSION-GEMMA.md`);
   if (!modelFile || !existsSync(modelFile)) throw new Error('diffusion model file not found');
   if (busy) throw new Error('a diffusion run is already in progress — one GPU, one denoiser at a time');

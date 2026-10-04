@@ -1,4 +1,5 @@
 <script>
+  import { onDestroy } from 'svelte';
   // Theme Studio — the full look-and-feel workshop. Everything previews LIVE
   // on the real app behind the dialog: preset gallery, community marketplace,
   // per-token color editing, effects (glass/glow/motion/backgrounds/scale/
@@ -79,6 +80,11 @@
       if (snap && JSON.stringify(snapshotTheme()) !== JSON.stringify(snap)) restoreTheme(snap);
       wasOpen = false;
     }
+  });
+  onDestroy(() => {
+    // The dialog is lazy-loaded. Closing it unmounts this component before a
+    // reactive close effect can always run, so restore an unsaved preview here.
+    if (snap && JSON.stringify(snapshotTheme()) !== JSON.stringify(snap)) restoreTheme(snap);
   });
 
   $effect(() => {
@@ -722,7 +728,7 @@
                     oninput={(e) => setFx('glassOpacity', +e.target.value)} />
                 </label>
               </div>
-              <p class="hint">Glass shows best over a Gradient or Animated background.</p>
+              <p class="hint">Adjust transparency to soften the panel surfaces.</p>
             {/if}
           </div>
 

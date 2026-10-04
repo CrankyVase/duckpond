@@ -347,8 +347,9 @@ try { db.exec("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'ext
 // Preferred local diffusion model id for generate_image / studio (e.g. Juggernaut).
 // 'auto' lets the bridge pick; anything else is a ready bridge model id.
 try { db.exec("ALTER TABLE users ADD COLUMN image_model TEXT NOT NULL DEFAULT 'auto'"); } catch { /* exists */ }
-// Content filter: off | safe | strict (see contentFilter.js)
-try { db.exec("ALTER TABLE users ADD COLUMN content_filter TEXT NOT NULL DEFAULT 'off'"); } catch { /* exists */ }
+// Image safety is on by default for existing and new accounts.
+try { db.exec("ALTER TABLE users ADD COLUMN content_filter TEXT NOT NULL DEFAULT 'safe'"); } catch { /* exists */ }
+db.prepare("UPDATE users SET content_filter = 'safe' WHERE content_filter IS NULL OR content_filter = 'off'").run();
 
 // Migrate images → AUTOINCREMENT if the live table was created without it.
 // Without this, delete+regenerate reuses id N and immutable browser caches
@@ -607,6 +608,11 @@ CREATE TABLE IF NOT EXISTS media_jobs (
   finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_media_jobs_user ON media_jobs(user_id, id DESC);
+CREATE TABLE IF NOT EXISTS media_job_previews (
+  job_id INTEGER PRIMARY KEY REFERENCES media_jobs(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  jpeg BLOB NOT NULL
+);
 `);
 
 for (const [column, definition] of [['bridge_tag', 'TEXT'], ['cancel_requested', 'INTEGER NOT NULL DEFAULT 0']]) {

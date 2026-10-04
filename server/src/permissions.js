@@ -30,6 +30,7 @@ export const RISK = { READ: 'read', WRITE: 'write', EXEC: 'exec', EXTERNAL: 'ext
 
 export const TOOL_RISK = {
   // read-only
+  update_plan: RISK.READ,
   list_files: RISK.READ,
   search_files: RISK.READ,
   server_status: RISK.READ,
@@ -256,7 +257,7 @@ export function capabilityManifest(userId, { tools = [], hasWorkspace = false, h
   lines.push('');
   lines.push('Risk tiers: ' + Object.entries(TIER_BLURB).map(([k, v]) => `${k} = ${v}`).join('; ') + '.');
   lines.push('A denied call comes back as `DENIED: …`. That is a real answer from the user, not an error to route around: do not retry it, do not reach for another tool to accomplish the same thing, and do not pretend it succeeded.');
-  if (!hasWorkspace) {
+  if (!hasWorkspace && names.includes('start_project')) {
     lines.push('');
     lines.push('You have no workspace yet — `start_project` creates one. Do that only for real multi-file work, not to answer a question.');
   }

@@ -75,7 +75,7 @@
   .orb {
     position: relative; width: 54px; height: 54px; border-radius: 50%;
     overflow: hidden;
-    background: radial-gradient(circle at 32% 28%, #efe0c8, var(--accent) 55%, var(--accent-deep) 100%);
+    background: var(--bg-card);
     box-shadow: 0 0 22px var(--accent-glow), inset 0 -6px 14px rgba(0, 0, 0, 0.25);
     transition: transform 90ms ease-out, box-shadow 250ms ease, filter 250ms ease;
   }
@@ -89,7 +89,7 @@
   .orb.muted { filter: grayscale(0.85) brightness(0.7); }
   .sheen {
     position: absolute; inset: -30%;
-    background: conic-gradient(from 0deg, transparent 0 70%, rgba(255, 244, 224, 0.55) 82%, transparent 94%);
+    background: var(--bg-card);
     opacity: 0; transition: opacity 250ms ease;
   }
   @keyframes breathe { 50% { transform: scale(1.06); } }
@@ -102,12 +102,8 @@
     overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   }
   .err { font-size: 12px; color: var(--red); line-height: 1.5; }
-  .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmertxt 1.6s linear infinite;
-  }
+  .shimmer { color: var(--text-dim); animation: statusPulse 1.6s ease-in-out infinite; }
+  @keyframes statusPulse { 50% { opacity: .5; } }
   @keyframes shimmertxt { to { background-position: -200% 0; } }
 
   .vactions { display: flex; flex-direction: column; gap: 6px; }

@@ -1,26 +1,24 @@
-// Content filter focused on IMAGE generation: block nudity / explicit bodies.
-// Chat is unrestricted (except a hard floor on sexual content involving minors).
-//
-// Modes (stored on users.content_filter):
-//   off   — no nudity filter on images (CSAM still blocked everywhere)
-//   safe  — block nude / explicit body image prompts (default when they turn filter on)
-//   strict — same as safe + "sexy / lingerie / topless photoshoot" style image asks
-//
-// Chat (kind === 'chat'): never keyword-filtered for adult language — only CSAM floor.
+// Child safety floor for prompts. Adult content and graphic violence are not
+// keyword-filtered.
 
-import { db } from './db.js';
-
-export const FILTER_MODES = ['off', 'safe', 'strict'];
-
-// Sexual content involving minors — always blocked (chat + images, even when "off")
+// Nude or sexual depictions involving minors are always blocked.
 const CHILD_SEXUAL = [
-  /\b(child\s*porn|cp\b|underage\s*sex|minor\s*nude|pedo|paedo|preteen\s*sex)\b/i,
+  /\b(child\s*porn|cp\b|csam|csem|underage\s*sex|minor\s*nude|pedo|paedo|preteen\s*sex)\b/i,
   /\b(loli|shota|shotacon|lolicon)\b/i,
   /\b((?:10|11|12|13|14|15|16|17)\s*year\s*old).{0,40}(nude|naked|sex|porn|erotic)/i,
   /\b(nude|naked|sex|porn|erotic).{0,40}((?:10|11|12|13|14|15|16|17)\s*year\s*old)/i,
 ];
 
-// Nudity / explicit bodies — IMAGE prompts only
+// Treat ambiguous age language conservatively when the same request asks for
+// nudity or sexual content. Text screening cannot determine a subject's age.
+const MINOR_CUES = [
+  /\b(child(?:ren)?|kid(?:s)?|minor(?:s)?|underage|preteen|tween|teen(?:age|ager|agers)?|adolescent|pubescent|schoolgirl|schoolboy|girl|boy|baby|infant|toddler|juvenile|youth)\b/i,
+  /\b(?:[0-9]|1[0-7])\s*(?:-|\s)*year(?:s)?(?:-|\s)*old\b/i,
+  /\b(?:[0-9]|1[0-7])\s*(?:yo|yrs?\s*old)\b/i,
+];
+const MINOR_SEXUAL = /\b(sex(?:ual(?:ly|ized|ization)?)?|sexy|suggestive|provocative|erotic|pornographic|porn|intercourse|sensual|seductive|fetish)\b/i;
+
+// Nudity terms used only to identify requests involving minors.
 const NUDITY = [
   /\b(nude|nudes|naked|nudity|fully\s*nude|completely\s*naked)\b/i,
   /\b(full\s*frontal|no\s*clothes|without\s*clothes|clothes\s*off|undressed)\b/i,
@@ -33,7 +31,7 @@ const NUDITY = [
   /\b(woman|man|girl|boy|person)\s+(who\s+is\s+)?(naked|nude)\b/i,
 ];
 
-// Explicit pornographic acts — IMAGE only (goes with no-nudity intent)
+// Sexual act terms used only to identify requests involving minors.
 const EXPLICIT_IMAGE = [
   /\b(porn|porno|pornography|xxx|hentai|rule\s*34|r34)\b/i,
   /\b(blow\s*job|hand\s*job|rim\s*job|deepthroat|cumshot|creampie|gangbang)\b/i,
@@ -41,27 +39,16 @@ const EXPLICIT_IMAGE = [
   /\b(uncensored\s*(nude|naked|nsfw)|nsfw\s*(photo|picture|image|pic))\b/i,
 ];
 
-// Milder sexualized image asks — strict mode only
+// Sexualized terms used only to identify requests involving minors.
 const MILD_IMAGE = [
   /\b(sexy|erotic|sensual|seductive)\b.{0,40}\b(photo|picture|image|pic|pose|model|portrait)\b/i,
+  /\b(sexual(?:ly|ized)?|sex)\s+(?:scene|content|activity|photo|image|act)\b/i,
+  /\b(?:scene|content|activity|photo|image)\s+(?:of\s+)?(?:sexual|sex)\b/i,
   /\b(lingerie|bikini\s*shoot|boudoir)\b/i,
   /\bmake\s+(me\s+)?(a\s+)?(sexy|hot|erotic)\b/i,
 ];
 
-const MSG = {
-  image: 'Blocked — image prompts with nudity or explicit bodies aren’t allowed. Describe a clothed scene, or turn the content filter off in Settings.',
-  child: 'Blocked — sexual content involving minors is never allowed.',
-};
-
-export function getUserFilterMode(userId) {
-  try {
-    const row = db.prepare('SELECT content_filter FROM users WHERE id = ?').get(userId);
-    const m = row?.content_filter;
-    return FILTER_MODES.includes(m) ? m : 'off';
-  } catch {
-    return 'off';
-  }
-}
+const MSG = { child: 'Blocked — nude or sexual depictions involving minors are never allowed.' };
 
 function hits(list, text) {
   return list.some((re) => re.test(text));
@@ -69,34 +56,21 @@ function hits(list, text) {
 
 /**
  * @param {string} text
- * @param {{ mode?: string, kind?: 'chat'|'image' }} opts
  * @returns {{ ok: true } | { ok: false, reason: string, code: string }}
  */
-export function checkContent(text, { mode = 'safe', kind = 'chat' } = {}) {
+export function checkContent(text) {
   const t = String(text || '').trim();
   if (!t) return { ok: true };
 
   // Hard floor everywhere
-  if (hits(CHILD_SEXUAL, t)) {
+  if (hits(CHILD_SEXUAL, t) || (hits(MINOR_CUES, t) && (hits(NUDITY, t) || hits(EXPLICIT_IMAGE, t) || hits(MILD_IMAGE, t) || MINOR_SEXUAL.test(t)))) {
     return { ok: false, reason: MSG.child, code: 'child' };
   }
 
-  // Chat: no adult keyword filter — only the CSAM floor above
-  if (kind === 'chat') return { ok: true };
-
-  // Images: nudity filter when enabled
-  if (!mode || mode === 'off') return { ok: true };
-
-  if (hits(NUDITY, t) || hits(EXPLICIT_IMAGE, t)) {
-    return { ok: false, reason: MSG.image, code: 'nudity' };
-  }
-  if (mode === 'strict' && hits(MILD_IMAGE, t)) {
-    return { ok: false, reason: MSG.image, code: 'mild' };
-  }
   return { ok: true };
 }
 
-/** Convenience: check a user's stored mode. */
+/** Keep the call shape used by chat and image routes. */
 export function checkUserContent(userId, text, kind = 'chat') {
-  return checkContent(text, { mode: getUserFilterMode(userId), kind });
+  return checkContent(text);
 }
