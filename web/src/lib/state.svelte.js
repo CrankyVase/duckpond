@@ -15,6 +15,7 @@ export const app = $state({
   mode: 'chat',
   streaming: null,       // { convId, text, thinking, tokS, n, loading, error }
   context: { used: 0, budget: 32768 },
+  resources: null,       // { ram, vram } {usedBytes,totalBytes} from /api/media/resources
   gpu: null,             // { totalBytes, usedBytes }
   view: 'chat',          // 'chat' | 'stats' | 'speech' | 'files' | 'media' | 'providers' | 'costs' | 'settings'
   modelPickerOpen: false,
@@ -113,6 +114,7 @@ export async function compactNow(keep = 8) {
 
 export async function pollStatus() {
   try { app.gpu = await api('/api/gpu'); } catch { /* ignore */ }
+  try { app.resources = await api('/api/media/resources'); } catch { /* ignore */ }
   await loadModels();
 }
 

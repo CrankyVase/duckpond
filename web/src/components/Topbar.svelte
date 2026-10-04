@@ -1,6 +1,6 @@
 <script>
   import { app } from '../lib/state.svelte.js';
-  import ContextBar from './ContextBar.svelte';
+  import ResourceMeters from './ResourceMeters.svelte';
   import ModeSwitch from './ModeSwitch.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import Clapperboard from '@lucide/svelte/icons/clapperboard';
@@ -27,10 +27,6 @@
   const workspaceTitle = $derived(app.conv?.title && !(app.mode === 'agent' && app.conv.title === 'New chat')
     ? app.conv.title : app.mode === 'agent' ? 'New task' : 'New chat');
 
-  const vram = $derived(app.gpu?.totalBytes
-    ? `${(app.gpu.usedBytes / 1024 ** 3).toFixed(1)} / ${(app.gpu.totalBytes / 1024 ** 3).toFixed(1)} GiB`
-    : null);
-
 </script>
 
 <header class:chat-toolbar={app.view === 'chat'}>
@@ -44,13 +40,7 @@
     <div class="model-control"><ModelPicker /></div>
     <span class="workspace-title" title={workspaceTitle}>{workspaceTitle}</span>
     {#if app.sidebarCollapsed}<div class="mode-control"><ModeSwitch compact /></div>{/if}
-    <details class="system-status">
-      <summary title="Context and memory usage">Usage</summary>
-      <div class="status-popover">
-        <ContextBar />
-        {#if vram}<span class="vram">VRAM <strong>{vram}</strong></span>{/if}
-      </div>
-    </details>
+    <ResourceMeters />
   {:else}
     <span class="viewtitle">{#if viewMeta}<viewMeta.icon size={16} /> {viewMeta.label}{/if}</span>
     <div class="spacer"></div>
@@ -71,16 +61,11 @@
   .viewtitle { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:500; }
   .viewtitle :global(svg) { color:var(--text-faint); }
   .spacer { flex:1; }
-  .system-status { position:relative; flex-shrink:0; font-size:11px; color:var(--text-dim); }
-  summary { cursor:pointer; padding:7px 10px; border:1px solid var(--border-soft); border-radius:7px; }
-  .status-popover { position:absolute; right:0; top:calc(100% + 12px); z-index:35; display:grid; gap:14px; min-width:240px; padding:18px; border:1px solid var(--border); border-radius:12px; background:var(--bg-card); box-shadow:var(--shadow-lg); }
-  .vram { display:flex; justify-content:space-between; gap:14px; }
-  .vram strong { font-weight:500; color:var(--text); font-family:var(--mono); }
   @media(max-width:1100px) { .workspace-title { text-align:right; } }
   @media(max-width:768px) {
     header { gap:8px; padding:8px 12px; padding-top:max(8px, env(safe-area-inset-top)); height:auto; min-height:58px; flex-wrap:wrap; }
     .model-control { flex:1; max-width:none; }
-    .workspace-title, .system-status { display:none; }
+    .workspace-title { display:none; }
     .mode-control { display:none; }
     .mode-control :global(.modeswitch) { width:100%; max-width:280px; }
     .iconb { width:38px; height:38px; }
