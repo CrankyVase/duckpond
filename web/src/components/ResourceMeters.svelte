@@ -19,6 +19,13 @@
     const left = Math.max(0, budget - app.context.used);
     return { pct, text: `${(left / 1000).toFixed(1)}k left`, full: `${app.context.estimated ? '~' : ''}${(app.context.used / 1000).toFixed(1)}k of ${Math.round(budget / 1024)}k used` };
   });
+  // Speed: live figure while a reply streams, otherwise the latest one; average is the 30-day measured mean for this model.
+  const speed = $derived.by(() => {
+    const m = app.tps?.[app.conv?.model_id];
+    const live = app.streaming?.convId === app.conv?.id ? app.streaming?.tokS : null;
+    const now = live ?? m?.last ?? null;
+    return now || m?.avg ? { live: !!live, now, avg: m?.avg ?? null, samples: m?.samples ?? 0 } : null;
+  });
   const canCompact = $derived((app.conv?.messages?.length ?? 0) > 6 && !app.streaming);
 
   async function compact() {
@@ -42,6 +49,13 @@
       </div>
     {/if}
   {/each}
+  {#if speed}
+    <div class="meter speed" class:live={speed.live} title="Generation speed · live while replying · average over {speed.samples} logged replies">
+      <span class="name">tok/s</span>
+      <span class="val now">{speed.now ? speed.now.toFixed(1) : '–'}</span>
+      {#if speed.avg}<span class="val avg">avg {speed.avg.toFixed(1)}</span>{/if}
+    </div>
+  {/if}
   {#if canCompact || app.compacting}
     <button class="compact" onclick={compact} disabled={app.compacting}
       title="Compact — summarize older messages to free context" aria-label="Compact conversation">
@@ -65,6 +79,9 @@
   .compact:disabled { cursor:default; }
   .spin { display:grid; animation:spin 1.1s linear infinite; color:var(--accent); }
   @keyframes spin { to { transform:rotate(360deg); } }
-  @media (max-width:1280px) { .val { display:none; } .track { width:44px; } }
+  .meter.speed .now { color:var(--text); font-weight:600; }
+  .meter.speed.live .now { color:var(--green); }
+  .meter.speed .avg { color:var(--text-faint); }
+  @media (max-width:1560px) { .meter:not(.speed) .val { display:none; } .track { width:44px; } }
   @media (max-width:900px) { .name { display:none; } .meter { padding:2px 8px; } }
 </style>

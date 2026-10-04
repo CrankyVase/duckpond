@@ -16,6 +16,7 @@ import {
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
+import { db } from './db.js';
 import { gpuVram } from './llama.js';
 import { inferenceHardware, usesRemoteHardware } from './inferenceHardware.js';
 import { modelParamsB } from './modelDescribe.js';
@@ -358,7 +359,77 @@ export function fitTier(sizeBytes, { gpuTotalGB, ramAvailableGB, ramTotalGB, ava
 const COMPUTE_FACTOR = 1.18;
 const FIXED_OH_S = 0.005;
 
-export function estimateTps(sizeBytes, repoIdOrName, { gpuFreeGB, ramAvailableGB }) {
+// Real speeds beat physics. Every finished generation lands in tps_log; the
+// median measured/predicted ratio across them scales the physics model, and an
+// installed model with enough samples reports its own measured speed outright.
+const TPS_WINDOW_DAYS = 30;
+const TPS_MIN_TOKENS = 16;
+let calibration = { at: 0, factor: 1, n: 0 };
+
+export function measuredTps(modelId) {
+  if (!modelId) return null;
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n, SUM(completion_tokens) AS tok, SUM(gen_ms) AS ms
+    FROM tps_log WHERE model_id = ? AND tps > 0 AND completion_tokens >= ?
+      AND ts >= unixepoch() - ? * 86400`).get(modelId, TPS_MIN_TOKENS, TPS_WINDOW_DAYS);
+  return row?.n && row.ms > 0 ? { n: row.n, avg: row.tok / (row.ms / 1000) } : null;
+}
+
+export function calibrationFactor() {
+  if (Date.now() - calibration.at < 60_000) return calibration.factor;
+  let factor = 1;
+  let n = 0;
+  try {
+    const rows = db.prepare(`
+      SELECT model_id, size_bytes, tps FROM tps_log
+      WHERE size_bytes > 0 AND tps > 0 AND completion_tokens >= ?
+        AND ts >= unixepoch() - ? * 86400
+      ORDER BY ts DESC LIMIT 300`).all(TPS_MIN_TOKENS, TPS_WINDOW_DAYS);
+    const ratios = [];
+    for (const r of rows) {
+      // Baseline assumes the whole model sat in VRAM; the median shrugs off the few that didn't.
+      const predicted = rawEstimateTps(r.size_bytes, r.model_id, { gpuFreeGB: 1e3, ramAvailableGB: 1e3 });
+      if (predicted > 0) ratios.push(r.tps / predicted);
+    }
+    n = ratios.length;
+    if (n >= 5) {
+      ratios.sort((a, b) => a - b);
+      const mid = ratios[Math.floor(n / 2)];
+      factor = Math.min(3, Math.max(0.25, mid));
+    }
+  } catch { /* an unreadable log just means uncalibrated estimates */ }
+  calibration = { at: Date.now(), factor, n };
+  return factor;
+}
+
+export function estimateTps(sizeBytes, repoIdOrName, hw) {
+  const raw = rawEstimateTps(sizeBytes, repoIdOrName, hw);
+  return raw == null ? null : Math.max(0.5, Math.round(raw * calibrationFactor()));
+}
+
+const aliasSizeCache = new Map();
+/** Weights size for a router alias (summing split shards), or null when the file isn't on this host. */
+export function aliasSizeBytes(alias) {
+  const hit = aliasSizeCache.get(alias);
+  if (hit && Date.now() - hit.at < 600_000) return hit.size;
+  let size = null;
+  try {
+    for (const [path, name] of routerAliasesByPath()) {
+      if (name !== alias) continue;
+      const shard = basename(path).match(/^(.*)-0*1-of-(\d+)\.gguf$/i);
+      if (shard) {
+        const dir = join(path, '..');
+        size = readdirSync(dir).filter((f) => f.startsWith(shard[1]) && /\.gguf$/i.test(f))
+          .reduce((s, f) => s + statSync(join(dir, f)).size, 0);
+      } else size = statSync(path).size;
+      break;
+    }
+  } catch { size = null; }
+  aliasSizeCache.set(alias, { at: Date.now(), size });
+  return size;
+}
+
+function rawEstimateTps(sizeBytes, repoIdOrName, { gpuFreeGB, ramAvailableGB }) {
   const { totalB, activeB, moe } = modelParamsB(repoIdOrName);
   if (!totalB) return null;
   const modelGB = sizeBytes / 1024 ** 3;
@@ -376,7 +447,7 @@ export function estimateTps(sizeBytes, repoIdOrName, { gpuFreeGB, ramAvailableGB
   if (ramGB > 0) t += ramGB / HW.ramBwGBs;
   if (nvmeGB > 0) t += nvmeGB / HW.nvmeGBs;
   const tTok = t * COMPUTE_FACTOR + FIXED_OH_S;
-  return tTok > 0 ? Math.max(0.5, Math.round(1 / tTok)) : null;
+  return tTok > 0 ? 1 / tTok : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +668,11 @@ export async function modelVariants(repoId) {
       tps: v.complete === false ? null : estimateTps(v.size, repoId, hw),
       routerAlias: path ? (aliases.get(path) ?? null) : null,
     };
+  }).map((v) => {
+    const measured = v.routerAlias ? measuredTps(v.routerAlias) : null;
+    return measured && measured.n >= 3
+      ? { ...v, tps: Math.max(0.5, Math.round(measured.avg * 10) / 10), tpsSource: 'measured', tpsSamples: measured.n }
+      : { ...v, tpsSource: 'estimated' };
   });
 
   for (const v of enriched) v.companion = isCompanionVariant(v, enriched);

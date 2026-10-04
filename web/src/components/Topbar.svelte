@@ -61,6 +61,7 @@
   .viewtitle { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:500; }
   .viewtitle :global(svg) { color:var(--text-faint); }
   .spacer { flex:1; }
+  @media(max-width:1560px) { .workspace-title { display:none; } .model-control { flex:1 1 auto; } }
   @media(max-width:1100px) { .workspace-title { text-align:right; } }
   @media(max-width:768px) {
     header { gap:8px; padding:8px 12px; padding-top:max(8px, env(safe-area-inset-top)); height:auto; min-height:58px; flex-wrap:wrap; }

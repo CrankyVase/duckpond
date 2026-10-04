@@ -327,3 +327,5 @@
   .hub.hub-studio .model-card .memory-fit { padding: 3px 10px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
   .hub.hub-studio .model-grid .model-card.active { background: var(--bg-raised); border-color: var(--text-faint); }
 }
+
+.hub.hub-studio .tps.measured { color: var(--green); }

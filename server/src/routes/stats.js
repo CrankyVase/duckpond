@@ -32,4 +32,26 @@ export default async function statsRoutes(app) {
       perModel: perModel.map((r) => ({ ...r, rolling_tok_s: rollingMap[r.model_id] ?? null })),
     };
   });
+
+  // Measured generation speed per model: what the chat header and Hub read.
+  app.get('/api/tps', async () => {
+    const rows = db.prepare(`
+      SELECT model_id,
+             COUNT(*) AS n,
+             SUM(completion_tokens) AS tok, SUM(gen_ms) AS ms,
+             MAX(ts) AS last_ts
+      FROM tps_log WHERE tps > 0 AND completion_tokens >= 16 AND ts >= unixepoch() - 30 * 86400
+      GROUP BY model_id`).all();
+    const latest = db.prepare(`SELECT tps FROM tps_log WHERE model_id = ? AND tps > 0 ORDER BY id DESC LIMIT 1`);
+    const models = {};
+    for (const r of rows) {
+      models[r.model_id] = {
+        samples: r.n,
+        avg: r.ms > 0 ? r.tok / (r.ms / 1000) : null,
+        last: latest.get(r.model_id)?.tps ?? null,
+        lastAt: r.last_ts,
+      };
+    }
+    return { models };
+  });
 }

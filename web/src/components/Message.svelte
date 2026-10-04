@@ -85,6 +85,8 @@
     return out;
   });
   // which model wrote this reply — matters once a chat has switched models
+  // live while the reply streams, the saved figure once it is done
+  const speed = $derived(streaming ? (msg.tokS ?? null) : (msg.tok_per_sec ?? null));
   const modelLabel = $derived.by(() => {
     const id = msg.model_id;
     if (!id) return null;
@@ -184,6 +186,7 @@
       <div class="message-heading">
         <span class="message-author">Dumpling</span>
         {#if modelLabel}<span class="stat model" title="Answered by {modelLabel}">{modelLabel}</span>{/if}
+        {#if speed}<span class="speed" class:live={streaming} title={streaming ? 'Live generation speed' : `${msg.tokens_out ?? '?'} tokens at ${speed.toFixed(1)} tokens/second`}>{speed.toFixed(1)} tok/s</span>{/if}
       </div>
       {#if search}
         <SearchTrace {search} />
@@ -573,4 +576,6 @@
   .ububble { background: var(--bg-card); border: 1px solid var(--border); border-radius: 18px 18px 5px 18px; padding: 12px 18px; }
   .abody > .md { font-size: 15px; line-height: 1.8; }
   .actions { margin-top: 14px; }
+  .speed { flex-shrink: 0; padding: 1px 8px; border-radius: 999px; background: var(--bg-raised); color: var(--text-dim); font: 11px var(--mono); font-variant-numeric: tabular-nums; }
+  .speed.live { color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
 </style>

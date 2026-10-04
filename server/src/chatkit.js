@@ -3,6 +3,8 @@
 // definition + widget builder. Split out of routes/chat.js with chatpolicy.js,
 // chatflow.js and routes/chatPost.js.
 import { db } from './db.js';
+import { aliasSizeBytes } from './hfHub.js';
+import { gpuVram } from './llama.js';
 import {
   makeChartWidget, makeColorPaletteWidget, makeCountdownWidget, makeCryptoWidget, makeCurrencyWidget,
   makeDashboardWidget, makeDictionaryWidget, makeFileWidget, makeGithubWidget, makeHackerNewsWidget,
@@ -205,6 +207,28 @@ export function persistInterruptedReply(job, conv, promptLeaf, { aborted = false
   }
 }
 
+// Best-effort speed log; a failure here must never touch the reply it measures.
+function logTps(modelId, usage, timings, { userId, convId, kind }) {
+  try {
+    const completion = usage?.completion_tokens ?? timings?.predicted_n ?? 0;
+    const genMs = Number(timings?.predicted_ms) || 0;
+    const tps = Number(timings?.predicted_per_second) || (completion > 0 && genMs > 0 ? completion / (genMs / 1000) : 0);
+    if (!(tps > 0) || isRemoteId(modelId)) return; // remote speed is the provider's, not ours
+    const promptMs = Number(timings?.prompt_ms) || null;
+    const promptTokens = usage?.prompt_tokens ?? timings?.prompt_n ?? null;
+    const insert = db.prepare(`INSERT INTO tps_log
+      (model_id, kind, user_id, conv_id, prompt_tokens, completion_tokens, prompt_ms, gen_ms, tps, prompt_tps, size_bytes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const info = insert.run(modelId, kind, userId, convId, promptTokens, completion, promptMs, genMs || null, tps,
+      Number(timings?.prompt_per_second) || (promptMs && promptTokens ? promptTokens / (promptMs / 1000) : null),
+      aliasSizeBytes(modelId));
+    gpuVram().then((g) => {
+      if (g?.totalBytes) db.prepare('UPDATE tps_log SET gpu_used_bytes = ?, gpu_total_bytes = ? WHERE id = ?')
+        .run(g.usedBytes, g.totalBytes, info.lastInsertRowid);
+    }).catch(() => {});
+  } catch { /* logging is optional */ }
+}
+
 export function recordUsage(modelId, usage, timings, { userId = null, convId = null, kind = 'chat' } = {}) {
   const day = new Date().toISOString().slice(0, 10);
   db.prepare(`
@@ -219,6 +243,7 @@ export function recordUsage(modelId, usage, timings, { userId = null, convId = n
       usage?.prompt_tokens ?? timings?.prompt_n ?? 0,
       usage?.completion_tokens ?? timings?.predicted_n ?? 0,
       Math.round(timings?.predicted_ms ?? 0));
+  logTps(modelId, usage, timings, { userId, convId, kind });
   // cost ledger: price remote calls; provider prompt-cache discounts count as savings
   if (userId != null && isRemoteId(modelId)) {
     try {

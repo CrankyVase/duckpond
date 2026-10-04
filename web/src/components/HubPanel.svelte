@@ -1313,7 +1313,7 @@
                     {#if picked.downloaded}<span class="dottag success"><span class="dot"></span>On device</span>{/if}
                     <span class="qsize mono">{fmtBytes(picked.size)}</span>
                     {#if picked.fit && FIT[picked.fit]}<span class="fitpill {picked.fit}" title={FIT[picked.fit].tip}>{FIT[picked.fit].label}</span>{/if}
-                    {#if picked.tps}<span class="tps mono" title="Estimated decode speed on this GPU (9070 XT) at the current free VRAM — rough order-of-magnitude">~{picked.tps} t/s</span>{/if}
+                    {#if picked.tps}<span class="tps mono" class:measured={picked.tpsSource === 'measured'} title={picked.tpsSource === 'measured' ? `Measured on this machine across ${picked.tpsSamples} replies` : 'Estimated decode speed on this GPU at the current free VRAM — calibrated by your logged speeds'}>{picked.tpsSource === 'measured' ? '' : '~'}{picked.tps} t/s{picked.tpsSource === 'measured' ? ' measured' : ''}</span>{/if}
                   {:else}
                     <span class="vhint">Select quantization</span>
                   {/if}
@@ -1383,7 +1383,7 @@
                         <span class="fitpill {row.fit}" title={FIT[row.fit].tip}>{FIT[row.fit].label}</span>
                       {/if}
                       {#if row.tps && !row.downloaded}
-                        <span class="tps mono" title="Estimated decode speed on this GPU at the current free VRAM">~{row.tps} t/s</span>
+                        <span class="tps mono" class:measured={row.tpsSource === 'measured'} title={row.tpsSource === 'measured' ? `Measured on this machine across ${row.tpsSamples} replies` : 'Estimated decode speed on this GPU at the current free VRAM'}>{row.tpsSource === 'measured' ? '' : '~'}{row.tps} t/s{row.tpsSource === 'measured' ? ' measured' : ''}</span>
                       {/if}
                       <span class="qsize mono">{fmtBytes(row.size)}</span>
                       {#if row.complete === false}<span class="incomplete-label">Missing files</span>

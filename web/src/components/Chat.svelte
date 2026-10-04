@@ -1092,7 +1092,7 @@ import ChatFiles from './ChatFiles.svelte';
           </div>
         {/if}
         <Message streaming
-          msg={{ role: 'assistant', content: streamingHere.text, thinking: streamingHere.thinking || null, search: streamingHere.search, widgets: streamingHere.widgets, pinned: 0 }} />
+          msg={{ role: 'assistant', tokS: streamingHere.tokS, content: streamingHere.text, thinking: streamingHere.thinking || null, search: streamingHere.search, widgets: streamingHere.widgets, pinned: 0 }} />
         {#if streamingHere.liveTool}
           <div class="agentwork live fade-in">
             <RunFeed events={[]} liveTool={streamingHere.liveTool} />

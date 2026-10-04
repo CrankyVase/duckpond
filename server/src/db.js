@@ -191,6 +191,27 @@ CREATE TABLE IF NOT EXISTS usage_stats (
   requests INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (model_id, day)
 );
+
+-- one row per completed generation: raw material for measured speeds and for
+-- calibrating the Model Hub's tokens/second predictions
+CREATE TABLE IF NOT EXISTS tps_log (
+  id INTEGER PRIMARY KEY,
+  ts INTEGER NOT NULL DEFAULT (unixepoch()),
+  model_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'chat',
+  user_id INTEGER,
+  conv_id INTEGER,
+  prompt_tokens INTEGER,           -- context the model had to read this turn
+  completion_tokens INTEGER,
+  prompt_ms REAL,
+  gen_ms REAL,
+  tps REAL,                        -- generation tokens/second
+  prompt_tps REAL,                 -- prompt-processing tokens/second
+  size_bytes INTEGER,              -- weights on disk, when resolvable
+  gpu_used_bytes INTEGER,          -- VRAM in use right after the turn
+  gpu_total_bytes INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tps_model_ts ON tps_log(model_id, ts);
 `);
 
 // semantic search / memory / RAG share one embedding pipeline (embed.js).
