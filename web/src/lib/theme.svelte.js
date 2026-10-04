@@ -42,17 +42,12 @@ export function sanitizeEffects(raw) {
   };
 }
 
+// There is one theme. Anything stored from the old Theme Studio (presets,
+// color overrides, glass/gradient effects, custom CSS) is ignored; only the
+// animation level survives because Settings still exposes it.
 function sanitize(raw) {
-  const t = { ...DEFAULTS, ...(raw ?? {}) };
-  t.layout = { ...DEFAULT_LAYOUT, ...(t.layout ?? {}) };
-  t.effects = sanitizeEffects(t.effects);
-  t.colors = Object.fromEntries(Object.entries(t.colors ?? {}).filter(([k]) => ALL_TOKENS.includes(k)));
-  t.custom = Array.isArray(t.custom) ? t.custom.slice(0, 30) : [];
-  t.customCss = String(t.customCss ?? '').slice(0, 20000);
-  t.favorites = Array.isArray(t.favorites)
-    ? [...new Set(t.favorites.map((id) => String(id)).filter(Boolean))].slice(0, 200)
-    : [];
-  return t;
+  const anim = sanitizeEffects(raw?.effects).anim;
+  return { ...DEFAULTS, effects: sanitizeEffects({ anim }) };
 }
 
 function loadLocal() {

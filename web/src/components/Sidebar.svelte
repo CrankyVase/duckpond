@@ -33,7 +33,6 @@
   import Gauge from '@lucide/svelte/icons/gauge';
   import LogOut from '@lucide/svelte/icons/log-out';
   import MessageSquare from '@lucide/svelte/icons/message-square';
-  import Palette from '@lucide/svelte/icons/palette';
   import Pencil from '@lucide/svelte/icons/pencil';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
   import SquarePen from '@lucide/svelte/icons/square-pen';
@@ -304,12 +303,6 @@
         <span class="wname">{app.user?.username}</span>
         <span class="wrole">{app.user?.role}</span>
       </span>
-      <button class="ghost out" onclick={() => {
-        app.themeStudioOpen = true;
-        closeSidebarIfMobile();
-      }} title="Theme Studio — customize the look" aria-label="Open Theme Studio">
-        <Palette size={14} />
-      </button>
       <button class="ghost out" onclick={logout} title="Sign out" aria-label="Sign out"><LogOut size={14} /></button>
     </div>
 
@@ -319,7 +312,6 @@
 <style>
   .brand-dot { color: var(--text-faint); }
   .bname { font-size: 18px; letter-spacing: -.7px; font-weight: 600; }
-  .mark { filter: grayscale(1); }
   .page:disabled { opacity: .5; cursor: wait; }
 
   /* ========== desktop base ========== */

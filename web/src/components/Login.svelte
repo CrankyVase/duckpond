@@ -72,7 +72,7 @@
   @media (max-width: 420px) {
     .card { padding: 28px 20px 22px; }
   }
-  .logo { filter: grayscale(1); display: flex; justify-content: center; margin-bottom: 2px; }
+  .logo { display: flex; justify-content: center; margin-bottom: 2px; }
   h1 { margin: 0; font-size: 22px; text-align: center; font-weight: 600; letter-spacing: -0.01em; }
   .hint { margin: -6px 0 8px; color: var(--text-dim); font-size: 13px; text-align: center; }
   .error { margin: 0; color: var(--red); font-size: 13px; }

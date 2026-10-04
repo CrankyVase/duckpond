@@ -33,7 +33,7 @@
 
 <style>
   .welcome { display:flex; flex-direction:column; align-items:center; text-align:center; padding:24px 0 22px; }
-  .pond { display:grid; place-items:center; width:64px; height:64px; margin-bottom:24px; filter:grayscale(1); }
+  .pond { display:grid; place-items:center; width:64px; height:64px; margin-bottom:24px; }
   .eyebrow { font-size:10px; font-weight:500; letter-spacing:.16em; color:var(--text-faint); margin-bottom:14px; }
   h2 { font-size:clamp(27px, 3.2vw, 40px); font-weight:500; letter-spacing:-.045em; line-height:1.2; margin:0 0 14px; color:var(--text); }
   p { font-size:14px; line-height:1.6; color:var(--text-faint); margin:0; }

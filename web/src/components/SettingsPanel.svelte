@@ -670,9 +670,6 @@
       <!-- appearance -->
       <section id="sec-appearance" hidden={activeSec !== 'appearance'}>
         <div class="stitle"><Palette size={13} />Appearance</div>
-        <button class="wide" onclick={() => { app.view = 'chat'; app.themeStudioOpen = true; }}>
-          <Palette size={14} />Open Theme Studio — colors, layouts, custom CSS
-        </button>
         <div class="row">
           <div class="rlabel"><div class="rt">Dumpling animations</div><div class="rd">Explore duck gestures, inspect frames, and build a little animation story.</div></div>
           <button onclick={() => { location.hash = 'ducklab'; }}>Open animation workshop</button>

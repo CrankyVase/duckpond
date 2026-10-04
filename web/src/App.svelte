@@ -77,7 +77,6 @@
         app.view = 'settings';
       } else if (route.kind === 'themes') {
         app.view = 'chat';
-        app.themeStudioOpen = true;
       } else if (route.kind === 'chat' && route.id) {
         app.view = 'chat';
         try {
@@ -357,12 +356,6 @@
           {/key}
         </div>
       </main>
-      {#if app.themeStudioOpen}
-        {#await import('./components/ThemeStudio.svelte')}
-          <div class="panel-loading">Opening Theme Studio…</div>
-        {:then panel}<panel.default />
-        {:catch}<div class="panel-loading">Could not open Theme Studio. Reload to try again.</div>{/await}
-      {/if}
     </div>
     {#snippet failed({ error })}
       <div class="crashed">
