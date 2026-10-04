@@ -376,11 +376,11 @@
   .new {
     width: 100%; display: flex; align-items: center; gap: 9px;
     min-height: 42px; padding: 10px 12px; font-size: 13px; font-weight: 500;
-    background: var(--text); color: var(--bg); border-color: var(--text); box-sizing: border-box;
+    background: transparent; color: var(--text); border: 1px solid var(--border); box-sizing: border-box;
   }
-  .new :global(svg) { color: inherit; flex-shrink: 0; }
-  .new:hover { background: var(--accent-deep); }
-  .new kbd { margin-left: auto; font: 9px var(--mono); color: #555; white-space: nowrap; }
+  .new :global(svg) { color: var(--accent); flex-shrink: 0; }
+  .new:hover { background: var(--bg-hover); }
+  .new kbd { margin-left: auto; font: 9px var(--mono); color: var(--text-faint); white-space: nowrap; }
   .navigation-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .history-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 22px 24px 2px; font-size: 12px; font-weight: 600; color: var(--text-dim); }
   .history-count { font: 10px var(--mono); color: var(--text-faint); }

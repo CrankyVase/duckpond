@@ -1590,10 +1590,13 @@ import ChatFiles from './ChatFiles.svelte';
   .empty .thread { padding-top: 0; }
   .empty .pad { display: none; }
   .dock { flex-shrink: 0; }
-  .composer { border-radius: 18px; background: var(--bg-input); padding: 17px 16px 12px; }
-  .composer:focus-within { border-color: var(--accent-dim); box-shadow: none; }
-  .composer textarea { font-size: 15px; }
-  .composer-footer { justify-content: center; opacity: 1; color: var(--text-faint); font-size: 10px; padding-top: 10px; }
+  .composer { border-radius: 28px; background: var(--bg-input); border-color: transparent; padding: 16px 14px 10px 22px; }
+  .composer:focus-within { border-color: var(--border); box-shadow: none; }
+  .composer textarea { font-size: 16px; min-height: 48px; }
+  .composer-footer { justify-content: center; opacity: 1; color: var(--text-faint); font-size: 10px; padding-top: 8px; }
+  .composer-footer > span:first-child:not(:only-child) { display: none; }
+  .composer-footer > span:only-child { visibility: hidden; height: 0; padding: 0; }
+  .empty .dock { max-width: 780px; }
   .send { width: 34px; height: 34px; min-width: 34px; padding: 0; border-radius: 50%; justify-content: center; }
   .send.ready { background: var(--text); color: var(--bg); border-color: var(--text); box-shadow: none; }
   .tool, .options-trigger { border: none; background: transparent; color: var(--text-dim); }
