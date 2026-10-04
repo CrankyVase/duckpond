@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test:workspace": "node test/workspaceState.test.mjs && node test/modelReadiness.test.mjs",
+    "test:mascot": "node --test test/mascot.test.mjs",
     "test": "node test/hubReadme.test.mjs && node test/hubLogos.test.mjs"
   },
   "devDependencies": {

@@ -1,3 +1,41 @@
+# Active UI redesign — October 3, 2026
+
+User direction: redesign the entire layout into a simple, modern chat interface.
+OLED black, white text, subtle gray accents/borders, and zero gradients.
+Keep chat, coding, image/video/music/voice generation and existing functionality.
+This request supersedes older instructions to preserve the main chat layout.
+
+- [x] Audit navigation, chat, composer, themes, and auxiliary workspaces.
+- [x] Rebuild the shell and sidebar with clear, compact navigation.
+- [x] Redesign the welcome screen, conversation, message bubbles, and composer.
+- [x] Apply a consistent flat monochrome design across coding, media, models,
+      settings, dialogs, and authentication; remove gradient effects.
+- [x] Verify desktop and mobile layouts and key feature navigation in browser.
+- [x] Run production build and relevant existing regression checks.
+- [x] Record completed work and any remaining limitations here.
+
+
+Completed: direct Chat/Coding navigation, persistent history, compact model header,
+expandable usage details, centered welcome/composer, restrained message bubbles,
+flat Media Studio, shared workspace typography, and redesigned authentication.
+Default theme is OLED black/white/gray. Existing optional custom themes remain
+available. All authored CSS gradients and gradient background modes were removed.
+
+Validation (October 3): production build passed; no source gradient expressions;
+diff whitespace check passed. Browser fixtures passed at desktop/tablet/phone widths
+for welcome/chat/options, coding project panes/drafts/previews, media controls and
+uploads/queues/galleries, Model Hub downloads/selection, settings/providers/files/
+stats/costs, and memory unload. Sign-in/invite fit 1440, 390 and 320px. Existing
+workspace/model readiness/Hub README/logo tests passed. APIs were mocked for tests;
+no real inference, downloads, account writes or production restart were performed.
+
+Review preview: http://127.0.0.1:5208 (static build in /tmp/duckpond-oled-preview;
+API proxy points to the existing local DuckPond server on port 3000).
+Live deployment was not changed. Existing build warnings about unused legacy styles,
+reactive captures in widgets and large bundles remain outside this visual pass.
+
+---
+
 # Duckpond — hardest to easiest
 
 Started 2026-09-06; updated 2026-09-08. Preserve the broad main chat layout.

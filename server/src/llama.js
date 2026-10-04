@@ -1,5 +1,7 @@
 import { trackStreamProgress } from './streamProgress.js';
 import { createStreamDeadline } from './streamDeadline.js';
+import { inferenceHardware, usesRemoteHardware } from './inferenceHardware.js';
+import { createTokenCountCache } from './tokenCountCache.js';
 // Client for llama-server ROUTER mode (b9625) on 127.0.0.1:8081.
 // Endpoints verified against the running build: /v1/models (per-model status),
 // /models/load, /models/unload, /v1/chat/completions (+/input_tokens), /slots.
@@ -16,13 +18,14 @@ import {
 import { makeThinkSplitter, REASONING_PARAM_KEYS } from './reasoning.js';
 
 const BASE = process.env.LLAMA_URL ?? 'http://127.0.0.1:8081';
+const tokenCounts = createTokenCountCache();
 
 // llama.cpp-only knobs that OpenAI-compatible APIs reject or ignore, and the
 // output cap for paid models (llama's max_tokens -1 = unlimited is a bill
 // waiting to happen on a metered endpoint).
 const LLAMA_ONLY_PARAMS = [
   'top_k', 'repeat_penalty', 'mirostat', 'mirostat_tau', 'mirostat_eta',
-  'grammar', 'json_schema', 'chat_template_kwargs', 'timings_per_token',
+  'grammar', 'json_schema', 'chat_template_kwargs', 'timings_per_token', 'return_progress',
 ];
 const REMOTE_MAX_TOKENS = 4096;
 // total attempts per remote turn, the requested model included — bounds both
@@ -92,7 +95,18 @@ export async function reclaimIdleModel(model) {
 export async function reapIdleModels(log) {
   const models = await listModels();
   for (const m of models) {
-    if (m.status !== 'loaded' && m.status !== 'sleeping') continue;
+    const resident = m.status === 'loaded' || m.status === 'sleeping' || m.status === 'loading';
+    if (!resident) {
+      // A model that has left memory must not keep a stale clock. Otherwise the
+      // next load is treated as already idle and unloaded within a minute.
+      const a = activity.get(m.id);
+      if (a && a.active === 0) activity.delete(m.id);
+      continue;
+    }
+    if (m.status === 'loading') {
+      markUse(m.id);
+      continue;
+    }
     const a = activity.get(m.id);
     if (!a) { markUse(m.id); continue; }        // discovered resident: start the clock
     if (a.active > 0 || Date.now() - a.lastUsed < IDLE_UNLOAD_MS) continue;
@@ -120,6 +134,10 @@ export async function listModels() {
     status: m.status?.value ?? 'unknown',   // 'loaded' | 'unloaded' | 'loading'
     args: m.status?.args ?? [],
     ctxSize: extractCtx(m.status?.args),
+    loadingProgress: m.loading_progress ?? null,
+    loadError: m.load_error ?? null,
+    executionHost: m.execution_host ?? null,
+    device: m.device ?? null,
   }));
 }
 
@@ -141,30 +159,45 @@ export async function isModelLoaded(model) {
   } catch { return true; } // router down — fall through to the normal path
 }
 
-export const loadModel = (model) =>
-  jfetch('/models/load', { method: 'POST', body: JSON.stringify({ model }) });
+export const loadModel = (model) => {
+  tokenCounts.clear();
+  return jfetch('/models/load', { method: 'POST', body: JSON.stringify({ model }) });
+};
 // Force-load a model: evict whatever else is resident first, then load.
 // The router runs with --models-max 1, so a plain /models/load for model B
 // while model A is resident fails with "model limit reached" — every
 // explicit load path (picker Load button, prompt enhancer, Hub register)
 // goes through here so one click always wins the GPU instead of erroring.
-// An in-flight chat auto-reloads its model on the next send (the router
-// queues inference and pulls the model in itself), so eviction self-heals.
+// Active requests keep their worker; an explicit conflicting load reports busy.
 export async function ensureLoadedModel(model, log) {
+  markUse(model);
   const evicted = [];
   try {
     const models = await listModels();
+    const target = models.find((m) => m.id === model);
     for (const m of models) {
       if (m.id === model) continue;
+      // The Fedora CPU helper and Windows GPU models have independent workers.
+      if (target?.executionHost && m.executionHost && target.executionHost !== m.executionHost) continue;
       if (m.status !== 'loaded' && m.status !== 'loading' && m.status !== 'sleeping') continue;
-      await unloadModel(m.id).catch((err) => log?.warn({ err, model: m.id }, 'evict-before-load unload failed'));
-      evicted.push(m.id);
+      if ((activity.get(m.id)?.active ?? 0) > 0) {
+        throw Object.assign(new Error(`Model ${m.id} is serving a request; stop it before loading another model on that worker`), { statusCode: 409 });
+      }
+      try {
+        await unloadModel(m.id);
+        evicted.push(m.id);
+      } catch (err) {
+        if (err.statusCode === 409) throw err;
+        log?.warn({ err, model: m.id }, 'evict-before-load unload failed');
+      }
     }
   } catch (err) {
+    if (err.statusCode === 409) throw err;
     log?.warn({ err }, 'evict-before-load list failed — trying load anyway');
   }
   try {
     await loadModel(model);
+    markUse(model);
   } catch (err) {
     // lost a race with an in-flight load of the same model — that's success
     if (/already running/i.test(String(err?.message ?? err))) return { evicted, already: true };
@@ -172,27 +205,46 @@ export async function ensureLoadedModel(model, log) {
   }
   return { evicted, already: false };
 }
-export const unloadModel = (model) =>
-  jfetch('/models/unload', { method: 'POST', body: JSON.stringify({ model }) });
+export const unloadModel = (model) => {
+  if ((activity.get(model)?.active ?? 0) > 0) {
+    return Promise.reject(Object.assign(new Error('A model request is active; stop it before unloading'), { statusCode: 409 }));
+  }
+  tokenCounts.clear();
+  return jfetch('/models/unload', { method: 'POST', body: JSON.stringify({ model }) });
+};
 // Drop a model from the RUNNING router's registry (DELETE /models?model=…).
 // Only works for dynamically-added (cache) models — preset models refuse.
-export const removeModel = (model) =>
-  jfetch(`/models?model=${encodeURIComponent(model)}`, { method: 'DELETE' });
+export const removeModel = (model) => {
+  tokenCounts.clear();
+  return jfetch(`/models?model=${encodeURIComponent(model)}`, { method: 'DELETE' });
+};
 // Force the router to re-read its preset ini: deleted models whose sections
 // were stripped stop listing immediately (GET /models?reload=1 → load_models()).
-export const reloadRouterModels = () => jfetch('/models?reload=1');
+export const reloadRouterModels = () => {
+  tokenCounts.clear();
+  return jfetch('/models?reload=1');
+};
 
-export async function countInputTokens(model, messages) {
+export async function countInputTokens(model, messages, { signal } = {}) {
+  signal?.throwIfAborted();
   // remote endpoints have no token counter — chars/4 estimate is all we need
   // for the context bar and auto-compaction pressure check
   if (isRemoteId(model)) return estimateTokens(messages);
-  markUse(model);
-  const r = await jfetch('/v1/chat/completions/input_tokens', {
-    method: 'POST',
-    body: JSON.stringify({ model, messages }),
-  });
-  // shape: { input_tokens: N } (fallbacks for other builds)
-  return r.input_tokens ?? r.prompt_tokens ?? r.tokens ?? null;
+  const body = JSON.stringify({ model, messages });
+  return tokenCounts.get(body, async requestSignal => {
+    const act = markUse(model);
+    act.active++;
+    try {
+      const r = await jfetch('/v1/chat/completions/input_tokens', {
+        method: 'POST', body, signal: AbortSignal.any([requestSignal, AbortSignal.timeout(120_000)]),
+      });
+      // shape: { input_tokens: N } (fallbacks for other builds)
+      return r.input_tokens ?? r.prompt_tokens ?? r.tokens ?? null;
+    } finally {
+      act.active--;
+      act.lastUsed = Date.now();
+    }
+  }, { signal });
 }
 
 // A dropped connection to the router — the process asleep after
@@ -295,7 +347,10 @@ async function streamChatTransport({
       model,
       messages,
       stream: true,
-      timings_per_token: true,
+      // Tokens still stream immediately; speed telemetry arrives at completion.
+      // Avoid serializing a full timings object for every token/tool fragment.
+      timings_per_token: false,
+      return_progress: true,
       ...params,
     }),
   });
@@ -316,6 +371,7 @@ async function streamChatTransport({
   const toolCalls = []; // streamed as fragments keyed by index; arguments concatenate
   const splitter = makeThinkSplitter();
 
+  try {
   streamLoop: while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -324,8 +380,8 @@ async function streamChatTransport({
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
-      if (!line.startsWith('data: ')) continue;
-      const payload = line.slice(6);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
       if (payload === '[DONE]') {
         sawDone = true;
         break streamLoop;
@@ -371,7 +427,11 @@ async function streamChatTransport({
       }
     }
   }
-  if (sawDone) await reader.cancel().catch(() => {});
+  } finally {
+    // Release upstream work even if a consumer callback throws while streaming.
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
   if (!sawDone && !finishReason) {
     throw new Error('Local model chat stream ended before the model finished');
   }
@@ -384,6 +444,7 @@ async function streamChatTransport({
 
 // VRAM via rocm-smi (card0 = RX 9070 XT). Cheap enough to poll every few seconds.
 export function gpuVram() {
+  if (usesRemoteHardware()) return inferenceHardware().then((hw) => hw.vram).catch(() => null);
   return new Promise((resolve) => {
     execFile('rocm-smi', ['--showmeminfo', 'vram', '--json'], { timeout: 4000 }, (err, stdout) => {
       if (err) return resolve(null);

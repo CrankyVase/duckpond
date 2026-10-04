@@ -5,30 +5,25 @@
   // Lewis's school network. Search is open to any logged-in user; actually
   // pulling bytes onto shared disk is owner-only, same gate as Providers.
   //
-  // The layout, vocabulary and math deliberately mirror Unsloth Studio's
-  // Hub (AGPL-3.0, github.com/unslothai/unsloth — studied from source):
-  // endless scroll via a cursor'd server proxy, result cards with 52px
-  // avatars + status dots, and the quant picker with their exact fit-badge
-  // labels/tooltips and downloaded-first fit/size sort. All data flows
-  // through /api/hf/* — the browser only renders it.
+  // The server owns search and downloads. This component renders three
+  // simple views: installed files, model discovery, and download activity.
+  // On phones, selecting a result opens its file choices as a separate step.
   import { api } from '../lib/api.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
   import { downloads, failDownload, getJob, jobKey, optimisticallyAdd, cancelJob, clearFinished, startPolling, stopPolling } from '../lib/downloads.svelte.js';
   import { prefs } from '../lib/prefs.svelte.js';
-  import { app, loadModels } from '../lib/state.svelte.js';
+  import { app, loadModels, switchMode } from '../lib/state.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import { resolveHubLogo, cardGlow } from '../lib/hubLogos.js';
   import { renderHubReadme } from '../lib/hubReadme.js';
   import { localModelKey, modelReadiness } from '../lib/modelReadiness.js';
-  import { imgFade, reveal, scrollFade, smoothScrollTo } from '../lib/motion.js';
+  import { reveal, scrollFade, smoothScrollTo } from '../lib/motion.js';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
   import Heart from '@lucide/svelte/icons/heart';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Copy from '@lucide/svelte/icons/copy';
-  import Cpu from '@lucide/svelte/icons/cpu';
   import ExternalLink from '@lucide/svelte/icons/external-link';
-  import HardDrive from '@lucide/svelte/icons/hard-drive';
   import Info from '@lucide/svelte/icons/info';
   import MemoryStick from '@lucide/svelte/icons/memory-stick';
   import Package from '@lucide/svelte/icons/package';
@@ -39,6 +34,12 @@
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import X from '@lucide/svelte/icons/x';
+  import Cpu from '@lucide/svelte/icons/cpu';
+  import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+  import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
+  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
+  import Clock3 from '@lucide/svelte/icons/clock-3';
+  import Flame from '@lucide/svelte/icons/flame';
 
   // Deterministic per-owner color behind the avatar while it loads (and for
   // owners with no HF avatar) — Unsloth's colored-initial fallback.
@@ -55,6 +56,7 @@
   function logoFor(id) { return resolveHubLogo(ownerOf(id), repoNameOf(id)); }
 
   let hw = $state(null);
+  let hardwareError = $state('');
   let mediaModels = $state([]);
   let mediaAvailable = $state(false);
   async function refreshRuntime() {
@@ -64,23 +66,21 @@
   void refreshRuntime();
   function openStudio(id) { sessionStorage.setItem('dp:media-selection', id); app.view = 'media'; }
   let recModels = $state([]);
-  let recLoading = $state(false);
   let readme = $state(new Map()); // repoId -> { loading, text, error }
   let registering = $state(null);
   let showPaste = $state(false);
 
   async function loadHardware() {
-    try { hw = await api('/api/hf/hardware'); } catch { /* pills stay empty */ }
+    try { hw = await api('/api/hf/hardware'); hardwareError = ''; }
+    catch { hardwareError = 'Worker unavailable'; }
   }
-  async function loadRecommended() {
-    recLoading = true;
-    try {
-      const r = await api('/api/hf/recommend');
-      recModels = r.models ?? [];
-    } catch { recModels = []; }
-    recLoading = false;
-  }
-  onMount(() => { void loadHardware(); void loadLocal(); });
+  onMount(() => {
+    void loadHardware(); void loadLocal();
+    discoverLoaded = true;
+    void loadTab(activeTab);
+    const hardwareTimer = setInterval(() => { void loadHardware(); }, 30000);
+    return () => { clearInterval(hardwareTimer); clearTimeout(searchTimer); };
+  });
 
   function readmeHtml(text) {
     if (!text) return '';
@@ -111,7 +111,7 @@
     ['video', 'Video'],
   ];
   const LIST_HEADING = {
-    llm: 'Latest Unsloth models',
+    llm: 'Models to explore',
     image: 'Image models',
     audio: 'Audio models',
     video: 'Video models',
@@ -192,6 +192,37 @@
   let taskFilter = $state('');
   let sizeFilter = $state('');
   let formatFilter = $state('');
+  let fitOnly = $state(false);
+  let discoveryFeed = $state('recommended');
+  let discoveryMeta = $state(null);
+  let queryError = $state('');
+  const FEEDS = [
+    ['recommended', 'For your PC', Sparkles],
+    ['new', 'New arrivals', Clock3],
+    ['trending', 'Trending', Flame],
+    ['all', 'Explore all', Package],
+  ];
+  const FEED_COPY = {
+    recommended: ['Picked for your hardware', 'Current models with real GGUF file sizes checked against your memory.'],
+    new: ['New arrivals', 'Recent GGUF repositories from Unsloth, Bartowski, LM Studio, and ggml.'],
+    trending: ['Popular right now', 'Models being explored by the Hugging Face community.'],
+    all: ['Find your next model', 'Explore local chat models from established GGUF publishers.'],
+  };
+  const SORT_API = { newest: 'createdAt', downloads: 'downloads', likes: 'likes', relevance: '' };
+  function chooseFeed(feed) {
+    discoveryFeed = feed;
+    sortBy = 'relevance';
+    void loadTab('llm');
+  }
+  function modelFitLabel(model) {
+    const fit = model.memory?.fit;
+    return fit === 'fits' ? 'Fits GPU' : fit === 'marginal' ? 'Tight GPU fit'
+      : fit === 'partial' ? 'GPU + RAM' : fit === 'ram' ? 'CPU + RAM'
+      : fit === 'oom' ? 'Too large' : 'Check file fit';
+  }
+  function contextLabel(tokens) {
+    return tokens >= 1000000 ? `${(tokens / 1000000).toFixed(1)}M` : `${Math.round(tokens / 1000)}K`;
+  }
   function toggleChip(which, value) {
     if (which === 'task') taskFilter = taskFilter === value ? '' : value;
     if (which === 'size') sizeFilter = sizeFilter === value ? '' : value;
@@ -233,16 +264,6 @@
     return true;
   }
 
-  const TYPE_FILTERS = [
-    ['all', 'All types'],
-    ['chat', 'Text / Chat'],
-    ['image', 'Image'],
-    ['audio', 'Audio / Speech'],
-    ['video', 'Video'],
-    ['embed', 'Embeddings'],
-  ];
-  let typeFilter = $state('all');
-
   const SORTS = [
     ['relevance', 'Relevance'],
     ['downloads', 'Most downloads'],
@@ -253,7 +274,7 @@
   function sortedResults(list) {
     if (sortBy === 'relevance') return list;
     const key = sortBy === 'newest'
-      ? (m) => (m.updatedAt ? new Date(m.updatedAt).getTime() : 0)
+      ? (m) => (m.createdAt ? new Date(m.createdAt).getTime() : 0)
       : (m) => Number(m[sortBy]) || 0;
     return [...list].sort((a, b) => key(b) - key(a));
   }
@@ -262,31 +283,37 @@
   // on disk, independent of the router's preset ini). The split LM Studio and
   // Unsloth Studio both make; see notes/HUB-3.md.
   let mode = $state('discover');
+  let discoverLoaded = false;
   let localModels = $state([]);
   let localTotalBytes = $state(0);
   let localLoading = $state(false);
   let localDeleting = $state(null); // `${repoDir}::${include}` mid-delete
+  let usingInstalled = $state(null); // `${repoId}::${include}` mid-register/select
   let localQuery = $state('');
   let localFilter = $state('all');
   let localError = $state('');
+  let detailEl = $state(null);
+  let mobileViewingDetail = $state(false);
   const installedRows = $derived(localModels.filter(row => {
     const info = modelReadiness(row, mediaModels, mediaAvailable);
     const text = [row.repoId, ...(row.variants || []).map(v => v.name)].join(' ').toLowerCase();
     return text.includes(localQuery.toLowerCase().trim()) && (localFilter === 'all'
       || (localFilter === 'attention' && ['setup','incomplete'].includes(info.state))
-      || (localFilter === 'ready' && info.state === 'ready'));
+      || (localFilter === 'ready' && info.state === 'ready')
+      || (localFilter === 'chat' && row.task === 'chat' && !row.broken)
+      || (localFilter === 'media' && ['image', 'audio', 'video'].includes(row.task)));
   }));
 
   async function inspectInstalled(row) {
-    if (!row.repoId) return;
+    if (!row.repoId || !row.source.startsWith('hf-cache')) return;
     const runtime = mediaModels.find(m => m.id === row.repoId);
     activeTab = runtime?.task === 'video' ? 'video' : runtime?.task === 'image' ? 'image'
       : ['audio','tts'].includes(runtime?.task) ? 'audio' : 'llm';
-    taskFilter = ''; sizeFilter = ''; formatFilter = ''; typeFilter = 'all';
+    taskFilter = ''; sizeFilter = ''; formatFilter = '';
     mode = 'discover'; q = row.repoId;
     results = [{ id: row.repoId, kind: activeTab === 'llm' ? 'chat' : activeTab }];
     searched = true; hasMore = false;
-    await select(row.repoId);
+    select(row.repoId, true);
   }
 
   async function loadLocal() {
@@ -300,9 +327,48 @@
     localLoading = false;
   }
 
+  function chatVariants(row) {
+    if (!['hf-cache', 'local-dir'].includes(row.source) || row.task !== 'chat') return [];
+    return row.variants.filter((v) => v.chatCompatible === true && v.include &&
+      !/(?:^|[-_.\/])(mmproj|mtp|eagle|draft)(?:[-_.\/]|$)/i.test(v.name));
+  }
+
+  async function useInstalledInChat(row, variant) {
+    const key = `${row.repoId}::${variant.include}`;
+    usingInstalled = key;
+    try {
+      const registered = await api('/api/hf/register', {
+        method: 'POST', body: { source: row.source, repoId: row.repoId, include: variant.include, load: false },
+      });
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await loadModels();
+        if (app.models.some((m) => m.id === registered.alias)) break;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+      if (!app.models.some((m) => m.id === registered.alias)) {
+        throw new Error('The files are on disk, but the chat engine has not listed this model yet. Check its status and try again.');
+      }
+      await switchMode('chat');
+      if (!app.conv?.id) throw new Error('Could not open a chat');
+      await api(`/api/conversations/${app.conv.id}`, { method: 'PATCH', body: { model_id: registered.alias } });
+      app.conv.model_id = registered.alias;
+      app.view = 'chat';
+      toast(`${registered.alias} is ready for this chat`, 'ok');
+    } catch (e) {
+      toast(e.error ?? e.message ?? 'Could not use this model in chat', 'error');
+    } finally {
+      usingInstalled = null;
+    }
+  }
+
   function setMode(m) {
     mode = m;
+    if (m === 'discover') mobileViewingDetail = false;
     if (m === 'my-models') { void loadLocal(); void refreshRuntime(); }
+    if (m === 'discover' && !discoverLoaded) {
+      discoverLoaded = true;
+      void loadTab(activeTab);
+    }
   }
 
   // Downloads tab — every job the server knows about (running, queued,
@@ -388,11 +454,12 @@
 
   const isOwner = $derived(app.user?.role === 'owner');
   const displayedResults = $derived.by(() => {
-    let list = typeFilter === 'all' ? results : results.filter((m) => (m.kind ?? 'chat') === typeFilter);
+    let list = results;
     if (activeTab === 'llm' && !q.trim() && !formatFilter) {
-      list = list.filter((m) => /-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id));
+      list = list.filter((m) => (/-gguf/i.test(m.id) || m.tags?.includes('gguf')) && !/nvfp4|fp8/i.test(m.id));
     }
     list = list.filter((m) => matchesTask(m) && matchesSize(m) && matchesFormat(m));
+    if (fitOnly && activeTab === 'llm') list = list.filter((m) => ['fits', 'marginal'].includes(m.memory?.fit));
     return sortedResults(list);
   });
   // If the filter drops the selected row out of view, follow the list rather
@@ -419,7 +486,7 @@
   $effect(() => { activeRepo; quantOpen = false; showOom = false; });
   const FIT_OK = new Set(['fits', 'marginal', 'partial', 'ram']);
   function fittingRows(v) {
-    return sortedVariants(v).filter((r) => FIT_OK.has(r.fit) && !r.companion);
+    return sortedVariants(v).filter((r) => FIT_OK.has(r.fit) && !r.companion && r.complete !== false);
   }
   function otherRows(v) {
     return sortedVariants(v).filter((r) => !FIT_OK.has(r.fit) || r.companion);
@@ -437,17 +504,16 @@
 
   function tabEndpoint(tab, cursor) {
     const p = cursor ? { cursor } : {};
-    if (tab === 'llm') return `/api/hf/search?${new URLSearchParams({ author: 'unsloth', sort: 'lastModified', filter: 'gguf', ...p })}`;
+    if (tab === 'llm') return `/api/hf/discover?${new URLSearchParams({ feed: discoveryFeed, sort: SORT_API[sortBy], ...p })}`;
     return `/api/hf/modality/${tab}`;
   }
 
   // The current query as a fetch function — tab browse or text search — so
   // fetchMore() can re-run it with the cursor for endless scroll.
-  let queryUrl = $state(null);
   function currentQueryUrl(cursor) {
     if (q.trim()) {
       if (activeTab === 'llm') {
-        return `/api/hf/search?${new URLSearchParams({ q: q.trim(), sort: 'trendingScore', filter: 'gguf', ...(cursor ? { cursor } : {}) })}`;
+        return `/api/hf/discover?${new URLSearchParams({ feed: discoveryFeed, q: q.trim(), sort: SORT_API[sortBy], ...(cursor ? { cursor } : {}) })}`;
       }
       // Image/Voice/Video each cover several HF pipeline tags (TTS is
       // text-to-speech, not text-to-audio). Searching a single tag used to
@@ -457,26 +523,27 @@
     return tabEndpoint(activeTab, cursor);
   }
 
-  let querySequence = 0;
+  let querySequence = $state(0);
   async function runQuery(fetchFn) {
     const sequence = ++querySequence;
     searching = true;
+    queryError = '';
     loadMoreFailed = false;
     try {
-      const { models, nextCursor: nc } = await fetchFn();
+      const response = await fetchFn();
+      const { models, nextCursor: nc } = response;
       if (sequence !== querySequence) return;
+      discoveryMeta = response;
       results = models;
+      if (activeTab === 'llm' && discoveryFeed === 'recommended' && !q.trim()) recModels = models;
       nextCursor = nc;
       hasMore = !!nc;
-      const landing = (activeTab === 'llm' ? recModels[0]?.id : null)
-        ?? results.find((m) => activeTab !== 'llm' || (/-gguf/i.test(m.id) && !/nvfp4|fp8/i.test(m.id)))?.id
-        ?? results[0]?.id
-        ?? null;
+      const landing = results[0]?.id ?? null;
       if (landing) select(landing);
       else selected = null;
     } catch (e) {
       if (sequence !== querySequence) return;
-      toast(e.message ?? 'search failed', 'error');
+      queryError = e.message ?? 'Could not reach the model catalog.';
       results = [];
       selected = null;
       hasMore = false;
@@ -486,19 +553,22 @@
   }
 
   async function loadTab(tab) {
+    clearTimeout(searchTimer);
+    if (tab !== 'llm') fitOnly = false;
+    mobileViewingDetail = false;
     activeTab = tab;
     q = '';
     await runQuery(() => api(tabEndpoint(tab)));
   }
 
   async function doSearch() {
+    mobileViewingDetail = false;
     const query = q.trim();
     if (!query) { await loadTab(activeTab); return; }
     await runQuery(() => api(currentQueryUrl()));
   }
   // Wait for the "fits this GPU" strip before the Unsloth tab so landing
   // can open LFM2-700M instead of the newest 80GB drop.
-  onMount(() => { void (async () => { await loadRecommended(); await loadTab(activeTab); })(); });
 
   // Reinstated 2026-09-02 after notes/HUB-2.md's "no free-text inputs"
   // removal (password managers were autofilling into search fields) — user
@@ -518,6 +588,7 @@
     void doSearch();
   }
   function clearSearch() {
+    mobileViewingDetail = false;
     if (searchTimer) clearTimeout(searchTimer);
     q = '';
     void loadTab(activeTab);
@@ -575,13 +646,13 @@
     return () => io.disconnect();
   });
 
-  function select(repoId) {
+  function select(repoId, jumpToDetail = false) {
     selected = repoId;
     if (!results.some((m) => m.id === repoId)) {
       const extra = recModels.find((m) => m.id === repoId);
       if (extra) results = [extra, ...results];
     }
-    if (isMediaTab || !GGUF_REPO_RE.test(repoId)) {
+    if (isMediaTab || GGUF_REPO_RE.test(repoId) || results.find((m) => m.id === repoId)?.tags?.includes('gguf')) {
       quantizers.set(repoId, { loading: false, list: [] });
       quantizers = new Map(quantizers);
       void loadVariants(repoId);
@@ -589,6 +660,10 @@
       void loadQuantizers(repoId);
     }
     void loadReadme(repoId);
+    if (jumpToDetail && window.matchMedia('(max-width: 900px)').matches) {
+      mobileViewingDetail = true;
+      requestAnimationFrame(() => detailEl?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
   }
 
   async function loadQuantizers(repoId) {
@@ -631,6 +706,7 @@
 
   async function loadVariants(repoId, force = false) {
     if (!force && variants.has(repoId)) return;
+    const previousPick = variants.get(repoId)?.pick;
     variants.set(repoId, { loading: true });
     variants = new Map(variants);
     // Capture the tab at request time — the user may switch Image → Voice
@@ -639,10 +715,16 @@
     try {
       const v = await api(`/api/hf/variants/${repoId}`);
       const media = ['image', 'audio', 'video'].includes(tabAtStart);
+      const suggested = results.find((m) => m.id === repoId)?.suggestedVariant?.include;
+      const hasSuggestion = v.variants.some((row) => row.include === suggested && row.complete !== false);
+      const mediaPick = v.variants.find((row) => row.complete !== false && !row.companion && /Q4/i.test(row.quant ?? ''))
+        ?? v.variants.find((row) => row.complete !== false && !row.companion);
+      const preserved = force && v.variants.some((row) => row.include === previousPick && row.complete !== false);
       variants.set(repoId, {
         loading: false,
         ...v,
-        pick: media ? (v.variants[0]?.include ?? null) : (v.recommended ?? v.pick ?? null),
+        recommended: !media && hasSuggestion ? suggested : v.recommended,
+        pick: preserved ? previousPick : media ? (mediaPick?.include ?? null) : (hasSuggestion ? suggested : (v.recommended ?? v.pick ?? null)),
       });
       void loadReadme(repoId);
     } catch (e) {
@@ -654,7 +736,8 @@
   function pickVariant(repoId, include) {
     const v = variants.get(repoId);
     if (!v) return;
-    v.pick = include;
+    if (v.variants.find((row) => row.include === include)?.complete === false) return;
+    variants.set(repoId, { ...v, pick: include });
     variants = new Map(variants);
   }
 
@@ -676,6 +759,10 @@
 
   async function download(repoId, include, variant) {
     const v = variants.get(repoId);
+    if (v?.variants?.find((row) => row.include === include)?.complete === false) {
+      toast('This version has incomplete model files. Choose another version.', 'error');
+      return;
+    }
     const label = variant ?? v?.variants?.find((x) => x.include === include)?.name ?? include;
     const totalBytes = v?.variants?.find((x) => x.include === include)?.size ?? null;
     try {
@@ -710,12 +797,20 @@
 
   /** Paste any `owner/repo` into the hub — validates and opens it directly. */
   async function addRepo() {
-    const id = pasteId.trim().replace(/^https?:\/\/huggingface\.co\//, '').replace(/\/$/, '');
+    const id = pasteId.trim().replace(/^https?:\/\/huggingface\.co\//, '').split(/[?#]/)[0].replace(/\/(?:tree|blob)\/.*$/, '').replace(/\/$/, '');
     if (!id || !id.includes('/')) { toast('Paste a repo id like unsloth/Qwen3-8B-GGUF', 'error'); return; }
     try {
-      await api(`/api/hf/models/${id}`);
+      const model = await api(`/api/hf/models/${id}`);
+      clearTimeout(searchTimer);
+      querySequence += 1;
+      activeTab = ['image', 'audio', 'video'].includes(model.kind) ? model.kind : 'llm';
+      taskFilter = ''; sizeFilter = ''; formatFilter = ''; fitOnly = false;
       q = id;
-      await doSearch();
+      results = [model];
+      searching = false; searched = true; queryError = '';
+      nextCursor = null; hasMore = false; mode = 'discover';
+      select(id, true);
+      showPaste = false;
       pasteId = '';
     } catch (e) {
       toast(e.message ?? 'repo not found', 'error');
@@ -820,20 +915,22 @@
     return Math.min(100, Math.round((j.downloadedBytes / j.totalBytes) * 100));
   }
 
-  // Unsloth's exact fit-badge vocabulary — labels, tooltips and icon colors
-  // copied from their gguf-download-card.tsx FIT_BADGE table (AGPL).
+  // Memory estimates reserve room for the runtime; context and architecture
+  // still affect the actual allocation on load.
   const FIT = {
+    incomplete: { label: 'Incomplete files', icon: 'rose', tip: 'This version is missing shards or contains empty files. Choose a complete version.' },
+    unknown: { label: 'Fit unknown', icon: 'sky', tip: 'Memory readings are unavailable. Check worker connectivity before loading.' },
     fits: {
-      label: 'Full GPU offload', icon: 'emerald',
-      tip: 'Full offload likely possible on your system.',
+      label: 'Estimated GPU fit', icon: 'emerald',
+      tip: 'Estimated to fit on the GPU with runtime headroom. Context size and architecture affect actual use.',
     },
     marginal: {
-      label: 'Over budget', icon: 'amber',
-      tip: 'Larger than your VRAM Budget allows, so part of it offloads even on an idle GPU. It is still smaller than the card, so raising the budget can keep it resident.',
+      label: 'Tight GPU fit', icon: 'amber',
+      tip: 'Very little graphics memory headroom remains. Some layers may need system RAM.',
     },
     partial: {
-      label: 'Partial offload', icon: 'sky',
-      tip: 'Model may not fit but still works with offloading. Expect slower inference.',
+      label: 'GPU + RAM', icon: 'sky',
+      tip: 'Requires GPU and system memory. Expect slower replies than a model that fits on the GPU.',
     },
     ram: {
       label: 'RAM fallback', icon: 'sky',
@@ -841,7 +938,7 @@
     },
     oom: {
       label: 'Does not fit', icon: 'rose',
-      tip: 'Model may not fit but still works with offloading. Expect slower inference.',
+      tip: 'Exceeds the reported combined memory budget. Choose a smaller version or model.',
     },
   };
   const FIT_RANK = { fits: 0, marginal: 1, partial: 2, ram: 2, oom: 3 };
@@ -862,6 +959,15 @@
     });
   }
   const pickedVariant = (v) => v?.variants?.find((x) => x.include === v.pick) ?? null;
+  function quantDescription(row) {
+    const code = String(row?.quant ?? row?.name ?? '').toUpperCase();
+    if (/\b(?:F16|BF16|FP16)\b/.test(code)) return 'Full precision. Largest download and memory use.';
+    if (/\b(?:Q8|IQ8)/.test(code)) return 'Higher precision. Larger download and memory use.';
+    if (/\b(?:Q6|IQ6|Q5|IQ5)/.test(code)) return 'More detail, with a larger download than Q4.';
+    if (/\b(?:Q4|IQ4)/.test(code)) return 'A common balance of size and output quality.';
+    if (/\b(?:Q3|IQ3|Q2|IQ2|Q1|IQ1)/.test(code)) return 'Smaller download, with a greater quality tradeoff.';
+    return 'The file size and memory fit below help you choose.';
+  }
 
   function fmtAgo(iso) {
     if (!iso) return null;
@@ -873,60 +979,61 @@
   }
 </script>
 
-<div class="hub">
+<div class="hub hub-studio" class:mobile-detail={mobileViewingDetail && mode === 'discover'}>
   <div class="head">
     <div class="title">
+      <span class="hub-eyebrow"><span></span> YOUR LOCAL AI LIBRARY</span>
       <h1>Model Hub</h1>
-      <p>Discover, download, and manage your local models.</p>
+      <p>{mode === 'discover' ? 'Discover something new. Run it on your own hardware.' : mode === 'downloads' ? 'Your models, on their way to your library.' : 'Your collection. Ready when you are.'}</p>
     </div>
-    <div class="pills">
-      {#if localModels.length}
-        <span class="pill" title="Models on disk"><HardDrive size={13} /> {localModels.length} Local</span>
-      {/if}
-      {#if hw?.gpuLabel}
-        <span class="pill" title="Total GPU VRAM"><MemoryStick size={13} /> {hw.gpuLabel} VRAM</span>
-      {/if}
-      {#if hw?.ramLabel}
-        <span class="pill" title="System RAM"><HardDrive size={13} /> {hw.ramLabel} RAM</span>
-      {/if}
-      {#if vramLabel}<span class="pill live"><span class="dot live"></span> {vramLabel} free</span>{/if}
-    </div>
+    <details class="device-info">
+      <summary><span class="hardware-icon"><Cpu size={19} /></span><span class="hardware-copy"><strong>{hw?.gpuName?.replace('AMD Radeon ', '') ?? 'Inference worker'}</strong><span>{hardwareError || (hw?.available === false ? 'Worker offline · fit unavailable' : hw ? `${hw.gpuLabel ?? 'CPU'}${hw.gpuLabel ? ' VRAM' : ''} · ${hw.ramLabel ?? '—'} RAM` : 'Checking your hardware…')}</span></span><ChevronDown size={14} /></summary>
+      <div class="device-details">
+        {#if hw?.gpuLabel}<span>Graphics memory <strong>{hw.gpuLabel}</strong></span>{/if}
+        {#if hw?.ramLabel}<span>System memory <strong>{hw.ramLabel}</strong></span>{/if}
+        {#if vramLabel}<span>Available graphics memory <strong>{vramLabel}</strong></span>{/if}
+        {#if localModels.length}<span>On disk <strong>{localModels.length} models · {fmtBytes(localTotalBytes)}</strong></span>{/if}
+        {#if !hw && !localModels.length}<span>Device details are loading.</span>{/if}
+      </div>
+    </details>
   </div>
 
-  <div class="modebar" aria-label="Model library views">
-      <button class="modebtn" class:on={mode === 'my-models'} aria-pressed={mode === 'my-models'} onclick={() => setMode('my-models')}>Installed</button>
-      <button class="modebtn" class:on={mode === 'discover'} aria-pressed={mode === 'discover'} onclick={() => setMode('discover')}>Discover</button>
-      <button class="modebtn" class:on={mode === 'downloads'} onclick={() => setMode('downloads')}>
-        Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
-      </button>
-  </div>
-  <div class="toolbar">
-    {#if mode === 'discover'}
-      <div class="tabs">
+  <nav class="modebar" aria-label="Model library views">
+    <button class="modebtn" class:on={mode === 'discover'} aria-pressed={mode === 'discover'} onclick={() => setMode('discover')}><SearchIcon size={15} />Discover</button>
+    <button class="modebtn" class:on={mode === 'my-models'} aria-pressed={mode === 'my-models'} onclick={() => setMode('my-models')}><Package size={15} />Installed{#if localModels.length}<span class="library-count">{localModels.length}</span>{/if}</button>
+    <button class="modebtn" class:on={mode === 'downloads'} aria-pressed={mode === 'downloads'} onclick={() => setMode('downloads')}>
+      <Download size={15} />Downloads{#if activeDownloadCount}<span class="modebadge">{activeDownloadCount}</span>{/if}
+    </button>
+  </nav>
+  {#if mode === 'discover'}
+    <div class="discover-controls">
+      <div class="discover-search">
+        <div class="searchbox">
+          <SearchIcon size={16} />
+          <input aria-label="Search models" type="search" inputmode="search" placeholder="Search Qwen, Gemma, coding models…"
+            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+            data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
+            name={searchInputName}
+            bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
+          {#if q}<button class="ghost searchclear" onclick={clearSearch} aria-label="Clear search" title="Clear search"><X size={15} /></button>{/if}
+        </div>
+        <label class="fselect">
+          <select aria-label="Sort models" bind:value={sortBy} onchange={() => void doSearch()}>
+            {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
+          </select>
+        </label>
+        <button class="repo-btn" onclick={() => (showPaste = !showPaste)} aria-expanded={showPaste} title="Open a Hugging Face repository">
+          <Plus size={15} /><span>Open repository</span>
+        </button>
+      </div>
+      <div class="tabs" aria-label="Model types">
         {#each TABS as [val, label] (val)}
-          <button class="tab" class:active={activeTab === val && !q.trim()}
-            onclick={() => loadTab(val)}>{label}</button>
+          <button class="tab" class:active={activeTab === val} aria-pressed={activeTab === val}
+            onclick={() => loadTab(val)}>{label}{#if val === 'audio' || val === 'video'}<span class="setup-tag">Browse</span>{/if}</button>
         {/each}
       </div>
-      <div class="searchbox">
-        <SearchIcon size={14} />
-        <input aria-label="Search models" type="search" inputmode="search" placeholder="Search {activeTab === 'llm' ? 'LLMs' : activeTab + ' models'}"
-          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
-          name={searchInputName}
-          bind:value={q} oninput={onSearchInput} onkeydown={onSearchKeydown} />
-        {#if q}<button class="ghost searchclear" onclick={clearSearch} title="Clear"><X size={13} /></button>{/if}
-      </div>
-      <label class="fselect">
-        <select aria-label="Sort models" bind:value={sortBy}>
-          {#each SORTS as [val, label] (val)}<option value={val}>{label}</option>{/each}
-        </select>
-      </label>
-      <button class="ghost addbtn" onclick={() => (showPaste = !showPaste)} title="Paste a repo id">
-        <Plus size={14} />
-      </button>
-    {/if}
-  </div>
+    </div>
+  {/if}
   {#if mode === 'discover' && showPaste}
     <div class="pasterow">
       <input class="paste" placeholder="Paste owner/repo to add…" bind:value={pasteId}
@@ -936,28 +1043,39 @@
   {/if}
 
   {#if mode === 'discover'}
-    <details class="filters-shell"><summary>Filter models{#if taskFilter || sizeFilter || formatFilter}<span class="filter-dot"></span>{/if}</summary>
+    <div class="discovery-toolbar">
+      {#if activeTab === 'llm'}
+        <div class="feed-tabs" aria-label="Discovery collections">
+          {#each FEEDS as [value, label, Icon] (value)}
+            <button class:active={discoveryFeed === value && !q.trim()} aria-pressed={discoveryFeed === value && !q.trim()} onclick={() => chooseFeed(value)}><Icon size={14} />{label}</button>
+          {/each}
+        </div>
+        <button class="fit-toggle" class:active={fitOnly} aria-pressed={fitOnly} disabled={!hw || hw.available === false || !!hardwareError} onclick={() => (fitOnly = !fitOnly)} title="Filter using memory estimates. Exact fit is shown for each file."><MemoryStick size={14} />Fits GPU</button>
+      {/if}
+    <details class="filters-shell"><summary><SlidersHorizontal size={14} /> Filters{#if taskFilter || sizeFilter || formatFilter}<span class="filter-dot"></span>{/if}</summary>
     <div class="filters">
-      <div class="fg">
+      <div class="filter-group"><span class="filter-label">Capability</span><div class="fg">
         {#each TASK_FILTERS as [val, label] (val)}
           <button type="button" class="fchip" class:on={taskFilter === val}
             onclick={() => toggleChip('task', val)}>{label}</button>
         {/each}
-      </div>
-      <div class="fg">
+      </div></div>
+      <div class="filter-group"><span class="filter-label">Parameters</span><div class="fg">
         {#each SIZE_FILTERS as [val, label] (val)}
           <button type="button" class="fchip" class:on={sizeFilter === val}
             onclick={() => toggleChip('size', val)}>{label}</button>
         {/each}
-      </div>
-      <div class="fg">
+      </div></div>
+      <div class="filter-group"><span class="filter-label">Format</span><div class="fg">
         {#each FORMAT_FILTERS as [val, label] (val)}
           <button type="button" class="fchip" class:on={formatFilter === val}
             onclick={() => toggleChip('format', val)}>{label}</button>
         {/each}
-      </div>
+      </div></div>
+      {#if taskFilter || sizeFilter || formatFilter}<button class="clear-filters" onclick={() => { taskFilter = ''; sizeFilter = ''; formatFilter = ''; }}>Clear filters</button>{/if}
     </div>
     </details>
+    </div>
   {/if}
 
   {#if mode !== 'downloads' && downloadAttention.length}
@@ -971,53 +1089,32 @@
   {/if}
 
   {#if mode === 'discover'}
-  {#if activeTab === 'llm' && !q.trim() && recModels.length}
-    <details class="recstrip">
-      <summary>Recommended for this machine</summary>
-      <div class="carousel">
-        {#each recModels as m (m.id)}
-          {@const logo = logoFor(m.id)}
-          <button class="mcard" class:on={selected === m.id} style="--glow:{cardGlow(m.id)}"
-            onclick={() => select(m.id)}>
-            <span class="avatar" class:logo={!!logo}
-              style={!logo && avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
-              {#if logo}
-                <img src={logo.path} alt="" class:cover={logo.fit === 'cover'} />
-              {:else if !avatarFail.has(ownerOf(m.id))}
-                <img src="/api/hf/avatar/{ownerOf(m.id)}" alt="" loading="lazy"
-                  onerror={() => { avatarFail.add(ownerOf(m.id)); avatarFail = new Set(avatarFail); }} />
-              {/if}
-              <span class="initial">{ownerOf(m.id)[0]?.toUpperCase()}</span>
-            </span>
-            <span class="mcname">{displayName(m.id)}</span>
-            <span class="mcowner">{ownerOf(m.id)}</span>
-          </button>
-        {/each}
-      </div>
-    </details>
-  {/if}
-
-  {#if searching}
-    <div class="skeleton-list">
-      {#each Array(6) as _, i (i)}
-        <div class="skeleton-row"><div class="sk avatar-sk"></div><div class="sk-lines"><div class="sk w40"></div><div class="sk w70"></div></div></div>
-      {/each}
+    <div class="collection-heading">
+      <div><h2>{q.trim() ? `Results for “${q.trim()}”` : activeTab === 'llm' ? FEED_COPY[discoveryFeed][0] : LIST_HEADING[activeTab]}</h2><p>{q.trim() ? activeTab === 'llm' ? 'GGUF chat models across Hugging Face.' : 'Models across Hugging Face.' : activeTab === 'llm' ? FEED_COPY[discoveryFeed][1] : 'Explore model files. Runtime support is checked separately.'}</p></div>
+      <button class="catalog-refresh" disabled={searching} onclick={() => { void loadHardware(); void doSearch(); }} title="Refresh models and hardware" aria-label="Refresh catalog"><RefreshCw size={14} class={searching ? 'spin' : ''} />{#if discoveryMeta?.fetchedAt}<span>{discoveryMeta.stale ? 'Cached · retry' : `Checked ${fmtAgo(discoveryMeta.fetchedAt)}`}</span>{:else}<span>Refresh</span>{/if}</button>
     </div>
-  {:else if searched && !displayedResults.length}
-    <div class="empty nodetail">
-      {#if results.length}No {TYPE_FILTERS.find(([v]) => v === typeFilter)?.[1].toLowerCase()} models in this view — try All types.
-      {:else}No models found{#if q.trim()} matching "{q}"{:else} on this tab right now.{/if}{/if}
-    </div>
-  {/if}
+    {#if discoveryMeta?.stale || discoveryMeta?.partialSources}<p class="catalog-note">{discoveryMeta.stale ? 'Showing the last saved catalog while Hugging Face is unavailable.' : 'Some publishers could not be reached. Available results are shown.'}</p>{/if}
+    {#if activeTab === 'llm'}<p class="estimate-note">{discoveryFeed === 'recommended' && !q.trim() ? 'Picks use real file sizes. ' : 'Card memory is a Q4 estimate. '}Fit includes a runtime reserve; context length and architecture affect actual memory use. New arrival dates refer to GGUF repositories.</p>{/if}
 
-  {#if displayedResults.length || (!searching && searched)}
-    <div class="split">
+  {#if searching || displayedResults.length || searched}
+    <div class="split" class:show-detail={mobileViewingDetail}>
       <div class="list" bind:this={listEl} use:scrollFade>
-        <div class="lhead">{q.trim() ? 'Search results' : (LIST_HEADING[activeTab] ?? 'Models')}</div>
+        <div class="lhead"><span>{searching ? 'Finding models…' : `${displayedResults.length} models`}</span><span>Hugging Face · live catalog</span></div>
+        {#if searching}
+          <div class="model-grid skeleton-grid" aria-label="Loading models" aria-busy="true">
+            {#each Array(6) as _, i (i)}<div class="model-skeleton"><div class="sk avatar-sk"></div><div class="sk w70"></div><div class="sk w40"></div><div class="sk w70"></div></div>{/each}
+          </div>
+        {:else if queryError}
+          <div class="catalog-empty"><Info size={24} /><h3>Catalog unavailable</h3><p>{queryError}</p><button class="dlbtn" onclick={() => void doSearch()}>Try again</button></div>
+        {:else if !displayedResults.length}
+          <div class="catalog-empty"><SearchIcon size={24} /><h3>{discoveryMeta?.hardwareAvailable === false && discoveryFeed === 'recommended' ? 'Connect your inference worker' : 'No models here yet'}</h3><p>{discoveryMeta?.hardwareAvailable === false && discoveryFeed === 'recommended' ? 'Hardware recommendations need a memory reading. You can still explore new arrivals.' : results.length ? 'Try clearing a filter to see more models.' : q.trim() ? 'Try a shorter model name or a different creator.' : 'Explore another collection while we check for models that fit.'}</p><button class="dlbtn" onclick={() => { fitOnly = false; taskFilter = ''; sizeFilter = ''; formatFilter = ''; chooseFeed('new'); }}>Explore new arrivals</button></div>
+        {:else}
+        <div class="model-grid">
         {#each displayedResults as m, i (m.id)}
           {@const badge = taskBadge(m.pipelineTag, m.kind)}
           {@const logo = logoFor(m.id)}
-          <button class="rrow" class:active={selected === m.id} use:reveal={{ delay: Math.min(i, 8) * 26 }} onclick={() => select(m.id)}>
+          <button class="rrow model-card" class:active={selected === m.id} style="--model-color:{cardGlow(m.id)}" aria-pressed={selected === m.id} onclick={() => select(m.id, true)}>
+            <span class="model-card-top">
             <span class="avatar" class:logo={!!logo}
               style={!logo && avatarFail.has(ownerOf(m.id)) ? avatarStyle(ownerOf(m.id)) : ''}>
               {#if logo}
@@ -1032,7 +1129,7 @@
               <span class="rname">
                 <span class="rnametext">{displayName(m.id)}</span>
                 <span class="dots">
-                  {#if m.curated}<span class="staffpick" title="Staff Pick"><Sparkles size={11} /></span>{/if}
+                  {#if m.recommendation}<span class="staffpick" title="Selected using hardware memory fit"><Sparkles size={11} /></span>{/if}
                   {#if badge}<span class="dot task {badge[1]}" title={badge[0]}></span>{/if}
                   {#if m.id.toLowerCase().includes('gguf')}<span class="dot gguf" title="GGUF"></span>{/if}
                   {#if m.gated}<span class="dot warn" title="Gated repo — access request needed"></span>{/if}
@@ -1040,13 +1137,16 @@
               </span>
               <span class="rowner">{ownerOf(m.id)}{#if ownerOf(m.id).toLowerCase() === 'unsloth'}<span class="verified" title="Verified Unsloth">✓</span>{/if}</span>
             </span>
-            <span class="rstats">
-              <span><Heart size={11} /> {fmtN(m.likes)}</span>
-              <span><Download size={11} /> {fmtN(m.downloads)}</span>
-              {#if m.updatedAt}<span class="rago">{fmtAgo(m.updatedAt)}</span>{/if}
+            <ArrowUpRight size={15} class="card-arrow" />
             </span>
+            <span class="card-summary">{m.summary ?? (badge ? badge[0] : 'Explore model details and available downloads.')}</span>
+            <span class="card-tags">{#each (m.skills ?? [badge?.[0] ?? 'Chat']) as skill}<span>{skill}</span>{/each}{#if paramsBOf(m)}<span>{Math.round(paramsBOf(m) * 10) / 10}B</span>{/if}{#if m.contextLength}<span title="Advertised model context window. Available context depends on runtime settings and memory.">{contextLabel(m.contextLength)} context</span>{/if}</span>
+            {#if m.memory}<span class="card-memory"><span class="memory-fit {m.memory.fit}"><span></span>{modelFitLabel(m)}</span><span>{m.memory.bytes ? `${m.memory.estimated ? '~' : ''}${fmtBytes(m.memory.bytes)}${m.suggestedVariant?.quant ? ` · ${m.suggestedVariant.quant.replace('Dynamic ', '')}` : ' Q4'}` : 'Choose a file'}</span></span>{/if}
+            <span class="card-footer"><span><Download size={11} />{fmtN(m.downloads)}<Heart size={11} />{fmtN(m.likes)}</span><span title={m.createdAt ? `GGUF repository created ${new Date(m.createdAt).toLocaleDateString()}` : ''}>{m.createdAt ? fmtAgo(m.createdAt) : 'View files'}</span></span>
           </button>
         {/each}
+        </div>
+        {/if}
 
         {#if loadingMore}
           <div class="loading-more">
@@ -1064,8 +1164,9 @@
         <div bind:this={sentinelEl} class="sentinel"></div>
       </div>
 
-      <div class="detail" use:scrollFade>
-        {#if selectedModel}
+      <div class="detail" bind:this={detailEl} use:scrollFade>
+        <button class="back-results" onclick={() => { mobileViewingDetail = false; requestAnimationFrame(() => listEl?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }}><ChevronRight size={14} /> Browse results</button>
+        {#if selectedModel && !searching}
           {@const v = selectedVariants}
           {@const dlogo = logoFor(selectedModel.id)}
           <div class="dhead">
@@ -1098,6 +1199,8 @@
             {#if selectedModel.gated}<span class="badge warn">gated</span>{/if}
             {#if selectedModel.private}<span class="badge warn">private</span>{/if}
           </div>
+          {#if selectedModel.summary}<p class="detail-summary">{selectedModel.summary}</p>{/if}
+          {#if selectedModel.recommendation}<div class="recommendation-note"><Sparkles size={16} /><span><strong>{selectedModel.recommendation.label}</strong>{selectedModel.recommendation.reason}</span></div>{/if}
 
           {@const qz = selectedQuantizers}
           {#if isMediaTab}
@@ -1108,7 +1211,7 @@
             <div class="qmrow"><span class="qmhint">Loading available quantizations…</span></div>
           {:else if qz?.list?.length}
             <div class="qmrow">
-              <span class="qmlabel">Quant maker</span>
+              <span class="qmlabel">File source</span>
               <div class="qmchips">
                 {#if GGUF_REPO_RE.test(selectedModel.id)}
                   <button class="qmchip" class:active={activeRepo === selectedModel.id}
@@ -1127,7 +1230,7 @@
           {:else if qz?.error}
             <div class="qmrow"><span class="qmhint err">{qz.error}</span></div>
           {:else if qz && !qz.loading}
-            <div class="qmrow"><span class="qmhint">No community GGUF quantization found — browsing this repo's own files.</span></div>
+            <div class="qmrow"><span class="qmhint">Showing files from this repository.</span></div>
           {/if}
 
           {#if isMediaTab}
@@ -1141,6 +1244,7 @@
             {:else}<p class="media-hint">Compatibility depends on the model architecture and installed runtime. Media Studio checks downloaded models before use.</p>{/if}
           {/if}
           <div class="varbar">
+            <div class="choice-heading"><strong>{isMediaTab ? 'Model files' : 'Choose a version'}</strong><span>{isMediaTab ? 'Choose files to download. Media Studio checks runtime support.' : 'The suggested file is selected. Smaller files usually need less memory.'}</span></div>
             {#if !v}
               <span class="vhint">Click a model on the left to load its files…</span>
             {:else if v?.loading}
@@ -1151,11 +1255,17 @@
               </div>
             {:else if v?.error}
               <span class="vhint err">{v.error}</span>
+              <button class="ghost" onclick={() => loadVariants(activeRepo, true)}>Retry file lookup</button>
             {:else if v}
               {@const picked = pickedVariant(v)}
               {@const fits = fittingRows(v)}
               {@const rest = otherRows(v)}
               {#if isMediaTab}
+              {#if v.variants.length > 1}
+                <select class="media-file-select" aria-label="Media model files" value={v.pick ?? '__all__'} onchange={(e) => pickVariant(activeRepo, e.currentTarget.value === '__all__' ? null : e.currentTarget.value)}>
+                  {#each v.variants.filter((row) => !row.companion) as row (row.include ?? row.name)}<option value={row.include ?? '__all__'} disabled={row.complete === false}>{row.name} · {fmtBytes(row.size)}</option>{/each}
+                </select>
+              {/if}
               <div class="vhead mediahead">
                 <span class="qtrigger">
                   <span class="mono">{picked?.name ?? 'Full model'}</span>
@@ -1178,14 +1288,15 @@
                   {/if}
                 {/if}
               </div>
+              {:else if !isMediaTab && v.kind === 'flat'}
+                <div class="nofit"><span>No GGUF version was found for this model. Open its Hugging Face page to check for a compatible conversion.</span></div>
               {:else if !picked && !fits.length}
                 <div class="nofit">
-                  <span>Nothing in this repo fits {hw?.gpuLabel ?? 'this GPU'}
-                    {hw?.ramLabel ? ` + ${hw.ramLabel} RAM` : ''}.
-                    Smallest real quant is {fmtBytes(rest.filter((r) => !r.companion)[0]?.size ?? v.total)}.</span>
+                  <span>{hw?.available === false || hardwareError ? 'Worker memory is unavailable. File fit cannot be checked.' : `No complete model version is estimated to fit the available memory (${hw?.gpuLabel ?? 'unknown'} graphics memory).`}
+                    {#if rest.some((r) => !r.companion)}Smallest model version: {fmtBytes(rest.filter((r) => !r.companion).sort((a, b) => a.size - b.size)[0]?.size)}.{/if}</span>
                   {#if rest.length}
                     <button class="ghost" onclick={() => { showOom = !showOom; quantOpen = true; }}>
-                      {showOom ? 'Hide oversized quants' : `Show oversized quants (${rest.length})`}
+                      {showOom ? 'Hide other versions' : `Browse all versions (${rest.length})`}
                     </button>
                   {/if}
                 </div>
@@ -1202,6 +1313,7 @@
                       {#if v.recommended && picked.include === v.recommended}<span class="reclabel">Recommended</span>{/if}
                     </span>
                     {#if picked.downloaded}<span class="dottag success"><span class="dot"></span>On device</span>{/if}
+                    <span class="qsize mono">{fmtBytes(picked.size)}</span>
                     {#if picked.fit && FIT[picked.fit]}<span class="fitpill {picked.fit}" title={FIT[picked.fit].tip}>{FIT[picked.fit].label}</span>{/if}
                     {#if picked.tps}<span class="tps mono" title="Estimated decode speed on this GPU (9070 XT) at the current free VRAM — rough order-of-magnitude">~{picked.tps} t/s</span>{/if}
                   {:else}
@@ -1220,14 +1332,18 @@
                       <X size={13} />
                     </button>
                   {:else if picked?.downloaded || dlJob?.state === 'done'}
+                    {#if !picked?.companion && picked?.complete !== false}
+                    <button class="dlbtn use-chat" disabled={usingInstalled === `${activeRepo}::${v.pick}`}
+                      onclick={() => useInstalledInChat({ source: 'hf-cache', repoId: activeRepo }, picked)}><Play size={13} />{usingInstalled === `${activeRepo}::${v.pick}` ? 'Opening…' : 'Use in chat'}</button>
                     {#if rs && (rs.status === 'loaded' || rs.status === 'sleeping' || rs.status === 'loading')}
-                      <button class="dlbtn eject" onclick={() => ejectAlias(picked.routerAlias)}>Eject</button>
+                      <button class="dlbtn eject" onclick={() => ejectAlias(picked.routerAlias)}>Unload memory</button>
                     {:else}
-                      <button class="dlbtn load" disabled={registering === `${activeRepo}::${v.pick}`}
+                      <button class="dlbtn load secondary-load" disabled={registering === `${activeRepo}::${v.pick}`}
                         onclick={() => loadIntoVram(activeRepo, v.pick, picked.quant ?? picked.name)}>
                         <Play size={13} /> Load
                       </button>
                     {/if}
+                    {:else}<button class="dlbtn done" disabled>Support file on device</button>{/if}
                   {:else}
                     <button class="dlbtn" onclick={() => download(activeRepo, v.pick)}>
                       <Download size={13} /> Download
@@ -1236,10 +1352,23 @@
                 {/if}
               </div>
               {/if}
+              {#if !isMediaTab && picked}
+                <p class="quant-help">{quantDescription(picked)} {v.recommended && picked.include === v.recommended ? 'Suggested for available memory; actual speed and quality can vary.' : ''}</p>
+                <button class="version-toggle" aria-expanded={quantOpen} onclick={() => (quantOpen = !quantOpen)}><SlidersHorizontal size={13} />{quantOpen ? 'Hide versions' : `Compare ${v.variants.filter((row) => !row.companion).length} versions`}<ChevronDown size={13} /></button>
+                {#if isOwner && getJob(activeRepo, v.pick)?.state === 'running'}
+                  {@const job = getJob(activeRepo, v.pick)}
+                  <div class="selected-job">
+                    <div class="selected-job-copy"><span>{job.totalBytes ? `${fmtPct(job)}% · ` : ''}{fmtBytes(job.downloadedBytes)}{job.totalBytes ? ` / ${fmtBytes(job.totalBytes)}` : ''}</span><span>{job.speedBytesPerSec ? fmtSpeed(job.speedBytesPerSec) : 'Preparing download'}{job.etaSec != null ? ` · ${fmtEta(job.etaSec)} left` : ''}</span></div>
+                    <div class="jbar" class:indeterminate={!job.totalBytes}><div class="jfill" style="width:{job.totalBytes ? fmtPct(job) : 0}%"></div></div>
+                    <button class="ghost job-link" onclick={() => setMode('downloads')}>View download activity <ChevronRight size={12} /></button>
+                  </div>
+                {/if}
+              {/if}
               {#if !isMediaTab && (quantOpen || showOom)}
               <div class="qlist">
                 {#each (showOom || !fits.length ? sortedVariants(v) : fits) as row (row.include ?? row.name)}
                   <div class="qrow" class:sel={v.pick === row.include} class:loaded={row.downloaded} class:companion={row.companion}
+                    aria-disabled={row.complete === false}
                     onclick={() => pickVariant(activeRepo, row.include)}
                     role="button" tabindex="0"
                     onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && pickVariant(activeRepo, row.include)}>
@@ -1259,7 +1388,8 @@
                         <span class="tps mono" title="Estimated decode speed on this GPU at the current free VRAM">~{row.tps} t/s</span>
                       {/if}
                       <span class="qsize mono">{fmtBytes(row.size)}</span>
-                      {#if isOwner && row.include != null}
+                      {#if row.complete === false}<span class="incomplete-label">Missing files</span>
+                      {:else if isOwner && row.include != null}
                         {#if row.downloaded}
                           <button class="qdel" disabled={deleting === row.include}
                             onclick={(e) => { e.stopPropagation(); deleteVariant(activeRepo, row.include, row.name); }}
@@ -1305,7 +1435,8 @@
           {/if}
 
           <div class="stats">
-            {#if selectedModel.updatedAt}<span class="stat">{fmtAgo(selectedModel.updatedAt)}</span>{/if}
+            {#if selectedModel.createdAt}<span class="stat">Added {fmtAgo(selectedModel.createdAt)}</span>{/if}
+            {#if selectedModel.updatedAt}<span class="stat">Updated {fmtAgo(selectedModel.updatedAt)}</span>{/if}
             <span class="stat"><Download size={11} /> {fmtN(selectedModel.downloads)}</span>
             <span class="stat"><Heart size={11} /> {fmtN(selectedModel.likes)}</span>
             {#if v && !v.loading && !v.error}<span class="stat">{fmtBytes(v.total)} total</span>{/if}
@@ -1326,13 +1457,13 @@
   {/if}
   {:else if mode === 'my-models'}
     <div class="mymodels" use:scrollFade>
-      <div class="installed-toolbar">
+      {#if localModels.length}<div class="installed-toolbar">
         <input type="search" aria-label="Search installed models" placeholder="Find an installed model…" bind:value={localQuery} />
         <select aria-label="Filter installed models" bind:value={localFilter}>
-          <option value="all">All models</option><option value="attention">Needs attention</option><option value="ready">Runtime available</option>
+          <option value="all">All files</option><option value="chat">Chat models</option><option value="media">Media models</option><option value="attention">Needs attention</option><option value="ready">Runtime available</option>
         </select>
         <button class="ghost" disabled={localLoading} onclick={() => { loadLocal(); refreshRuntime(); }}>Refresh</button>
-      </div>
+      </div>{/if}
       {#if localError}<p class="installed-error" role="alert">{localError} <button onclick={loadLocal}>Retry</button></p>{/if}
       {#if localLoading}
         <div class="skeleton-list">
@@ -1341,7 +1472,7 @@
           {/each}
         </div>
       {:else if !localModels.length}
-        <div class="empty nodetail">Nothing downloaded yet — switch to Discover to find a model.</div>
+        <div class="empty nodetail model-empty"><Package size={28} /><h2>Your models will appear here</h2><p>Explore models for chat and image creation, then download the ones you want to keep on this machine.</p><button class="ghost" onclick={() => setMode('discover')}>Discover models →</button></div>
       {:else}
         <div class="mmhead">
           <span>{localModels.length} model{localModels.length === 1 ? '' : 's'} on disk</span>
@@ -1364,15 +1495,21 @@
               </span>
               <div class="mminfo">
                 <div class="mmtop">
-                  <span class="mmname">{row.repoId ?? row.variants[0]?.name}</span>
+                  <span class="mmname">{row.label ?? row.repoId ?? row.variants[0]?.name}</span>
                   <span class="mmwhen">{fmtAgo(row.updatedAt)}</span>
                   <span class="mmsize mono">{fmtBytes(row.totalBytes)}</span>
                 </div>
-                <div class="installed-status"><span class:available={readiness.state === 'ready'}>{readiness.label}</span><p>{readiness.detail}</p></div>
+                <div class="installed-status"><span class:available={readiness.state === 'ready'}>{readiness.label}</span>{#if row.source === 'media-components'}<span>ComfyUI media</span>{/if}<p>{readiness.detail}</p></div>
                 <div class="installed-actions">
                   {#if readiness.runtime?.ready}<button class="ghost" onclick={() => openStudio(readiness.runtime.id)}><Play size={12} /> Open Studio</button>{/if}
-                  {#if row.repoId}<button class="ghost" onclick={() => inspectInstalled(row)}>Files & setup <ChevronRight size={12} /></button>{/if}
+                  {#if isOwner && chatVariants(row).length === 1}
+                    {@const variant = chatVariants(row)[0]}
+                    <button class="installed-use" disabled={usingInstalled === `${row.repoId}::${variant.include}`} onclick={() => useInstalledInChat(row, variant)}><Play size={12} /> {usingInstalled === `${row.repoId}::${variant.include}` ? 'Adding…' : 'Use in chat'}</button>
+                  {/if}
+                  {#if row.repoId && row.source.startsWith('hf-cache')}<button class="ghost" onclick={() => inspectInstalled(row)}>Files & setup <ChevronRight size={12} /></button>{/if}
                 </div>
+                <details class="installed-files" open={row.broken}>
+                  <summary>{row.broken ? 'Incomplete files' : `${row.variants.length} file${row.variants.length === 1 ? '' : 's'} on disk`}<ChevronDown size={14} /></summary>
                 {#if row.broken}
                   <div class="qlist">
                     <div class="qrow mmvariant">
@@ -1396,11 +1533,15 @@
                     {#each row.variants as variant (variant.include ?? variant.name)}
                       <div class="qrow mmvariant">
                         <span class="qleft">
-                          <span class="mono qname">{variant.quant ?? variant.name}</span>
+                          <span class="mono qname" title={variant.name}>{variant.quant ?? variant.name}</span>
                         </span>
                         <span class="qright">
                           <span class="qsize mono">{fmtBytes(variant.size)}</span>
-                          {#if isOwner}
+                          {#if isOwner && chatVariants(row).length > 1 && chatVariants(row).includes(variant)}
+                            <button class="variant-use" disabled={usingInstalled === `${row.repoId}::${variant.include}`} onclick={() => useInstalledInChat(row, variant)}>{usingInstalled === `${row.repoId}::${variant.include}` ? 'Adding…' : 'Use in chat'}</button>
+                          {/if}
+                          {#if variant.containsGguf && variant.chatCompatible === false && row.task === 'chat'}<span class="vhint" title="The GGUF files for this version are incomplete">Incomplete</span>{/if}
+                          {#if isOwner && row.source !== 'media-components'}
                             <button class="qdel" disabled={localDeleting === `${row.repoDir}::${variant.include}`}
                               onclick={() => deleteLocalVariant(row, variant)} title="Delete from disk">
                               <Trash2 size={13} />
@@ -1411,6 +1552,7 @@
                     {/each}
                   </div>
                 {/if}
+                </details>
               </div>
             </div>
           {:else}<p class="empty">No installed models match these filters.</p>{/each}
@@ -1420,7 +1562,7 @@
   {:else}
     <div class="downloadstab" use:scrollFade>
       {#if !allDownloads.length}
-        <div class="empty nodetail">No downloads yet — grab a model from Discover.</div>
+        <div class="empty nodetail model-empty"><Download size={28} /><h2>No downloads yet</h2><p>Find a model in Discover. Downloads keep running and remain visible here when you leave this page.</p><button class="ghost" onclick={() => setMode('discover')}>Discover models →</button></div>
       {:else}
         <div class="mmhead">
           <span>{activeDownloadCount} active · {allDownloads.length} total</span>
@@ -1430,8 +1572,7 @@
           {#each allDownloads as j (j.key)}
             <div class="jobbar" class:err={j.state === 'error'} class:done={j.state === 'done'} use:reveal>
               <div class="jtop">
-                <span class="jrepo mono">{j.repoId}</span>
-                {#if j.variant}<span class="jvariant mono">{j.variant}</span>{/if}
+                <div class="job-identity"><strong>{displayName(j.repoId)}</strong><span>{ownerOf(j.repoId)}{#if j.variant} · {j.variant}{/if}</span></div>
                 <span class="dltag {j.state}">{DL_STATE_LABEL[j.state] ?? j.state}</span>
                 {#if j.state === 'running' || j.state === 'cancelling'}
                   <button class="ghost" onclick={() => cancel(j.repoId, j.include)} title="Cancel"><Square size={13} /></button>
@@ -1453,7 +1594,7 @@
                 {/if}
               </span>
               {#if j.state === 'running' && j.totalBytes}
-                <div class="jbar"><div class="jfill" style="width:{fmtPct(j)}%"></div></div>
+                <div class="jbar" role="progressbar" aria-label="Download {j.repoId}" aria-valuenow={fmtPct(j)} aria-valuemin="0" aria-valuemax="100"><div class="jfill" style="width:{fmtPct(j)}%"></div></div>
               {:else if j.state === 'running'}
                 <div class="jbar indeterminate"></div>
               {/if}
@@ -1475,6 +1616,10 @@
   .installed-status p { flex:1; min-width:180px; margin:0; color:var(--text-dim); line-height:1.6; }
   .installed-actions { display:flex; gap:8px; margin-bottom:10px; }
   .installed-actions button { display:inline-flex; align-items:center; gap:6px; font-size:11px; }
+  .installed-actions .installed-use, .variant-use { border:1px solid var(--accent-deep); background:var(--accent-deep); color:var(--on-accent); border-radius:7px; padding:7px 10px; font-size:11px; font-weight:600; }
+  .installed-actions .installed-use:hover:not(:disabled), .variant-use:hover:not(:disabled) { background:var(--accent); }
+  .variant-use { flex-shrink:0; }
+  .installed-actions button:disabled, .variant-use:disabled { opacity:.55; cursor:default; }
   .installed-error { color:var(--red); }
   .download-summary { flex-shrink: 0; display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 12px 14px; margin: 0 0 12px; border: 1px solid var(--border-soft); background: var(--bg-card); border-radius: calc(10px * var(--rf)); text-align: left; color: var(--text-dim); }
   .download-summary:hover { background: var(--bg-hover); }
@@ -1484,8 +1629,7 @@
   .download-progress { font-size: 12px; font-variant-numeric: tabular-nums; }
   @media(max-width: 768px) { .download-copy { flex-direction: column; gap: 3px; } .download-copy span { max-width: 140px; } .download-progress { font-size: 11px; } }
 
-  /* Unsloth Hub layout: the panel is a fixed frame — header + toolbar stay
-     pinned, only the two columns scroll. No page-level scrolling at all. */
+  /* Keep navigation in view while the model list and detail scroll. */
   .hub {
     flex: 1; min-height: 0; display: flex; flex-direction: column;
     max-width: 1600px; width: 100%; margin: 0 auto;
@@ -1496,21 +1640,10 @@
 
   .head {
     display: flex; align-items: flex-start; justify-content: space-between;
-    gap: 16px; margin-bottom: 26px; flex-shrink: 0; flex-wrap: wrap;
+    gap: 16px; margin-bottom: 18px; flex-shrink: 0; flex-wrap: wrap;
   }
   h1 { margin: 6px 0; font-size:30px; font-weight:600; letter-spacing:-1.1px; }
   .title p { margin: 4px 0 0; font-size: 13px; color: var(--text-dim); max-width: 560px; }
-  .pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 11.5px; font-weight: 600; color: var(--text-dim);
-    padding: 5px 11px; border-radius: 999px;
-    border: 1px solid var(--border-soft); background: var(--bg-card);
-    white-space: nowrap;
-  }
-  .pill.live { color: var(--text); }
-  .pill .dot.live { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-
   /* Discover / My Models — same segmented-pill look as .tabs */
   .modebar {
     display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 9px;
@@ -1538,15 +1671,16 @@
 
   .recstrip { flex-shrink: 0; margin: 0 0 16px; }
   .recstrip summary { cursor: pointer;
-    margin: 0 0 10px; font-size: 15px; font-weight: 650; letter-spacing: -0.02em;
-    display: list-item; line-height: 1.4; color: var(--text-dim); font-size: 12px; font-weight: 500;
+    margin: 0 0 10px; font-size: 13px; font-weight: 650; letter-spacing: -0.01em;
+    display: list-item; line-height: 1.45; color: var(--text);
   }
+  .recstrip summary span { font-size: 11.5px; font-weight: 400; letter-spacing: 0; color: var(--text-dim); margin-left: 6px; }
   .carousel {
     display: flex; gap: 12px; overflow-x: auto; padding: 0 0 4px;
     scrollbar-width: thin;
   }
   .mcard {
-    flex: 0 0 196px; height: 118px; border-radius: 16px; padding: 12px 14px;
+    flex: 0 0 196px; min-height: 128px; border-radius: 16px; padding: 12px 14px;
     display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
     text-align: left; border: 1px solid transparent; box-sizing: border-box;
     background: var(--bg-raised); border-color:var(--border-soft);
@@ -1898,6 +2032,11 @@
   .fromrepo { font-size: 10.5px; color: var(--text-faint); margin: -6px 0 14px; }
 
   .varbar { margin-bottom: 14px; }
+  .quant-help { margin: 0 0 12px; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+  .selected-job { margin: 0 0 16px; padding: 12px; background: var(--bg-raised); border: 1px solid var(--border-soft); border-radius: 10px; }
+  .selected-job-copy { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 8px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  .selected-job .jbar { margin-bottom: 6px; }
+  .job-link { display: inline-flex; align-items: center; gap: 3px; color: var(--accent); font-size: 11px; padding: 3px 0; }
   .vhint { font-size: 12.5px; color: var(--text-faint); }
   .vhint.err { color: var(--red); }
   .qskeleton { display: flex; flex-direction: column; gap: 6px; }
@@ -2000,6 +2139,11 @@
   .mono { font-family: var(--mono); }
 
   .empty.nodetail { flex: 1; display: flex; align-items: center; justify-content: center; }
+  .empty.model-empty { flex-direction:column; gap:10px; padding:56px 20px; }
+  .model-empty :global(svg) { color:var(--accent); }
+  .model-empty h2 { margin:3px 0 0; color:var(--text); font-size:18px; font-weight:600; }
+  .model-empty p { max-width:390px; margin:0 0 10px; color:var(--text-dim); font-size:13px; line-height:1.6; }
+  .model-empty button { min-height:40px; padding:0 15px; border:1px solid var(--border-soft); border-radius:9px; }
 
   @media (max-width: 900px) {
     .hub { padding: 14px 14px 10px; }
@@ -2007,6 +2151,7 @@
     .list { flex: 0 0 auto; max-height: 46vh; width: 100%; }
     .detail { overflow-y: visible; min-height: 0; }
     .head { flex-direction: column; gap: 8px; }
+    .recstrip summary span { display: block; margin-left: 0; }
   }
   .filters-shell { margin:0 0 18px; flex-shrink:0; }
   .filters-shell summary { cursor:pointer; font-size:11px; color:var(--text-dim); }
@@ -2017,4 +2162,156 @@
   .runtime-note.ready strong { color:var(--green); }
   .runtime-note .dlbtn { flex-shrink:0; }
   @media(max-width:760px) { .hub { padding:20px 16px 12px; }.runtime-note { flex-wrap:wrap; } }
+
+  /* A single path through discovery: search, category, model, file. */
+  .head { align-items: center; margin-bottom: 22px; }
+  .head h1 { margin: 0; font-size: clamp(24px, 2.3vw, 30px); }
+  .title p { margin-top: 7px; line-height: 1.45; }
+  .device-info { position: relative; flex-shrink: 0; z-index: 5; }
+  .device-info summary {
+    list-style: none; display: flex; align-items: center; gap: 8px; cursor: pointer;
+    min-height: 36px; padding: 0 11px; border-radius: 9px; border: 1px solid var(--border-soft);
+    color: var(--text-dim); background: var(--bg-card); font-size: 12px; font-weight: 600;
+  }
+  .device-info summary::-webkit-details-marker { display: none; }
+  .device-info summary span { color: var(--text-faint); font-weight: 500; }
+  .device-info[open] summary { border-color: var(--border); color: var(--text); }
+  .device-info[open] summary :global(svg:last-child) { transform: rotate(180deg); }
+  .device-details {
+    position: absolute; right: 0; top: calc(100% + 7px); min-width: 260px;
+    display: grid; gap: 10px; padding: 15px; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--bg-card); box-shadow: 0 14px 35px rgba(0,0,0,.2);
+    font-size: 12px; color: var(--text-dim);
+  }
+  .device-details span { display: flex; justify-content: space-between; gap: 20px; }
+  .device-details strong { color: var(--text); font-weight: 600; text-align: right; }
+  .modebar {
+    width: 100%; height: auto; gap: 24px; padding: 0; margin-bottom: 22px;
+    border-radius: 0; border-bottom: 1px solid var(--border-soft); background: transparent;
+  }
+  .modebtn {
+    height: 40px; padding: 0 2px; border-radius: 0; border-bottom: 2px solid transparent;
+    font-size: 13px; color: var(--text-dim);
+  }
+  .modebtn.on { background: transparent; box-shadow: none; border-bottom-color: var(--accent); color: var(--text); }
+  .modebadge { margin-left: 7px; }
+  .discover-controls { display: grid; gap: 16px; margin-bottom: 12px; flex-shrink: 0; }
+  .discover-search { display: flex; align-items: center; gap: 10px; width: 100%; }
+  .discover-search .searchbox {
+    flex: 1 1 auto; max-width: none; min-width: 0; height: 43px;
+    border-radius: 10px; padding: 0 14px; background: var(--bg-card);
+  }
+  .discover-search .searchbox input { font-size: 13px; }
+  .discover-search .fselect, .discover-search .fselect select { height: 43px; }
+  .discover-search .fselect select { min-width: 138px; border-radius: 10px; background: var(--bg-card); }
+  .repo-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    height: 43px; padding: 0 13px; white-space: nowrap; border: 1px solid var(--border-soft);
+    border-radius: 10px; background: var(--bg-card); color: var(--text-dim); font-size: 12px; font-weight: 600;
+  }
+  .repo-btn:hover, .repo-btn[aria-expanded="true"] { color: var(--text); background: var(--bg-hover); }
+  .discover-controls .tabs {
+    width: fit-content; height: auto; gap: 5px; padding: 0; border-radius: 0;
+    background: transparent; max-width: 100%; overflow-x: auto;
+  }
+  .discover-controls .tab {
+    flex-shrink: 0; height: 34px; padding: 0 15px; border: 1px solid var(--border-soft);
+    border-radius: 8px; background: transparent; color: var(--text-dim);
+  }
+  .discover-controls .tab.active { color: var(--text); background: var(--bg-card); border-color: var(--accent-dim); box-shadow: none; }
+  .pasterow { margin: 0 0 10px; }
+  .pasterow .paste { width: min(480px, 100%); height: 40px; border-radius: 9px; box-sizing: border-box; }
+  .filters-shell { margin-bottom: 18px; }
+  .filters-shell summary { width: fit-content; padding: 3px 0; font-size: 12px; font-weight: 600; }
+  .filter-group { display: grid; gap: 8px; }
+  .filter-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); }
+  .filters-shell .filters { display: grid; gap: 16px; margin: 12px 0 0; padding: 16px; border: 1px solid var(--border-soft); border-radius: 12px; background: var(--bg-card); }
+  .filters-shell .fg { gap: 8px; }
+  .clear-filters { justify-self: start; border: 0; padding: 4px 0; background: transparent; color: var(--accent); font-size: 12px; }
+  .recstrip { margin-bottom: 16px; }
+  .recstrip summary { margin-bottom: 8px; color: var(--text-dim); }
+  .recstrip[open] summary { color: var(--text); }
+  .split { gap: 22px; }
+  .list { flex-basis: clamp(300px, 32%, 390px); }
+  .rrow { grid-template-columns: 40px minmax(0, 1fr) auto; min-height: 64px; padding: 10px; }
+  .rstats span:first-child, .rstats .rago { display: none; }
+  .detail { padding: 24px; scroll-margin-top: 12px; }
+  .choice-heading { display: grid; gap: 3px; margin: 0 0 13px; }
+  .choice-heading strong { color: var(--text); font-size: 13px; font-weight: 650; }
+  .choice-heading span { color: var(--text-faint); font-size: 11px; line-height: 1.45; }
+  .back-results { display: none; }
+  .installed-toolbar { max-width: 1100px; margin-bottom: 20px; }
+  .installed-toolbar input, .installed-toolbar select { min-height: 40px; border-radius: 9px; }
+  .mymodels .mmlist, .downloadstab .mmlist { max-width: 1100px; gap: 12px; }
+  .mmrow { padding: 18px; gap: 16px; border-radius: 13px; }
+  .mminfo { gap: 9px; }
+  .mmname { font-size: 14px; }
+  .installed-status { margin: 0; font-size: 12px; }
+  .installed-status p { line-height: 1.5; }
+  .installed-actions { margin: 0; flex-wrap: wrap; }
+  .installed-actions button { min-height: 32px; }
+  .installed-files { margin-top: 5px; border-top: 1px solid var(--border-soft); }
+  .installed-files summary {
+    display: flex; align-items: center; gap: 5px; width: fit-content; padding: 11px 0 2px;
+    list-style: none; cursor: pointer; color: var(--text-dim); font-size: 12px; font-weight: 600;
+  }
+  .installed-files summary::-webkit-details-marker { display: none; }
+  .installed-files[open] summary :global(svg) { transform: rotate(180deg); }
+  .installed-files .qlist { margin-top: 8px; }
+  .jobbar { max-width: 1100px; padding: 17px 19px; margin: 0; gap: 12px; border-radius: 13px; }
+  .job-identity { display: grid; gap: 4px; flex: 1; min-width: 0; }
+  .job-identity strong { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-identity span { font-size: 11px; color: var(--text-faint); overflow-wrap: anywhere; }
+  .jobbar .jline { font-family: inherit; font-size: 12px; white-space: normal; line-height: 1.4; }
+  .jobbar .jbar { height: 6px; }
+  .downloadstab .mmhead, .mymodels .mmhead { max-width: 1100px; }
+  @media (max-width: 900px) {
+    .hub { padding: 18px 18px 16px; }
+    .head { flex-direction: row; align-items: flex-start; gap: 10px; }
+    .list { max-height: min(38vh, 340px); padding-bottom: 8px; }
+    .detail { scroll-margin-top: 8px; }
+    .split:not(.show-detail) .detail, .split.show-detail .list { display: none; }
+    .split.show-detail .detail { display: block; flex: 1; }
+    .hub.mobile-detail .discover-controls, .hub.mobile-detail .filters-shell,
+    .hub.mobile-detail .recstrip, .hub.mobile-detail .download-summary { display: none; }
+    .back-results { display: inline-flex; align-items: center; gap: 5px; margin: 0 0 16px; padding: 0; border: 0; background: transparent; color: var(--accent); font-size: 12px; font-weight: 600; }
+    .back-results :global(svg) { transform: rotate(180deg); }
+  }
+  @media (max-width: 600px) {
+    .hub { padding: 16px 14px max(16px, env(safe-area-inset-bottom)); }
+    .head { flex-wrap: wrap; margin-bottom: 16px; }
+    .head h1 { font-size: 24px; }
+    .title p { font-size: 12px; }
+    .device-info { width: 100%; }
+    .device-info summary { width: fit-content; box-sizing: border-box; }
+    .device-details { left: 0; right: auto; max-width: calc(100vw - 28px); min-width: min(280px, calc(100vw - 28px)); box-sizing: border-box; }
+    .modebar { gap: 0; justify-content: space-between; margin-bottom: 16px; }
+    .modebtn { padding: 0 5px; font-size: 12px; }
+    .discover-controls { gap: 12px; }
+    .discover-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .discover-search .searchbox { grid-column: 1 / -1; width: 100%; }
+    .discover-search .fselect { min-width: 0; }
+    .discover-search .fselect select { width: 100%; min-width: 0; }
+    .repo-btn { padding: 0 11px; }
+    .discover-controls .tabs { width: 100%; }
+    .discover-controls .tab { padding: 0 12px; font-size: 11px; }
+    .mmrow { padding: 14px; gap: 10px; }
+    .mmrow .avatar { width: 34px; height: 34px; border-radius: 9px; }
+    .mmtop { flex-wrap: wrap; }
+    .mmname { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+    .mmwhen { display: none; }
+    .mmsize { margin-left: 0; }
+    .installed-status { gap: 6px; }
+    .installed-status p { flex-basis: 100%; min-width: 0; }
+    .installed-actions { gap: 5px; }
+    .mmvariant { flex-wrap: wrap; }
+    .mmvariant .qleft { flex-basis: 100%; }
+    .mmvariant .qright { width: 100%; justify-content: flex-end; }
+    .download-summary { gap: 8px; }
+    .download-progress { max-width: 90px; text-align: right; }
+    .detail { padding: 18px; }
+    .dhead { flex-wrap: wrap; }
+    .dacts { margin-left: auto; }
+    .jobbar { padding: 14px; }
+  }
 </style>

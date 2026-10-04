@@ -1,9 +1,11 @@
 <script>
   import { untrack } from 'svelte';
-  import { api, sse, sseGet } from '../lib/api.js';
+  import { api, sseGet } from '../lib/api.js';
   import { prefs, savePrefs } from '../lib/prefs.svelte.js';
+  import { recordDuckEvent, textReaction } from '../lib/duck-signals.js';
+  import { activeContext } from '../lib/mascot-beats.js';
   import {
-    app, childrenMap, compactNow, deepestLeaf, loadConversations, loadModels, localWorkspace, newConversation, openConversation, refreshContext, visiblePath,
+    app, childrenMap, deepestLeaf, loadConversations, loadModels, localWorkspace, newConversation, openConversation, refreshContext, visiblePath,
   } from '../lib/state.svelte.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
 import { toast } from '../lib/toast.svelte.js';
@@ -19,10 +21,43 @@ import ChatFiles from './ChatFiles.svelte';
   import Globe from '@lucide/svelte/icons/globe';
   import Lightbulb from '@lucide/svelte/icons/lightbulb';
   import Paperclip from '@lucide/svelte/icons/paperclip';
-  import Telescope from '@lucide/svelte/icons/telescope';
   import Square from '@lucide/svelte/icons/square';
+  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
 
   let input = $state('');
+  let composerOptionsOpen = $state(false);
+  let projectFilesOpen = $state(!window.matchMedia('(max-width: 1100px)').matches);
+  $effect(() => {
+    const mobile = window.matchMedia('(max-width: 768px)');
+    const collapse = event => { if (event.matches) projectFilesOpen = false; };
+    mobile.addEventListener('change', collapse);
+    return () => mobile.removeEventListener('change', collapse);
+  });
+  const composerId = $props.id();
+  let optionsPanel = $state(null), optionsTrigger = $state(null);
+  $effect(() => {
+    if (!optionsPanel) return;
+    if (composerOptionsOpen) optionsPanel.showModal();
+    else optionsPanel.close();
+  });
+  $effect(() => {
+    if (!composerOptionsOpen) return;
+    const dismiss = event => {
+      const bounds = optionsPanel?.getBoundingClientRect();
+      const backdrop = event.target === optionsPanel && bounds
+        && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom);
+      if (backdrop || (!optionsPanel?.contains(event.target) && !optionsTrigger?.contains(event.target))) composerOptionsOpen = false;
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  });
+  function optionsKey(event) {
+    if (event.key === 'Escape' && composerOptionsOpen) {
+      event.preventDefault(); event.stopPropagation();
+      composerOptionsOpen = false; optionsTrigger?.focus();
+    }
+  }
   let draftOwner = null;
   // Save on every input change and before navigation/unmount. Using a captured
   // store prevents a departing account's draft from being saved to another account.
@@ -47,10 +82,6 @@ import ChatFiles from './ChatFiles.svelte';
   let pendThink = '';
   let toolBuf = null; // { index, name, args } — streaming tool-call arguments
   let ctxPromptBaseline = null; // last server-reported prompt size → tok_s grows the bar live
-
-  // ----- follow-up prompt chips (messageId → string[]) -----
-  let followups = $state(null); // { messageId, items: string[], loading?: boolean } | null
-  let followupsConvId = null;
 
   // ----- message queue (send while AI is busy) -----
   let msgQueue = $state([]); // { id, content }[]
@@ -193,6 +224,7 @@ import ChatFiles from './ChatFiles.svelte';
   function handleEvent(ev, convId) {
     const s = app.streaming;
     const here = app.conv?.id === convId;
+    recordDuckEvent(s, ev);
     switch (ev.type) {
       case 'user_msg':
         if (here) { if (!app.conv.messages.some(m => m.id === ev.msg.id)) app.conv.messages.push(ev.msg); app.conv.active_leaf_id = ev.msg.id; scrollToBottom(true); }
@@ -279,6 +311,7 @@ import ChatFiles from './ChatFiles.svelte';
           s.events?.push(e);
         } else if (e.type === 'status') {
           if (e.status !== 'waiting_approval') s.pendingApproval = null;
+          s.events?.push(e);
         } else {
           s.events?.push(e);
         }
@@ -292,22 +325,9 @@ import ChatFiles from './ChatFiles.svelte';
           if (!app.conv.messages.some(m => m.id === ev.msg.id)) app.conv.messages.push(ev.msg);
           app.conv.active_leaf_id = ev.msg.id;
           if (ev.msg.run_id) app.filesVersion++;
-          // chips load after the model finishes a second cheap pass
-          followups = { messageId: ev.msg.id, items: [], loading: true };
-          followupsConvId = convId;
           scrollToBottom();
         }
         app.streaming = null;
-        break;
-      case 'followups':
-        // short clickable next-messages under the just-finished reply
-        if (here && ev.messageId && Array.isArray(ev.items) && ev.items.length) {
-          followups = { messageId: ev.messageId, items: ev.items.slice(0, 3), loading: false };
-          followupsConvId = convId;
-          scrollToBottom();
-        } else if (here && followups?.loading && followups.messageId === ev.messageId) {
-          followups = null; // model returned nothing useful
-        }
         break;
       case 'image_job':
         if (s) { s.loading = false; s.image = { prompt: ev.prompt, phase: 'starting', step: null, steps: null, preview: null }; }
@@ -337,31 +357,41 @@ import ChatFiles from './ChatFiles.svelte';
         if (!s) break;
         s.loading = false;
         const se = (s.search ??= { steps: [], sources: [], active: true });
+        const currentStep = () => ev.query_id != null ? se.steps.find(step => step.id === ev.query_id) : se.steps.at(-1);
         if (ev.phase === 'begin') se.active = true;
-        else if (ev.phase === 'query') se.steps.push({ query: ev.query, sites: [] });
-        else if (ev.phase === 'reading') se.reading = ev.domain;
+        else if (ev.phase === 'query') {
+          if (ev.query_id == null || !currentStep()) se.steps.push({ id: ev.query_id, query: ev.query, status: ev.status, sites: [] });
+        } else if (ev.phase === 'query_done') {
+          const step = currentStep();
+          if (step) { step.status = ev.status; if (ev.error) step.error = ev.error; else delete step.error; }
+        } else if (ev.phase === 'reading') {
+          se.reading = ev.domain; se.readingQuery = ev.query_id;
+          const step = currentStep(); if (step) step.status = 'reading';
+        }
         else if (ev.phase === 'site') {
-          const step = se.steps[se.steps.length - 1];
+          const step = currentStep();
           if (step) {
             let site = step.sites.find((x) => x.url === ev.url);
             if (!site) { site = { title: ev.title, url: ev.url, domain: ev.domain, read: false, snippet: ev.snippet || '' }; step.sites.push(site); }
             if (ev.title) site.title = ev.title;
             if (ev.snippet && !site.snippet) site.snippet = ev.snippet;
+            if (ev.status) site.status = ev.status;
+            if (ev.error) site.error = ev.error; else if (ev.status === 'read') delete site.error;
             if (ev.read) {
               site.read = true;
               if (!se.sources.find((x) => x.url === ev.url)) se.sources.push({ title: ev.title || ev.url, url: ev.url, domain: ev.domain });
             }
           }
-          se.reading = null;
-        } else if (ev.phase === 'done') { se.active = false; se.reading = null; }
+          if (se.readingQuery == null || se.readingQuery === ev.query_id) { se.reading = null; se.readingQuery = null; }
+        } else if (ev.phase === 'done') { se.active = false; se.reading = null; se.readingQuery = null; }
         if (here) scrollToBottom();
         break;
       }
       case 'reset_text':
         // a new search round begins — drop the last round's partial answer text
         if (raf) { cancelAnimationFrame(raf); raf = 0; }
-        pendText = '';
-        if (s) s.text = '';
+        pendText = ''; toolBuf = null;
+        if (s) { s.text = ''; s.liveTool = null; }
         break;
       case 'widget':
         // an interactive card the model summoned — show it live; it's also baked
@@ -390,7 +420,17 @@ import ChatFiles from './ChatFiles.svelte';
         if (here && ev.message) toast(`Generation hit an error — work kept. Say continue to pick up.`, 'error', 4200);
         break;
       case 'resume': {
+        // Resume is an authoritative snapshot, including intentionally empty
+        // text after reset_text. Discard unpainted fragments from the old tail.
+        if (raf) { cancelAnimationFrame(raf); raf = 0; }
+        pendText = ''; pendThink = ''; toolBuf = null;
         const workspaceId = ev.workspace?.id ?? ev.run?.workspace_id;
+        // The detached POST can save the prompt before the GET attaches.
+        // Replay its real message id so the tree stays correct on fast starts.
+        if (here && ev.userMsg && !app.conv.messages.some((m) => m.id === ev.userMsg.id)) {
+          app.conv.messages.push(ev.userMsg);
+          app.conv.active_leaf_id = ev.userMsg.id;
+        }
         if (here && workspaceId && !app.conv.workspace_id) {
           app.conv.workspace_id = workspaceId;
           app.filesVersion++;
@@ -402,6 +442,7 @@ import ChatFiles from './ChatFiles.svelte';
         // Reattach after refresh: restore the live bubble from the server snapshot.
         // If the job already finished, apply the final message and clear.
         if (ev.status === 'done' && ev.finalMsg) {
+          recordDuckEvent(s, { type: 'done', msg: ev.finalMsg, outcome: ev.outcome });
           if (here && !app.conv.messages.some((m) => m.id === ev.finalMsg.id)) {
             app.conv.messages.push(ev.finalMsg);
             app.conv.active_leaf_id = ev.finalMsg.id;
@@ -410,6 +451,7 @@ import ChatFiles from './ChatFiles.svelte';
           break;
         }
         if (ev.status === 'stopped' || ev.status === 'error') {
+          if (s) s.duckOutcome = ev.status;
           // Prefer a server-saved finalMsg (has a real id on the tree)
           if (ev.finalMsg) {
             if (here && !app.conv.messages.some((m) => m.id === ev.finalMsg.id)) {
@@ -429,8 +471,15 @@ import ChatFiles from './ChatFiles.svelte';
           app.streaming = null;
           break;
         }
+        // The server retains the complete partial JSON argument buffer. Keep
+        // that prefix so later tool_delta fragments continue the same call.
+        const resumedTool = ev.liveTool && typeof ev.liveTool.args === 'string'
+          ? { index: ev.liveTool.index, name: ev.liveTool.name, args: ev.liveTool.args }
+          : null;
+        toolBuf = resumedTool;
         app.streaming = {
           convId,
+          jobId: ev.jobId ?? null,
           text: ev.text || '',
           thinking: ev.thinking || '',
           tokS: ev.tokS ?? null,
@@ -439,7 +488,7 @@ import ChatFiles from './ChatFiles.svelte';
           error: ev.error ?? null,
           run: ev.run ?? null,
           events: ev.events ?? [],
-          liveTool: ev.liveTool ?? null,
+          liveTool: resumedTool ? parseLiveTool(resumedTool) : ev.liveTool ?? null,
           lastWrite: ev.lastWrite ?? null,
           pendingApproval: ev.pendingApproval ?? null,
           image: ev.image ?? null,
@@ -447,8 +496,12 @@ import ChatFiles from './ChatFiles.svelte';
           queued: ev.queued ?? 0,
           search: ev.search ?? null,
           widgets: ev.widgets ?? [],
+          // Reattachments preserve the latest observed phase for this job.
+          duckPhase: ev.phase ?? (s?.jobId === ev.jobId ? s.duckPhase : null),
+          duckCue: textReaction(ev.userMsg?.content) ?? (s?.jobId === ev.jobId ? s.duckCue : null),
+          duckOutcome: ev.outcome ?? (s?.jobId === ev.jobId ? s.duckOutcome : null),
+          duckStatus: [...(ev.events ?? [])].reverse().find(e => e.type === 'status')?.status ?? null,
         };
-        pendText = ''; pendThink = ''; toolBuf = null;
         if (here) scrollToBottom(true);
         break;
       }
@@ -461,6 +514,7 @@ import ChatFiles from './ChatFiles.svelte';
   function emptyStreaming(convId) {
     return {
       convId, text: '', thinking: '', tokS: null, n: 0, loading: false, error: null,
+      jobId: null,
       run: null, events: [], liveTool: null, lastWrite: null, pendingApproval: null,
       image: null, diffusion: null, queued: 0,
       search: null, widgets: [],
@@ -470,7 +524,7 @@ import ChatFiles from './ChatFiles.svelte';
   let intentionalStop = false;
   let resumeToken = 0;
   let resuming = false;
-  let reconnectBudget = 0;
+  let reconnectFailures = 0;
 
   /** Resolve a parent id the server will accept (no tmp-* client leaves). */
   function realParentId() {
@@ -492,38 +546,43 @@ import ChatFiles from './ChatFiles.svelte';
     app.streaming = emptyStreaming(convId);
     pendText = ''; pendThink = ''; toolBuf = null;
     intentionalStop = false;
-    reconnectBudget = 3;
+    reconnectFailures = 0;
     // Always pass a real DB parent so "continue" after a drop stays on the same branch
     const outBody = {
       ...body,
       parentId: body.parentId !== undefined ? body.parentId : realParentId(),
       researchMode: prefs.researchMode,
     };
-    stream = sse(`/api/conversations/${convId}/chat`, outBody, (ev) => handleEvent(ev, convId));
-    let reattached = false;
+    let started = false;
     try {
-      await stream.done;
+      // The POST only creates the server job. Read progress through a separate
+      // live feed so a proxy's request limit cannot interrupt generation.
+      const accepted = await api(`/api/conversations/${convId}/chat`, { method: 'POST', body: outBody });
+      if (app.streaming?.convId === convId) app.streaming.jobId = accepted.jobId ?? null;
+      started = true;
+      await tryResume(convId, { nested: true });
     } catch (err) {
       if (err?.name === 'AbortError') { /* stop / tab close */ }
-      else if (/already generating/i.test(String(err.message ?? ''))) {
-        // Server still working — reattach live bubble, do not start a new turn / wipe
-        toast('Still generating — reconnected to the live reply', 'ok');
-        reattached = true;
-        await tryResume(convId, { nested: false });
+      else if (err?.status === 409) {
+        // Another tab started this conversation first. Its job remains the
+        // source of truth; show it instead of creating a second generation.
+        if (body.content && !input) input = body.content;
+        toast('This chat is already replying. Your message is ready in the composer.', 'ok');
+        started = true;
+        await tryResume(convId, { nested: true });
       } else if (app.streaming) {
         app.streaming.error = String(err.message ?? err);
       }
     } finally {
-      // tryResume owns the live tail when we reattached to an in-flight job
-      if (!reattached) await endStream(convId);
+      if (started) await endStream(convId);
+      else {
+        if (app.streaming?.convId === convId) app.streaming = null;
+        if (app.conv?.id === convId) {
+          if (body.content && !input) input = body.content;
+          toast('Could not start the reply. Your message is ready in the composer.', 'error');
+        }
+      }
     }
-  }
-
-  function snapHasContent(snap) {
-    if (!snap) return false;
-    return !!(snap.text || snap.thinking || snap.error || snap.run
-      || snap.events?.length || snap.liveTool || snap.lastWrite
-      || snap.widgets?.length || snap.image || snap.diffusion);
   }
 
   function codeFenceFromWrite(w) {
@@ -600,7 +659,6 @@ import ChatFiles from './ChatFiles.svelte';
       stream = null;
       if (app.conv?.id === convId) {
         refreshContext();
-        maybeAutoCompact();
         if (!app.streaming) pumpQueue(convId);
       }
       return;
@@ -610,79 +668,62 @@ import ChatFiles from './ChatFiles.svelte';
       promoteSnapToMessage(convId, snap, '\n\n> stopped');
       app.streaming = null;
       stream = null;
-    } else if (reconnectBudget > 0 && app.conv?.id === convId) {
-      // Unexpected local disconnect (proxy timeout, blip). KEEP the live bubble
-      // visible while we reattach — never blank the thread.
-      reconnectBudget -= 1;
-      stream = null;
-      // Mark reconnecting so UI can still show the bubble (streaming stays set)
-      if (app.streaming?.convId === convId) app.streaming.loading = true;
-      // Soft-reattach without clearing the bubble. tryResume waits until the
-      // live tail ends (done / stream_end / network drop).
-      await tryResume(convId, { preserveSnap: snap, nested: true });
-      if (app.streaming?.convId === convId) {
-        // Live tail died again while still generating — fall through to save
-        // partial or keep trying until budget is gone
-        if (reconnectBudget > 0) {
-          reconnectBudget -= 1;
-          await tryResume(convId, { preserveSnap: app.streaming, nested: true });
-        }
-      }
-      if (app.streaming?.convId === convId) {
-        // Still no clean finish — park partial so it never vanishes
-        promoteSnapToMessage(convId, app.streaming, '\n\n> connection dropped — partial reply kept');
-        toast('Connection dropped — partial kept. Say continue to pick up.', 'error', 4500);
-        app.streaming = null;
-      } else {
-        // done applied (incl. server-saved interrupt) — refresh from DB so continue
-        // hangs under a real message id, not a tmp-* leaf
-        try { await openConversation(convId); } catch { /* ignore */ }
-      }
-      stream = null;
     } else {
-      // Out of reconnect attempts — keep whatever we had
-      if (snapHasContent(snap)) {
-        promoteSnapToMessage(convId, snap, '\n\n> connection lost');
-        toast('Connection lost — partial kept. Say continue to pick up.', 'error', 4500);
+      // Proxy timeouts and lost tabs affect only this viewer. Keep the job and
+      // its live bubble, then attach again until the server reports completion.
+      stream = null;
+      while (app.streaming?.convId === convId && !intentionalStop) {
+        app.streaming.loading = true;
+        const result = await tryResume(convId, { nested: true });
+        if (!app.streaming || app.streaming.convId !== convId) break;
+        if (result?.active === false) {
+          // The server has no job (finished during a long outage, or restarted).
+          // Reload saved messages before deciding whether a partial is needed.
+          if (app.conv?.id === convId) {
+            try { await openConversation(convId); } catch { /* keep local snapshot */ }
+            promoteSnapToMessage(convId, app.streaming, '\n\n> connection lost — partial reply kept');
+          }
+          app.streaming = null;
+          break;
+        }
+        reconnectFailures += 1;
+        const pause = Math.min(8_000, 500 * 2 ** Math.min(reconnectFailures, 4));
+        await new Promise((resolve) => setTimeout(resolve, pause));
       }
-      app.streaming = null;
+      if (intentionalStop && app.streaming?.convId === convId) {
+        promoteSnapToMessage(convId, app.streaming, '\n\n> stopped');
+        app.streaming = null;
+        intentionalStop = false;
+      }
       stream = null;
     }
 
     if (app.conv?.id === convId) {
       refreshContext();
-      maybeAutoCompact();
       if (!app.streaming) pumpQueue(convId);
     }
   }
 
   // After refresh / open conversation: reattach to a still-running generation.
-  // preserveSnap: merge local text if the server snapshot is empty mid-blip.
+  // Keep the local bubble during a blip until an authoritative snapshot arrives.
   // nested: called from endStream — do NOT re-enter endStream (avoids loops).
-  async function tryResume(convId, { preserveSnap = null, nested = false } = {}) {
+  async function tryResume(convId, { nested = false } = {}) {
     if (!convId || resuming) return;
     // Allow resume even when streaming is set (soft reconnect after blip)
-    if (app.streaming && app.streaming.convId !== convId && !preserveSnap) return;
+    if (app.streaming && app.streaming.convId !== convId) return;
     resuming = true;
     const token = ++resumeToken;
     try {
       let gotResume = false;
-      const handle = sseGet(`/api/conversations/${convId}/live`, (ev) => {
+      let status = null;
+      const jobId = app.streaming?.convId === convId ? app.streaming.jobId : null;
+      const path = `/api/conversations/${convId}/live${jobId ? `?jobId=${encodeURIComponent(jobId)}` : ''}`;
+      const handle = sseGet(path, (ev) => {
         if (token !== resumeToken) return;
         if (ev.type === 'resume') {
           gotResume = true;
-          if (reconnectBudget <= 0) reconnectBudget = 3;
-          // If resume snapshot is empty but we still have local text, merge it
-          // so a blip mid-code doesn't wipe the bubble before the next delta.
-          if (preserveSnap && ev.status === 'running') {
-            if (!ev.text && preserveSnap.text) ev.text = preserveSnap.text;
-            if (!ev.thinking && preserveSnap.thinking) ev.thinking = preserveSnap.thinking;
-            if (!ev.liveTool && preserveSnap.liveTool) ev.liveTool = preserveSnap.liveTool;
-            if (!ev.lastWrite && preserveSnap.lastWrite) ev.lastWrite = preserveSnap.lastWrite;
-            if (!ev.events?.length && preserveSnap.events?.length) ev.events = preserveSnap.events;
-            if (!ev.widgets?.length && preserveSnap.widgets?.length) ev.widgets = preserveSnap.widgets;
-            if (!ev.run && preserveSnap.run) ev.run = preserveSnap.run;
-          }
+          status = ev.status;
+          reconnectFailures = 0;
         }
         handleEvent(ev, convId);
       });
@@ -694,7 +735,7 @@ import ChatFiles from './ChatFiles.svelte';
       if (nested) {
         // endStream owns cleanup
         if (!gotResume) stream = null;
-        return;
+        return { gotResume, active: handle.active, status };
       }
       // Boot / popstate path: if we attached and the job later finished, done
       // already cleared streaming. If the live socket died mid-run, endStream.
@@ -729,45 +770,11 @@ import ChatFiles from './ChatFiles.svelte';
     if (!msgQueue.length) return;
     const next = msgQueue[0];
     msgQueue = msgQueue.slice(1);
-    followups = null; // a queued message is the next turn — hide chips
     run({ content: next.content });
   }
 
-  // Clear follow-up chips when leaving a chat or starting a new one
-  $effect(() => {
-    const id = app.conv?.id;
-    if (id !== followupsConvId) {
-      followups = null;
-      followupsConvId = id ?? null;
-    }
-  });
-
-  // Drop the "loading" skeleton if the stream ended without a followups event
-  $effect(() => {
-    if (!followups?.loading) return;
-    if (app.streaming) return;
-    const t = setTimeout(() => {
-      if (followups?.loading) followups = null;
-    }, 12_000);
-    return () => clearTimeout(t);
-  });
-
   function removeQueued(id) {
     msgQueue = msgQueue.filter((q) => q.id !== id);
-  }
-
-  // fires after each exchange: summarize old turns before the context wall
-  async function maybeAutoCompact() {
-    if (!prefs.autoCompact || app.compacting || app.streaming) return;
-    const { used, budget } = app.context;
-    if (!used || used / Math.max(1, budget) < 0.75) return;
-    toast('Context 75% full — compacting older messages…');
-    try {
-      const r = await compactNow();
-      if (r) toast(`Compacted ${r.compacted} messages`, 'ok');
-    } catch (err) {
-      toast(`Auto-compact failed: ${err.message ?? err}`, 'error');
-    }
   }
 
   function send() {
@@ -775,7 +782,6 @@ import ChatFiles from './ChatFiles.svelte';
     if (!content || !app.conv) return;
     input = '';
     if (inputEl) inputEl.style.height = 'auto';
-    followups = null;
     pushHistory(content);
     if (app.streaming) {
       // queue while the model is working — grey chips under the live bubble
@@ -787,12 +793,11 @@ import ChatFiles from './ChatFiles.svelte';
     run({ content, parentId: realParentId() });
   }
 
-  function suggest(prompt) {
-    if (prompt.endsWith('\n\n')) {           // template that wants user input
+  function suggest(prompt, { draft = false } = {}) {
+    if (draft || prompt.endsWith('\n\n')) { // template that wants user input
       input = prompt;
       inputEl?.focus();
     } else {
-      followups = null;
       pushHistory(prompt);
       if (app.streaming) {
         msgQueue = [...msgQueue, { id: `q-${Date.now()}`, content: prompt }];
@@ -802,18 +807,10 @@ import ChatFiles from './ChatFiles.svelte';
     }
   }
 
-  /** One-tap follow-up chip under the last assistant reply. */
-  function useFollowup(text) {
-    const t = String(text ?? '').trim();
-    if (!t || !app.conv || app.streaming) return;
-    followups = null;
-    pushHistory(t);
-    run({ content: t, parentId: realParentId() });
-  }
-
   async function stop() {
     // explicit stop only — aborts the server job AND the local reader
     intentionalStop = true;
+    if (app.streaming) app.streaming.duckOutcome = 'stopped';
     const convId = app.streaming?.convId ?? app.conv?.id;
     if (convId) {
       // body: {} so Fastify never 415s on empty POST (was leaving runs stuck)
@@ -919,13 +916,11 @@ import ChatFiles from './ChatFiles.svelte';
   }
 
 
-  // web-search depth: cycle quick → normal → ultra
+  // Search depth belongs with the other optional composer controls.
   const RESEARCH = { quick: 'Quick', normal: 'Normal', ultra: 'Ultra research' };
-  function cycleResearch() {
-    const order = ['quick', 'normal', 'ultra'];
-    prefs.researchMode = order[(order.indexOf(prefs.researchMode) + 1) % order.length];
+  function setResearch(mode) {
+    prefs.researchMode = mode;
     savePrefs();
-    toast(`Search depth: ${RESEARCH[prefs.researchMode]}${prefs.researchMode === 'ultra' ? ' — deep, slow, ~400 sources' : ''}`);
   }
 
   async function approve(ok) {
@@ -935,27 +930,8 @@ import ChatFiles from './ChatFiles.svelte';
     catch (err) { toast(err.message, 'error'); }
   }
 
-  // mascot mood while a reply streams
-  const activeToolName = $derived.by(() => {
-    if (streamingHere?.liveTool?.name) return streamingHere.liveTool.name;
-    const events = streamingHere?.events;
-    if (!events?.length) return null;
-    for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].type === 'tool_call') return events[i].name;
-    }
-    return null;
-  });
-  const duckState = $derived(!streamingHere ? 'idle'
-    : streamingHere.queued ? 'sleep'
-    : streamingHere.error ? 'error'
-    : streamingHere.diffusion ? 'thinkhard'
-    : streamingHere.image ? 'image'
-    : (streamingHere.search?.active && !streamingHere.text) ? 'search'
-    : (activeToolName === 'web_search' || activeToolName === 'fetch_page') ? 'search'
-    : (streamingHere.liveTool || streamingHere.events?.length) ? 'code'
-    : (streamingHere.thinking && !streamingHere.text) ? 'thinkhard'
-    : streamingHere.loading ? 'think'
-    : 'talk');
+  // Every live duck uses the same phase and tool lifecycle in the shared brain.
+  const duckState = $derived(activeContext({ streaming: streamingHere }));
 
   function onEdit(msg, newContent) {
     run({ content: newContent, parentId: msg.parent_id ?? null });
@@ -1087,7 +1063,9 @@ import ChatFiles from './ChatFiles.svelte';
   }
 </script>
 
-<div class="chat">
+<svelte:document onkeydown={optionsKey} />
+
+<div class="chat" class:empty={!path.length && !streamingHere}>
  <div class="main">
   <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     <div class="thread">
@@ -1106,7 +1084,7 @@ import ChatFiles from './ChatFiles.svelte';
               pendingApproval={streamingHere.pendingApproval} onapprove={approve} />
           </div>
         {/if}
-        <Message streaming mood={duckState}
+        <Message streaming
           msg={{ role: 'assistant', content: streamingHere.text, thinking: streamingHere.thinking || null, search: streamingHere.search, widgets: streamingHere.widgets, pinned: 0 }} />
         {#if streamingHere.liveTool}
           <div class="agentwork live fade-in">
@@ -1139,7 +1117,7 @@ import ChatFiles from './ChatFiles.svelte';
         {#if streamingHere.image}
           <div class="imgjob fade-in">
             {#if streamingHere.image.preview}
-              <img class="imgpreview" src={streamingHere.image.preview} alt="image taking shape" />
+               <img class="imgpreview" src={streamingHere.image.preview} alt="Preview taking shape" />
             {:else}
               <div class="imgshimmer"></div>
             {/if}
@@ -1177,24 +1155,10 @@ import ChatFiles from './ChatFiles.svelte';
             <div class="qbody">
               <span class="qlabel">queued</span>
               <div class="qtext">{q.content}</div>
-              <button class="qdrop" onclick={() => removeQueued(q.id)} title="Remove from queue"><X size={12} /></button>
+              <button class="qdrop" onclick={() => removeQueued(q.id)} title="Remove from queue" aria-label="Remove queued message"><X size={12} /></button>
             </div>
           </div>
         {/each}
-      {/if}
-      {#if followups && !streamingHere && !msgQueue.length
-          && path.length && path[path.length - 1]?.id === followups.messageId}
-        <div class="followups fade-in" aria-label="Suggested follow-ups">
-          {#if followups.loading}
-            <span class="fup-skel shimmer">Suggesting follow-ups…</span>
-          {:else}
-            {#each followups.items as item (item)}
-              <button type="button" class="fup" onclick={() => useFollowup(item)} title="Send this follow-up">
-                {item}
-              </button>
-            {/each}
-          {/if}
-        </div>
       {/if}
       <div class="pad"></div>
     </div>
@@ -1202,11 +1166,11 @@ import ChatFiles from './ChatFiles.svelte';
 
   <div class="dock">
     {#if !atBottom}
-      <button class="tobottom fade-in" onclick={() => scrollToBottom(true, true)} title="Jump to latest">
+      <button class="tobottom fade-in" onclick={() => scrollToBottom(true, true)} title="Jump to latest" aria-label="Jump to latest message">
         <ArrowDown size={16} />
       </button>
     {/if}
-    <div class="composer" class:active={busy} class:drag={dragOver}
+    <div class="composer" class:active={busy} class:drag={dragOver} role="group" aria-label="Message composer"
       ondragenter={onComposerDrag} ondragover={onComposerDrag}
       ondragleave={onComposerDrag} ondrop={onComposerDrag}
       onpaste={onComposerPaste}>
@@ -1216,19 +1180,19 @@ import ChatFiles from './ChatFiles.svelte';
             <span class="docchip imgchip" title={u.description || 'Attached image — every model gets a description; vision models also see pixels'}>
               <img class="ithumb" src={`/api/uploads/${u.id}/file`} alt="" />
               <span class="dname">{u.name}</span>
-              <button class="dx" onclick={() => detachImgChip(u)} title="Detach from this chat"><X size={11} /></button>
+              <button class="dx" onclick={() => detachImgChip(u)} title="Detach from this chat" aria-label={`Detach ${u.name}`}><X size={11} /></button>
             </span>
           {/each}
           {#each attachedDocs as d (d.id)}
             <span class="docchip" title={`${d.chunks} section${d.chunks === 1 ? '' : 's'} — any model can read this file`}>
               <FileText size={12} />
               <span class="dname">{d.name}</span>
-              <button class="dx" onclick={() => detachDocChip(d)} title="Detach from this chat"><X size={11} /></button>
+              <button class="dx" onclick={() => detachDocChip(d)} title="Detach from this chat" aria-label={`Detach ${d.name}`}><X size={11} /></button>
             </span>
           {/each}
         </div>
       {/if}
-      <textarea rows="1"
+      <textarea rows="2" data-duck-composer aria-label={app.mode === 'agent' ? 'Describe a coding task' : 'Message DuckPond'}
         placeholder={busy
           ? 'Queue a follow-up…'
           : dragOver ? 'Drop files to attach…' : (app.mode === 'agent' ? 'Describe a task, ask about your code…' : 'Message DuckPond')}
@@ -1239,51 +1203,70 @@ import ChatFiles from './ChatFiles.svelte';
         <input type="file" multiple hidden bind:this={fileInput}
           accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml,.toml,.ini,.log,.js,.ts,.jsx,.tsx,.svelte,.py,.rs,.go,.java,.c,.h,.cpp,.hpp,.cs,.rb,.php,.sh,.sql"
           onchange={(e) => { uploadDocs([...e.target.files]); e.target.value = ''; }} />
+        <div class="composer-tools">
+        {#if app.conv?.workspace_id}
+          <button class="tool mobile-files" aria-label="Show project files" title="Show project files"
+            onclick={() => (projectFilesOpen = true)}><PanelRightOpen size={15} /><span class="tool-label">Files</span></button>
+        {/if}
         <button class="tool" class:on={attachedDocs.length > 0 || attachedImgs.length > 0} disabled={uploading}
+          aria-label={uploading ? 'Reading attachments' : 'Attach images or documents'}
           title={uploading ? 'Reading…' : 'Attach images or documents — every model can read them'}
-          onclick={pickFiles}><Paperclip size={15} /></button>
-        <button class="tool" class:on={prefs.researchMode !== 'normal'} class:ultra={prefs.researchMode === 'ultra'}
-          title={`Search depth: ${RESEARCH[prefs.researchMode]} (click to change). The model searches the web on its own; this sets how deep it goes.`}
-          onclick={cycleResearch}>
-          {#if prefs.researchMode === 'ultra'}<Telescope size={15} />{:else}<Globe size={15} />{/if}
-          {#if prefs.researchMode !== 'normal'}<span class="rlbl">{prefs.researchMode === 'ultra' ? 'Ultra' : 'Quick'}</span>{/if}
+          onclick={pickFiles}><Paperclip size={15} /><span class="tool-label">Attach</span></button>
+        <button type="button" class="options-trigger" class:on={composerOptionsOpen}
+          bind:this={optionsTrigger}
+          aria-label="Chat options" title="Chat options" aria-haspopup="dialog" aria-expanded={composerOptionsOpen} aria-controls={`${composerId}-options`}
+          onclick={() => (composerOptionsOpen = !composerOptionsOpen)}>
+          <SlidersHorizontal size={15} /><span class="option-label">Options</span>
+          {#if prefs.researchMode !== 'normal'}<span class="option-badge">{RESEARCH[prefs.researchMode]}</span>{/if}
         </button>
-        <button class="tool" class:on={thinkingOn} disabled={!model}
-          title={thinkingOn ? 'Reasoning on — click to disable' : 'Reasoning off — click to enable'}
-          onclick={toggleThinking}><Lightbulb size={15} /></button>
-        <div class="grow"></div>
+        </div>
+        <div class="composer-actions">
         {#if msgQueue.length}
           <span class="qcount" title="{msgQueue.length} message{msgQueue.length === 1 ? '' : 's'} queued">{msgQueue.length} queued</span>
         {/if}
         {#if busy}
-          <button class="send stop" onclick={stop} title="Stop generating">
+          <button class="send stop" onclick={stop} title="Stop generating" aria-label="Stop generating">
             <Square size={12} fill="currentColor" />
           </button>
         {/if}
         <button class="send" class:ready={input.trim()} onclick={send}
           disabled={!input.trim() || !app.conv}
-          title={busy ? 'Queue message (sends when the reply finishes)' : 'Send (Enter)'}>
-          <ArrowUp size={17} />
+          aria-label={busy ? 'Queue message' : 'Send message'}
+          title={busy ? 'Queue message (sends when the reply finishes)' : prefs.sendOnEnter ? 'Send (Enter)' : 'Send message'}>
+          <ArrowUp size={18} />
         </button>
+        </div>
       </div>
     </div>
+    <div class="composer-footer"><span>{prefs.sendOnEnter ? `Enter to ${busy ? 'queue' : 'send'} · Shift + Enter for a new line` : `Use ${busy ? 'Queue' : 'Send'} to submit · Enter for a new line`}</span>{#if busy}<span>Follow-ups queue while replying</span>{/if}</div>
   </div>
+  <dialog class="composer-options" id={`${composerId}-options`} aria-labelledby={`${composerId}-options-title`} bind:this={optionsPanel} onclose={() => (composerOptionsOpen = false)}>
+    <div class="options-head"><strong id={`${composerId}-options-title`}>Response options</strong><button class="options-close" onclick={() => { composerOptionsOpen = false; optionsTrigger?.focus(); }} aria-label="Close chat options"><X size={16} /></button></div>
+    <div class="option-copy"><Globe size={16} /><div><strong>Web search depth</strong><span>How thoroughly DuckPond searches when a reply needs the web.</span></div></div>
+    <div class="search-choices" role="group" aria-label="Web search depth">
+      {#each ['quick', 'normal', 'ultra'] as mode}
+        <button type="button" class:selected={prefs.researchMode === mode} aria-pressed={prefs.researchMode === mode} onclick={() => setResearch(mode)}>{RESEARCH[mode]}</button>
+      {/each}
+    </div>
+    <div class="option-copy"><Lightbulb size={16} /><div><strong>Reasoning</strong><span>{thinkingOn ? 'The selected model can think through complex requests.' : 'The selected model replies without its extra reasoning mode.'}</span></div></div>
+    <button type="button" class="reasoning-choice" class:selected={thinkingOn} disabled={!model} aria-pressed={!!thinkingOn} onclick={toggleThinking}>{thinkingOn ? 'On' : 'Off'}</button>
+  </dialog>
  </div>
  {#if app.conv?.workspace_id}
-   <ChatFiles />
+   <ChatFiles bind:open={projectFilesOpen} />
  {/if}
 </div>
 
 <style>
   .chat { flex: 1; display: flex; min-width: 0; min-height: 0; }
-  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; container: chatpane / inline-size; --thread-gutter: clamp(18px, 3vw, 36px); }
   .scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-bottom: 40px; -webkit-overflow-scrolling: touch; }
-  .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 20px 24px 0; width: 100%; box-sizing: border-box; }
-  .pad { height: 24px; }
+  .thread { max-width: var(--chat-maxw); margin: 0 auto; padding: 28px var(--thread-gutter) 0; width: 100%; box-sizing: border-box; }
+  .pad { height: 32px; }
   .agentwork {
     margin: 14px 0 8px 42px;
-    padding: 12px 14px;
-    border: 1px solid var(--border-soft); border-radius: calc(12px * var(--rf));
+    padding: 0;
+    border: 0 solid var(--border-soft); border-radius: calc(12px * var(--rf));
     background: var(--bg-card);
   }
   .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text-faint); padding: 2px 0 8px 42px; min-height: 26px; }
@@ -1293,18 +1276,14 @@ import ChatFiles from './ChatFiles.svelte';
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .mono { font-family: var(--mono); }
-  .shimmer {
-    background: linear-gradient(90deg, var(--text-faint) 30%, var(--text) 50%, var(--text-faint) 70%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 1.6s linear infinite;
-  }
+  .shimmer { color: var(--text-dim); animation: statusPulse 1.6s ease-in-out infinite; }
+  @keyframes statusPulse { 50% { opacity: .5; } }
   @keyframes shimmer { to { background-position: -200% 0; } }
 
   .dock {
     position: relative; max-width: var(--chat-maxw); width: 100%; margin: 0 auto;
-    padding: 4px 24px 10px;
-    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    padding: 8px var(--thread-gutter) 14px;
+    padding-bottom: max(14px, env(safe-area-inset-bottom));
     box-sizing: border-box;
   }
   .tobottom {
@@ -1321,7 +1300,7 @@ import ChatFiles from './ChatFiles.svelte';
     background: var(--bg-input);
     border: 1px solid var(--border);
     border-radius: calc(18px * var(--rf));
-    padding: 10px 10px 8px 16px;
+    padding: 16px 14px 12px 18px;
     transition: border-color 160ms ease, box-shadow 160ms ease;
   }
   .composer.drag {
@@ -1337,12 +1316,12 @@ import ChatFiles from './ChatFiles.svelte';
       0 6px 20px rgba(0, 0, 0, 0.28);
   }
   .composer textarea {
-    resize: none; max-height: 200px; min-height: 24px; width: 100%;
+    resize: none; max-height: 200px; min-height: 56px; width: 100%;
     background: none; border: none; box-shadow: none; outline: none; padding: 2px 0 8px;
-    line-height: 1.5;
+    line-height: 1.6;
   }
   .composer textarea:focus { box-shadow: none; }
-  .docchips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+  .docchips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 12px; max-height: 120px; overflow-y: auto; }
   .docchip {
     display: inline-flex; align-items: center; gap: 6px;
     font-size: 11.5px; color: var(--text-dim);
@@ -1360,26 +1339,50 @@ import ChatFiles from './ChatFiles.svelte';
     width: 18px; height: 18px; border-radius: 50%; color: var(--text-faint);
   }
   .dx:hover { background: var(--bg-hover); color: var(--red); }
-  .bar { display: flex; align-items: center; gap: 2px; }
-  .grow { flex: 1; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 8px; }
+  .composer-tools, .composer-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .composer-actions { flex-shrink: 0; margin-left: auto; }
+  .composer-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; padding: 9px 6px 0; font-size: 10.5px; line-height: 1.4; opacity: .6; }
+  .tool-label { font-size: 12px; }
+  .composer-options {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    position: fixed; inset: 0; width: min(600px, calc(100vw - 32px)); height: fit-content; box-sizing: border-box;
+    gap: 16px 18px; padding: 18px; margin: auto; max-height: calc(100dvh - 32px); overflow-y: auto;
+    border: 1px solid var(--border-soft); border-radius: calc(18px * var(--rf)); background: var(--bg-input); color: var(--text);
+  }
+  .composer-options:not([open]) { display: none; }
+  .composer-options::backdrop { background: transparent; }
+  .options-head { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; padding-bottom: 4px; }
+  .options-close { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; }
+  .option-copy { display: flex; align-items: flex-start; gap: 10px; min-width: 0; color: var(--text-dim); }
+  .option-copy :global(svg) { flex: 0 0 auto; margin-top: 2px; color: var(--accent); }
+  .option-copy strong { display: block; color: var(--text); font-size: 12.5px; font-weight: 600; }
+  .option-copy span { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.4; }
+  .search-choices { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg-raised); }
+  .search-choices button, .reasoning-choice { border: 0; border-radius: 7px; padding: 6px 9px; background: transparent; color: var(--text-dim); font-size: 11.5px; white-space: nowrap; }
+  .search-choices button.selected, .reasoning-choice.selected { background: var(--accent-glow); color: var(--accent); }
+  .search-choices button:hover, .reasoning-choice:hover { background: var(--bg-hover); }
+  .reasoning-choice { border: 1px solid var(--border-soft); min-width: 46px; }
+  .reasoning-choice:disabled { opacity: .45; cursor: default; }
+  .options-trigger { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text-dim); font-size: 12px; }
+  .options-trigger:hover, .options-trigger.on { background: var(--bg-hover); color: var(--text); }
+  .option-badge { color: var(--accent); font-size: 11px; }
   .tool {
     all: unset; cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center;
-    width: 30px; height: 28px; border-radius: calc(8px * var(--rf));
+    min-width: 36px; height: 36px; padding: 0 9px; gap: 6px; border-radius: calc(8px * var(--rf));
     color: var(--text-faint);
     transition: background 120ms ease, color 120ms ease;
   }
   .tool:hover { background: var(--bg-hover); color: var(--text-dim); }
   .tool:focus-visible { outline: none; background: var(--bg-hover); color: var(--text-dim); }
   .tool.on { color: var(--accent); }
-  .tool.ultra { color: var(--accent); background: var(--accent-glow); }
-  .tool.ultra:focus-visible { outline: none; background: var(--accent-glow); }
-  .tool :global(.rlbl) { font-size: 11px; font-weight: 600; line-height: 1; }
-  .tool:has(.rlbl) { width: auto; gap: 5px; padding: 0 8px; }
   .tool:disabled { opacity: 0.35; cursor: default; }
+  .mobile-files { display: none; }
+  .options-trigger:focus-visible, .options-close:focus-visible, .dx:focus-visible, .qdrop:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
   .send {
-    width: 34px; height: 34px; border-radius: 50%; padding: 0; line-height: 0;
-    display: grid; place-items: center; flex-shrink: 0;
+    min-width: 80px; height: 38px; border-radius: calc(11px * var(--rf)); padding: 0 12px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex-shrink: 0;
     background: var(--bg-hover); border: none;
     color: var(--text-dim);
     opacity: 0.6;
@@ -1390,7 +1393,7 @@ import ChatFiles from './ChatFiles.svelte';
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   }
   .send.ready:hover { background: var(--accent-deep); }
-  .send.stop { background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; box-shadow: none; }
+  .send.stop { min-width: 38px; padding: 0; background: transparent; border: 1px solid var(--border); color: var(--red); opacity: 1; box-shadow: none; }
   .imgjob {
     margin: 14px 0 8px 42px;
     display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
@@ -1405,7 +1408,7 @@ import ChatFiles from './ChatFiles.svelte';
     width: min(320px, 100%); height: min(320px, 70vw); max-width: 100%;
     border-radius: calc(12px * var(--rf));
     border: 1px solid var(--border-soft);
-    background: linear-gradient(110deg, var(--bg-raised) 40%, var(--bg-hover) 50%, var(--bg-raised) 60%);
+    background: var(--bg-card);
     background-size: 220% 100%; animation: imgshim 1.6s linear infinite;
   }
   @keyframes imgshim { to { background-position: -120% 0; } }
@@ -1433,6 +1436,7 @@ import ChatFiles from './ChatFiles.svelte';
     font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
     color: var(--accent); margin-bottom: 8px; font-family: var(--mono);
   }
+  .agentwork.lastwrite { padding: 14px; }
   .lastwrite .lw-body {
     margin: 0; max-height: 360px; overflow: auto;
     font-family: var(--mono); font-size: 12px; line-height: 1.55;
@@ -1470,31 +1474,6 @@ import ChatFiles from './ChatFiles.svelte';
   .qcount {
     font-size: 11px; color: var(--text-faint); font-family: var(--mono);
     padding: 0 6px; white-space: nowrap;
-  }
-
-  /* clickable next-message chips under the last assistant reply */
-  .followups {
-    display: flex; flex-wrap: wrap; gap: 8px;
-    margin: 6px 0 4px 42px;
-    max-width: calc(100% - 42px);
-  }
-  .fup {
-    all: unset; cursor: pointer; box-sizing: border-box;
-    max-width: 100%;
-    padding: 8px 14px; border-radius: 999px;
-    font-size: 13px; line-height: 1.35; color: var(--text-dim);
-    background: var(--bg-raised); border: 1px solid var(--border-soft);
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-    word-break: break-word;
-  }
-  .fup:hover {
-    color: var(--text);
-    border-color: color-mix(in srgb, var(--accent-dim) 40%, var(--border));
-    background: var(--bg-hover);
-  }
-  .fup:active { background: var(--bg-card); }
-  .fup-skel {
-    font-size: 12px; color: var(--text-faint); padding: 6px 2px;
   }
 
   @media (max-width: 768px) {
@@ -1549,24 +1528,17 @@ import ChatFiles from './ChatFiles.svelte';
       width: 100%;
     }
     .bar::-webkit-scrollbar { display: none; }
-    .tool { width: 40px; height: 40px; flex-shrink: 0; }
-    .tool:has(.rlbl) { min-height: 40px; }
-    .send { width: 42px; height: 42px; flex-shrink: 0; }
+    .tool { min-width: 40px; height: 40px; flex-shrink: 0; }
+    .options-trigger { min-height: 40px; flex-shrink: 0; }
+    .mobile-files { display: inline-flex; }
+    .composer-options { grid-template-columns: 1fr; gap: 8px; }
+    .search-choices { width: fit-content; margin-bottom: 6px; }
+    .reasoning-choice { justify-self: start; }
+    .send { min-width: 42px; width: 42px; height: 42px; padding: 0; flex-shrink: 0; }
     .dname { max-width: 120px; }
+    .dx { width: 28px; height: 28px; }
+    .qdrop { width: 28px; height: 28px; }
     .tobottom { width: 40px; height: 40px; top: -50px; }
-    .followups {
-      margin: 8px 0 2px 0;
-      max-width: 100%;
-      gap: 8px;
-    }
-    .fup {
-      flex: 1 1 auto;
-      min-width: min(100%, 160px);
-      padding: 11px 14px;
-      font-size: 13.5px;
-      border-radius: calc(12px * var(--rf));
-      text-align: left;
-    }
     .pad { height: 12px; }
     .qmsg { margin-left: 0; }
     .imgpreview, .imgshimmer { width: 100%; max-width: 100%; }
@@ -1576,8 +1548,55 @@ import ChatFiles from './ChatFiles.svelte';
   @media (max-width: 420px) {
     .thread { padding: 8px 10px 0; }
     .dock { padding: 4px 8px max(6px, env(safe-area-inset-bottom)); }
-    .fup { min-width: 100%; }
+    .option-label, .option-badge, .tool-label { display: none; }
+    .tool { padding: 0; }
+    .options-trigger { width: 40px; justify-content: center; padding: 0; }
+  }
+  @container chatpane (max-width: 560px) {
+    .thread { padding: 18px 16px 0; }
+    .dock { padding-inline: 16px; }
+    .agentwork, .imgjob, .diffjob { margin-left: 0; }
+    .status { padding-left: 0; flex-wrap: wrap; }
+    .composer { padding: 12px; }
+    .composer-options { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 16px; }
+    .search-choices { justify-self: start; margin-bottom: 6px; }
+    .reasoning-choice { justify-self: start; }
+    .composer-footer > span:last-child:not(:first-child) { display: none; }
+    .bar { flex-wrap: wrap; }
+  }
+  @container chatpane (max-width: 420px) {
+    .thread { padding-inline: 12px; }
+    .dock { padding-inline: 12px; }
+    .tool-label, .option-label, .option-badge,
+    .tool, .options-trigger { width: 40px; min-width: 40px; height: 40px; padding: 0; justify-content: center; }
+    .send { min-width: 40px; width: 40px; height: 40px; padding: 0; }
+    .bar { gap: 6px; overflow: visible; }
+    .composer-tools, .composer-actions { gap: 4px; }
+    .qcount { padding: 0; font-size: 10px; }
+    .composer-footer { font-size: 10px; padding-inline: 0; }
+  }
+  @media (max-height: 600px) {
+    .thread { padding-top: 14px; }
+    .composer textarea { min-height: 32px; }
+    .composer-footer { display: none; }
+    .dock { padding-top: 4px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   }
   .bar .send + .send { margin-left: 4px; }
   .bar .send.stop { margin-right: 2px; }
+
+  .main { --thread-gutter: 24px; background: var(--bg); }
+  .empty .main { justify-content: center; padding-bottom: min(12vh, 112px); }
+  .empty .scroll { flex: 0 1 auto; }
+  .empty .thread { padding-top: 0; }
+  .empty .pad { display: none; }
+  .dock { flex-shrink: 0; }
+  .composer { border-radius: 18px; background: var(--bg-input); padding: 17px 16px 12px; }
+  .composer:focus-within { border-color: var(--accent-dim); box-shadow: none; }
+  .composer textarea { font-size: 15px; }
+  .composer-footer { justify-content: center; opacity: 1; color: var(--text-faint); font-size: 10px; padding-top: 10px; }
+  .send { width: 34px; height: 34px; min-width: 34px; padding: 0; border-radius: 50%; justify-content: center; }
+  .send.ready { background: var(--text); color: var(--bg); border-color: var(--text); box-shadow: none; }
+  .tool, .options-trigger { border: none; background: transparent; color: var(--text-dim); }
+  @media(max-width:768px) { .empty .main { padding-bottom: 5vh; } .composer { padding: 14px 12px 10px; } }
+  @media(max-height:600px) { .empty .main { padding-bottom: 0; } }
 </style>

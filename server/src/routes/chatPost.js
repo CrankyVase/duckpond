@@ -1,7 +1,8 @@
-// POST /api/conversations/:id/chat — the main streaming turn, registered from
+// POST /api/conversations/:id/chat — starts a server-owned turn, registered from
 // routes/chat.js (same plugin scope, so the requireAuth hook applies). Split
 // out when the original chat.js outgrew one file.
 import { db } from '../db.js';
+import { EDIT_ONLY_TOOLS, EDIT_ONLY_INSTRUCTION } from '../agentHarness.js';
 import { ipLocation } from '../geoip.js';
 import { countInputTokens, listModels, streamChat } from '../llama.js';
 import { clientIp } from '../auth.js';
@@ -9,7 +10,8 @@ import {
   AGENT_TOOLS, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
 } from './agent.js';
 import { checkUserContent } from '../contentFilter.js';
-import { getUserImagePrefs } from '../imagegen.js';
+import { evictBridgeModels, getUserImagePrefs } from '../imagegen.js';
+import { activeMediaJobCount } from '../mediaJobs.js';
 import { convUploads, injectUploadsIntoMessages } from '../uploads.js';
 import {
   memoryEnabled, rememberFromExchange, retrieveMemories,
@@ -18,7 +20,7 @@ import { isDiffusionModel } from '../diffusiongen.js';
 import { acquireGpu } from '../gpuqueue.js';
 import { finishRun, isRunLive } from './agent.js';
 import {
-  broadcast, createLiveJob, finishLiveJob, getLiveJob,
+  broadcast, createLiveJob, finishLiveJob, hasActiveJob, waitForStoppingJob,
 } from '../liveJobs.js';
 import { convDocs, docFullText, retrieveChunks } from '../docs.js';
 // remote providers + cost saver (feat/remote-providers)
@@ -33,18 +35,18 @@ import { cacheEligible, orderSystemForPrefixCache, promptPressure } from '../tok
 import { saveContext, saverSummary } from '../contextsaver.js';
 import { reasoningDialect, reasoningParams } from '../reasoning.js';
 import { capabilityManifest } from '../permissions.js';
-import { GITHUB_READ_TOOLS, GITHUB_TOOLS, hasGithub } from '../github.js';
+import { GITHUB_READ_TOOLS, hasGithub } from '../github.js';
 import {
   GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
   WIDGET_TOOLS, WIDGET_TOOL_NAMES,
-  buildPrompt, convForUser, dashboardCapable, filterTools, insertMessage,
+  buildPrompt, convForUser, filterTools, insertMessage,
   persistInterruptedReply, recordUsage, setLeaf, stripFakeImages,
 } from '../chatkit.js';
 import {
-  RESEARCH_MODES, ULTRA_DIRECTIVE, makeSpeculator, withToolsPolicy,
+  RESEARCH_MODES, ULTRA_DIRECTIVE, makeSpeculator, selectTurnWidgets, withToolsPolicy,
 } from '../chatpolicy.js';
 import {
-  autoCompactMessages, generateFollowups, makeTurnDelta, replayCacheHit,
+  autoCompactMessages, makeTurnDelta, replayCacheHit,
   runAgentTurn, runDiffusionTurn, runImageTurn, runInlineSearch,
 } from '../chatflow.js';
 
@@ -76,26 +78,31 @@ const PROJECT_NUDGE = 'Stop. You are writing a multi-file project as chat text i
   + 'one-shot commands that exit. Do not paste project code into the chat.';
 
 export function registerChatPost(app) {
-  // The main event: send a user message (or regenerate) and stream the reply.
+  // Start a turn and return immediately. Progress is read from GET /live so a
+  // browser refresh or proxy request limit cannot cancel the model invocation.
   // body: { content?, parentId?, regenerateFrom? } — exactly one of content|regenerateFrom.
   app.post('/api/conversations/:id/chat', async (req, reply) => {
     const conv = convForUser(req.params.id, req.user.id);
     if (!conv) return reply.code(404).send({ error: 'not found' });
     if (!conv.model_id) return reply.code(400).send({ error: 'no model selected' });
 
-    // one live generation per conversation — the client queues extras itself
-    if (getLiveJob(conv.id)?.status === 'running') {
+    // Stop followed by Send waits for prior cleanup; other concurrent sends still 409.
+    await waitForStoppingJob(conv.id);
+    if (hasActiveJob(conv.id)) {
       return reply.code(409).send({ error: 'a reply is already generating for this chat' });
     }
 
     const { content, parentId, regenerateFrom } = req.body ?? {};
+    if (regenerateFrom) {
+      const src = db.prepare('SELECT role FROM messages WHERE id = ? AND conv_id = ?').get(regenerateFrom, conv.id);
+      if (src?.role !== 'assistant') return reply.code(400).send({ error: 'bad regenerateFrom' });
+    } else if (typeof content !== 'string' || !content.trim()) {
+      return reply.code(400).send({ error: 'empty message' });
+    }
     // remote (paid API) models take a different path for GPU queueing, warm-up
     // probes and agent tooling — and get the cost-saver pipeline on top
     const remote = isRemoteId(conv.model_id);
-    // coarse location, resolved from the request's own IP (no browser prompt,
-    // no client involvement) → lets show_weather/show_map default to where the
-    // user is when they name no place
-    const userLoc = await ipLocation(clientIp(req));
+    const sourceIp = clientIp(req);
     // search depth: quick | normal | ultra (deep research)
     const researchMode = RESEARCH_MODES[req.body?.researchMode] ? req.body.researchMode : 'normal';
     const modeCfg = RESEARCH_MODES[researchMode];
@@ -106,42 +113,29 @@ export function registerChatPost(app) {
       return reply.code(err.code === 409 ? 409 : 500).send({ error: err.message });
     }
     const abort = job.abort;
-
-    // take the socket away from Fastify — otherwise it "completes" the reply
-    // as soon as the handler yields and our SSE stream gets torn down
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-      'x-accel-buffering': 'no',
-    });
-    // Fan out every event to all attached clients (this tab + any reattach after
-    // refresh). The primary connection is just another listener — closing it
-    // must NOT abort the job.
-    const writePrimary = (obj) => {
-      if (reply.raw.writableEnded || reply.raw.destroyed) return;
-      try { reply.raw.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ }
-    };
-    job.listeners.add(writePrimary);
     const send = (obj) => broadcast(job, obj);
-    // Cloudflare / proxies kill "idle" SSE after ~100s. Keepalive comments
-    // (ignored by the client parser) prevent the reply vanishing mid-generation.
-    const pingPrimary = setInterval(() => {
-      if (reply.raw.writableEnded || reply.raw.destroyed) return;
-      try { reply.raw.write(': ping\n\n'); } catch { /* client gone */ }
-    }, 15_000);
-    reply.raw.on('close', () => {
-      clearInterval(pingPrimary);
-      job.listeners.delete(writePrimary);
-      // intentionally no abort.abort() — generation keeps going server-side
-    });
+    // The request ends here; all state and the abort signal belong to the job.
+    // setImmediate makes the 202 observable before slow setup (such as GeoIP).
+    setImmediate(() => { void processTurn().catch((err) => {
+      req.log.error({ err }, 'detached chat turn failed');
+      send({ type: 'error', message: String(err.message ?? err) });
+      finishLiveJob(job, 'error');
+      for (const fn of [...job.listeners]) {
+        try { fn({ type: 'stream_end' }); } catch { /* ignore */ }
+      }
+      job.listeners.clear();
+    }); });
+    return reply.code(202).send({ convId: conv.id, jobId: job.id, status: 'running' });
 
+    async function processTurn() {
     let releaseGpu = null;
     let turnDelta = null;       // per-turn stream wiring (timer cleared in finally)
+    let spec = null;
     let promptLeaf = null;      // message the assistant will answer under (needed in finally)
     const t0 = Date.now();      // turn wall-clock start (tok/s fallback below)
     try {
+      // Resolve location inside the job; a slow lookup must not hold the POST.
+      const userLoc = await ipLocation(sourceIp);
       if (regenerateFrom) {
         const src = db.prepare('SELECT * FROM messages WHERE id = ? AND conv_id = ?').get(regenerateFrom, conv.id);
         if (!src || src.role !== 'assistant') throw new Error('bad regenerateFrom');
@@ -212,12 +206,17 @@ export function registerChatPost(app) {
         return; // finally{} closes the SSE stream
       }
 
-      // warm-up indicator: tell the client if this request will trigger a model (re)load
+      // warm-up indicator: tell the client if this request will trigger a model (re)load.
+      // Image weights left on the same GPU make the chat model fill the card and
+      // stall inside the first GPU copy, so drop them before a local model loads.
       if (!remote) {
         try {
           const models = await listModels();
           const m = models.find((x) => x.id === conv.model_id);
-          if (m && m.status !== 'loaded') send({ type: 'loading', model: conv.model_id });
+          if (m && m.status !== 'loaded') {
+            send({ type: 'loading', model: conv.model_id });
+            if (activeMediaJobCount() === 0) await evictBridgeModels(req.log);
+          }
         } catch { /* router briefly unavailable; generation attempt will surface it */ }
       }
 
@@ -226,6 +225,8 @@ export function registerChatPost(app) {
         : null;
       const imgPrefs = getUserImagePrefs(req.user.id);
       const disabledTools = new Set(conv._settings.disabledTools ?? []);
+      const editOnly = conv.mode === 'agent' && conv._settings.agent_execution === 'edit';
+      if (editOnly) for (const name of EDIT_ONLY_TOOLS) disabledTools.add(name);
       // remote models: sandbox/agent tooling stays local-only (a paid API
       // model driving shell loops would be a bill and a half). Inline tools —
       // web search, widgets, memory, image gen — work fine remotely.
@@ -242,27 +243,35 @@ export function registerChatPost(app) {
       const schemaStr = String(conv._settings.json_schema ?? '').trim();
       const grammarStr = String(conv._settings.grammar ?? '').trim();
       const constrained = !!(schemaStr || grammarStr);
-      let promptMessages = constrained
-        ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
-        : withToolsPolicy(
-          buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow, imgPrefs.allowed, userLoc, disabledTools);
-      // The turn's tool list, hoisted so the capability manifest below can name
-      // the actual tools rather than describe the policy in the abstract.
+      const requestedWidgets = wsRow ? new Set() : selectTurnWidgets(promptLeaf?.content);
+      for (const name of disabledTools) requestedWidgets.delete(name);
+      // Construct the tools before their prompt policy. A disabled or unavailable
+      // tool must not be described to the model as something it can call.
       const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
       const ghOn = hasGithub(req.user.id);
       const turnTools = constrained ? [] : filterTools(
         wsRow
           ? AGENT_TOOLS
           : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
-            ...(ghOn ? GITHUB_READ_TOOLS : []), ...WIDGET_TOOLS, ...memTools],
+            ...(ghOn ? GITHUB_READ_TOOLS : []),
+            ...WIDGET_TOOLS.filter((t) => requestedWidgets.has(t.function.name)), ...memTools],
         disabledTools,
       ).filter((t) => imgPrefs.allowed || t.function.name !== 'generate_image');
+      const availableTools = new Set(turnTools.map((t) => t.function.name));
+      let promptMessages = constrained
+        ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
+        : withToolsPolicy(
+          buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow,
+          imgPrefs.allowed, userLoc, disabledTools, requestedWidgets, availableTools);
+      if (editOnly && promptMessages[0]?.role === 'system') {
+        promptMessages[0] = { ...promptMessages[0], content: `${promptMessages[0].content}\n\n${EDIT_ONLY_INSTRUCTION}` };
+      }
 
       // Tell the model its own permissions. A model that doesn't know a tool
       // needs approval either avoids useful tools or promises things it can't
       // deliver — and it pre-asks in prose, which is exactly the double-prompt
       // the approval card is supposed to replace.
-      if (!constrained && promptMessages[0]?.role === 'system') {
+      if (!constrained && conv.mode === 'agent' && promptMessages[0]?.role === 'system') {
         const manifest = capabilityManifest(req.user.id, {
           tools: turnTools, hasWorkspace: !!wsRow, hasGithub: ghOn,
         });
@@ -293,20 +302,12 @@ export function registerChatPost(app) {
         // the top, and a memory that gets ignored is worse than none.
         // (For remote models the saver moves this block to the END instead —
         // keeping the stable prefix byte-identical is worth more there.)
-        const memBlock = '## Your long-term memory\n'
-          + 'You HAVE a persistent long-term memory about this user. It survives across conversations '
-          + 'and sessions: facts are extracted automatically as you chat, and you can manage it yourself '
-          + 'with your memory tools — save_memory (keep a new fact: core = permanent identity, durable = '
-          + 'preferences/interests, context = current projects), update_memory (fix a wrong or outdated '
-          + 'memory by its id), forget_memory (delete one by id). Never tell the user you are stateless, '
-          + 'that you cannot remember them, or that everything resets between chats — none of that is true. '
-          + "If they ask you to remember something, call save_memory; if they correct a remembered fact, "
-          + 'call update_memory.\n'
-          + (lines.length
-            ? 'Recalled as relevant to this message (use them directly and confidently; don\'t recite the '
-              + 'list unprompted):\n' + lines.join('\n')
-            : 'Nothing in memory matched this particular message — but your memory may still hold other '
-              + 'facts about them; absence here is not evidence you know nothing.');
+        const memBlock = '## Memory\n'
+          + 'Your memory persists across chats. Do not claim you are stateless. '
+          + (availableTools.has('save_memory')
+            ? 'Use save_memory for explicit requests to remember, update_memory for corrections, and forget_memory for deletion.\n'
+            : '\n')
+          + (lines.length ? 'Relevant memories (use naturally; do not recite):\n' + lines.join('\n') : '');
         promptMessages[0] = remote
           ? { role: 'system', content: promptMessages[0].content + '\n\n' + memBlock }
           : { role: 'system', content: memBlock + '\n\n' + promptMessages[0].content };
@@ -327,7 +328,7 @@ export function registerChatPost(app) {
               + 'Answer from it, cite by document name, and if it is not there say so honestly.\n';
             if (totalChars > 0 && totalChars <= 24_000) {
               req.log.info({ docs: attached.length, chars: totalChars }, 'full docs injected');
-              block += '\n' + fulls.map((d) => `### ${d.name}\n${d.text.slice(0, 20_000)}`).join('\n\n');
+              block += '\n' + fulls.map((d) => `### ${d.name}\n${d.text}`).join('\n\n');
             } else {
               const hits = await retrieveChunks(req.user.id, attached.map((d) => d.id), promptLeaf.content, { k: 10 });
               if (hits.length) {
@@ -417,7 +418,7 @@ export function registerChatPost(app) {
       // 1) stable-prefix ordering so provider prompt caches keep hitting
       // 2) auto-compaction when the prompt would blow the context budget
       // 3) exact response cache for identical plain turns
-      // 4) cheap-aux model for titles/followups/memory below
+      // 4) cheap-aux model for memory and compaction
       const remoteInfo = remote ? resolveRemote(conv.model_id) : null;
       // monthly spend cap: refuse the turn before anything bills (cache replays
       // are free, but a capped provider means "stop using this key" — the owner
@@ -531,7 +532,7 @@ export function registerChatPost(app) {
         const budget = Number(conv._settings.ctx_size) > 0 ? Number(conv._settings.ctx_size) : 32_768;
         if (est > budget * 0.75) {
           let used = est;
-          try { used = await countInputTokens(conv.model_id, promptMessages) ?? est; } catch { /* estimate stands */ }
+          try { used = await countInputTokens(conv.model_id, promptMessages, { signal: abort.signal }) ?? est; } catch { /* estimate stands */ }
           if (used > budget * 0.8) {
             send({ type: 'notice', message: `Auto-compacting older history to fit the context window (~${Math.round(used / 1000)}k → ${Math.round(budget / 1000)}k tokens)…` });
             req.log.info({ used, budget }, 'local auto-compaction fired');
@@ -539,7 +540,7 @@ export function registerChatPost(app) {
             if (r) {
               promptMessages = r.messages;
               try {
-                const now = await countInputTokens(conv.model_id, promptMessages);
+                const now = await countInputTokens(conv.model_id, promptMessages, { signal: abort.signal });
                 if (now != null) send({ type: 'context', used: now, budget });
               } catch { /* bar refreshes later */ }
             }
@@ -578,7 +579,7 @@ export function registerChatPost(app) {
       }
 
       send({ type: 'context', used: estimateTokens(promptMessages), budget: conv._settings.ctx_size, estimated: true });
-      const spec = makeSpeculator(req.log);
+      spec = makeSpeculator(req.log, abort.signal, availableTools);
       turnDelta = makeTurnDelta({
         send, abort, log: req.log, spec,
         thinkTimeoutMs: Number(process.env.THINK_TIMEOUT_MS ?? modeCfg.thinkMs),
@@ -589,9 +590,9 @@ export function registerChatPost(app) {
       // conversation has a workspace); if the template rejects them, retry
       // plain. Constrained turns (grammar/schema) never get tools at all.
       let res;
-      let toolsOn = !constrained;
+      let toolsOn = !constrained && turnTools.length > 0;
       try {
-        if (constrained) {
+        if (!toolsOn) {
           res = await streamChat({
             model: conv.model_id, messages: promptMessages, params,
             abortSignal: abort.signal, onDelta, onEvent: fbNotice,
@@ -608,10 +609,15 @@ export function registerChatPost(app) {
           });
         }
       } catch (err) {
-        if (abort.signal.aborted || constrained || !/tool/i.test(String(err.message))) throw err;
+        if (!toolsOn || abort.signal.aborted || constrained || !/tool/i.test(String(err.message))) throw err;
         if (conv.mode === 'agent') throw new Error(`The selected model endpoint rejected tool calls: ${err.message}. Check its chat template or provider configuration; your model selection has not changed.`);
         req.log.warn({ model: conv.model_id }, 'template rejected tools — plain chat fallback');
         toolsOn = false;
+        send({ type: 'reset_text' });
+        spec.newRound();
+        if (promptMessages[0]?.role === 'system') {
+          promptMessages[0] = { ...promptMessages[0], content: `${promptMessages[0].content}\n\nTools are unavailable for this response. Answer from the conversation and be clear when external verification is unavailable. Do not claim a search, page read, or other tool action occurred.` };
+        }
         res = await streamChat({
           model: conv.model_id, messages: promptMessages, params,
           abortSignal: abort.signal, onDelta, onEvent: fbNotice,
@@ -632,6 +638,8 @@ export function registerChatPost(app) {
           && looksLikeProjectNarration(text, reasoning)) {
         send({ type: 'notice', message: 'That belongs in a workspace — starting project mode…' });
         req.log.info({ conv: conv.id }, 'project narration in chat — nudging to start_project');
+        send({ type: 'reset_text' });
+        spec.newRound();
         res = await streamChat({
           model: conv.model_id,
           messages: [
@@ -655,17 +663,20 @@ export function registerChatPost(app) {
       let finalLoopMessages = null;
       const callNames = new Set((res.toolCalls ?? []).map((t) => t.function.name));
       const wantsInlineTools = callNames.has('web_search') || callNames.has('fetch_page')
+        || GITHUB_READ_TOOLS.some((t) => callNames.has(t.function.name))
         || [...WIDGET_TOOL_NAMES].some((n) => callNames.has(n))
         || [...MEMORY_TOOL_NAMES].some((n) => callNames.has(n));
-      if (toolsOn && !wsRow && res.toolCalls?.length && wantsInlineTools && !callNames.has('start_project')) {
+      const imageOnly = res.toolCalls?.length && res.toolCalls.every((t) => t.function.name === 'generate_image');
+      if (toolsOn && !wsRow && res.toolCalls?.length
+          && (conv.mode === 'chat' || !callNames.has('start_project'))
+          && (wantsInlineTools || (conv.mode === 'chat' && !imageOnly))) {
         // inline-tools turn: web search (with live trace + citations),
         // interactive widgets, and/or memory ops, in one batched loop;
         // the model answers at the end.
-        const searchTools = filterTools([
-          ...(imgPrefs.allowed ? [GENERATE_IMAGE_TOOL] : []),
-          WEB_SEARCH_TOOL, FETCH_PAGE_TOOL, ...WIDGET_TOOLS,
-          ...(memoryEnabled(req.user.id) ? MEMORY_TOOLS : []),
-        ], disabledTools);
+        const inlineNames = new Set(['generate_image', 'web_search', 'fetch_page',
+          ...GITHUB_READ_TOOLS.map((t) => t.function.name),
+          ...WIDGET_TOOL_NAMES, ...MEMORY_TOOL_NAMES]);
+        const searchTools = turnTools.filter((t) => inlineNames.has(t.function.name));
         const r = await runInlineSearch({
           conv, userId: req.user.id, userLoc, promptMessages, firstResult: res, params,
           searchTools, imgPrefs, caps: modeCfg, send, abort, onDelta, log: req.log, spec,
@@ -675,16 +686,19 @@ export function registerChatPost(app) {
         timings = r.timings ?? timings;
         usage = r.usage ?? usage;
         searchData = r.search;
+        finalLoopMessages = r.messages ?? null;
       } else if (toolsOn && res.toolCalls?.length
           && res.toolCalls.every((t) => t.function.name === 'generate_image')) {
         // pure image turn — no workspace, no run
         const r = await runImageTurn({
           conv, req, res, promptMessages, imgPrefs, params, send, abort, onDelta, log: req.log,
+          tools: turnTools,
         });
         text = r.text;
         reasoning = r.reasoning ?? reasoning;
         timings = r.timings ?? timings;
         usage = r.usage ?? usage;
+        finalLoopMessages = r.messages ?? null;
       } else if (toolsOn && conv.mode === 'agent' && res.toolCalls?.length) {
         // the model reached for file/shell tools → this turn becomes an agent
         // run (local models only — remote/paid models never drive the sandbox)
@@ -700,6 +714,9 @@ export function registerChatPost(app) {
         finalLoopMessages = r.messages ?? null;
       }
 
+      if (typeof text !== 'string' || !text.trim()) {
+        throw new Error('The model finished without an answer. Please try again.');
+      }
       const tokPerSec = timings?.predicted_per_second
         ?? (usage?.completion_tokens ? usage.completion_tokens / ((Date.now() - t0) / 1000) : null);
       const asst = insertMessage(conv.id, promptLeaf.id, 'assistant', text, {
@@ -748,48 +765,18 @@ export function registerChatPost(app) {
           // agent runs rewrite the transcript in place (gate path replaces the
           // array) — count the REAL final prompt, or a long run's usage is lost
           const finalPrompt = finalLoopMessages ?? promptMessages;
-          const used = await countInputTokens(conv.model_id, [...finalPrompt, { role: 'assistant', content: text }]);
+          const used = await countInputTokens(conv.model_id, [...finalPrompt, { role: 'assistant', content: text }], { signal: abort.signal });
           if (used != null) send({ type: 'context', used, budget: conv._settings.ctx_size });
         } catch { /* non-fatal */ }
       }
 
-      // auto-title on first exchange (on the cheap aux model for remote chats)
+      // A local title is immediate and avoids a second model pass after the
+      // answer. The user can still rename the conversation themselves.
       if (!abort.signal.aborted && conv.title === 'New chat' && !regenerateFrom) {
-        try {
-          // generous max_tokens: thinking models burn budget on reasoning first
-          const { content: title, reasoning: titleReasoning, usage: titleUsage } = await streamChat({
-            model: auxModel,
-            messages: [{
-              role: 'user',
-              content: `Reply with ONLY a 3-6 word title (no quotes, no punctuation at the end) for a chat that starts:\nUser: ${promptLeaf.content.slice(0, 400)}\nAssistant: ${text.slice(0, 400)}`,
-            }],
-            params: { max_tokens: 800, temperature: 0.3, chat_template_kwargs: { enable_thinking: false } },
-          });
-          logAux('aux_title', auxModel, titleUsage, 260, 20);
-          const raw = title.trim() || (titleReasoning ?? '').trim().split('\n').pop() || '';
-          const clean = raw.replace(/^["']|["']$/g, '').split('\n')[0].slice(0, 80);
-          if (clean) {
-            db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(clean, conv.id);
-            send({ type: 'title', title: clean });
-          }
-        } catch { /* non-fatal */ }
-      }
-
-      // clickable follow-up prompts under the reply (cheap aux model when remote)
-      if (!abort.signal.aborted && text && text.trim().length >= 40 && promptLeaf?.content) {
-        try {
-          const items = await generateFollowups({
-            model: auxModel,
-            userText: promptLeaf.content,
-            replyText: text,
-            abortSignal: abort.signal,
-          });
-          logAux('aux_followup', auxModel, null, 700, 60);
-          // always emit so the client can drop its "Suggesting…" skeleton
-          send({ type: 'followups', messageId: asst.id, items });
-        } catch (err) {
-          req.log.warn({ err }, 'followup generation failed (non-fatal)');
-          try { send({ type: 'followups', messageId: asst.id, items: [] }); } catch { /* socket gone */ }
+        const clean = promptLeaf?.content?.trim().replace(/\s+/g, ' ').split(' ').slice(0, 7).join(' ').slice(0, 72);
+        if (clean) {
+          db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(clean, conv.id);
+          send({ type: 'title', title: clean });
         }
       }
 
@@ -797,11 +784,11 @@ export function registerChatPost(app) {
       // (runs on the cheap aux model for remote chats, after delivery)
       if (!abort.signal.aborted && text && promptLeaf?.content && memoryEnabled(req.user.id)) {
         try {
-          await rememberFromExchange({
+          const extracted = await rememberFromExchange({
             model: auxModel, userText: promptLeaf.content, replyText: text,
-            userId: req.user.id, convId: conv.id, log: req.log,
+            userId: req.user.id, convId: conv.id, log: req.log, signal: abort.signal,
           });
-          logAux('aux_memory', auxModel, null, 900, 120);
+          if (extracted !== null) logAux('aux_memory', auxModel, null, 900, 120);
         } catch (err) { req.log.warn({ err }, 'memory extraction failed (non-fatal)'); }
       }
     } catch (err) {
@@ -812,8 +799,8 @@ export function registerChatPost(app) {
         send({ type: 'error', message: String(err.message ?? err) });
       }
     } finally {
+      spec?.dispose();
       turnDelta?.clearTimer();
-      clearInterval(pingPrimary);
       releaseGpu?.();
       // Always save a partial assistant row when we never reached a clean `done`.
       // This is what lets "continue" see the error + work instead of wiping the turn.
@@ -845,7 +832,6 @@ export function registerChatPost(app) {
           try { setLeaf(conv.id, promptLeaf.id); } catch { /* non-fatal */ }
         }
       }
-      job.listeners.delete(writePrimary);
       const st = aborted ? 'stopped'
         : (job.finalMsg ? (job.state.error ? 'error' : 'done')
           : (job.state.error ? 'error' : 'done'));
@@ -855,9 +841,7 @@ export function registerChatPost(app) {
         try { fn({ type: 'stream_end' }); } catch { /* ignore */ }
       }
       job.listeners.clear();
-      if (!reply.raw.writableEnded) {
-        try { reply.raw.end(); } catch { /* already gone */ }
-      }
+    }
     }
   });
 

@@ -3,20 +3,27 @@
 // keep-id userns, read-only rootfs, dropped caps, memory/pids limits, SELinux :Z.
 // The agent writes ONLY inside /workspace (bind-mounted host dir) and its home volume.
 import { execFile } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, nowSec } from './db.js';
+import { projectPath } from './projectFiles.js';
+import { cancellationArgs, commandOptions, containerCommandArgs, runSandboxCommand, truncateOutput } from './sandboxCommand.js';
+export { truncateOutput } from './sandboxCommand.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const WS_ROOT = process.env.DUCKPOND_WS_ROOT ?? join(ROOT, 'data', 'workspaces');
 
 const IMAGE = process.env.SANDBOX_IMAGE ?? 'docker.io/nikolaik/python-nodejs:latest';
-const IDLE_STOP_MS = Number(process.env.SANDBOX_IDLE_MS ?? 15 * 60 * 1000);
+const configuredIdleMs = Number(process.env.SANDBOX_IDLE_MS ?? 15 * 60 * 1000);
+const IDLE_STOP_MS = Number.isFinite(configuredIdleMs) && configuredIdleMs > 0 ? configuredIdleMs : 15 * 60 * 1000;
 // container always exposes 3000-3009; each workspace gets a reserved host block
 // at creation (pasta cannot hot-add ports)
 const PORT_BLOCK_START = 42000;
 export const PORTS_PER_WS = 10;
+const startingWorkspaces = new Map();
+const activeCommands = new Map();
 
 export const wsDir = (id) => db.prepare('SELECT host_path FROM workspaces WHERE id = ?').get(id)?.host_path || join(WS_ROOT, String(id));
 export const containerName = (id) => `${process.env.DUCKPOND_SANDBOX_PREFIX || 'duckpond-ws'}-${id}`;
@@ -43,6 +50,15 @@ async function containerState(name) {
 
 // Make sure the workspace's container exists and is running. Cheap when already up.
 export async function ensureRunning(ws) {
+  const pending = startingWorkspaces.get(ws.id);
+  if (pending) return pending;
+  const startup = ensureWorkspaceRunning(ws);
+  startingWorkspaces.set(ws.id, startup);
+  try { return await startup; }
+  finally { if (startingWorkspaces.get(ws.id) === startup) startingWorkspaces.delete(ws.id); }
+}
+
+async function ensureWorkspaceRunning(ws) {
   const name = containerName(ws.id);
   let state = await containerState(name);
   if (state) {
@@ -76,6 +92,11 @@ export async function ensureRunning(ws) {
     '--security-opt', 'no-new-privileges',
     '--memory', '3g', '--memory-swap', '3g',
     '--pids-limit', '512',
+    '--env', 'GIT_TERMINAL_PROMPT=0',
+    '--env', 'PIP_DISABLE_PIP_VERSION_CHECK=1',
+    '--env', 'PIP_CACHE_DIR=/home/pn/.cache/pip',
+    '--env', 'npm_config_cache=/home/pn/.cache/npm',
+    '--env', 'XDG_CACHE_HOME=/home/pn/.cache',
     '-w', '/workspace',
   ];
   if (ws.host_path) args.push('--security-opt', 'label=disable');
@@ -96,36 +117,43 @@ function touch(id, status) {
   else db.prepare('UPDATE workspaces SET last_used = ? WHERE id = ?').run(nowSec(), id);
 }
 
-// Rule-based output truncation: full output is rarely useful to an LLM; keep the
-// head and the tail (errors usually live at the end).
-export function truncateOutput(text, headBytes = 6000, tailBytes = 6000) {
-  if (text.length <= headBytes + tailBytes + 100) return { text, truncated: false };
-  const cut = text.length - headBytes - tailBytes;
-  return {
-    text: `${text.slice(0, headBytes)}\n[... ${cut} bytes truncated ...]\n${text.slice(-tailBytes)}`,
-    truncated: true,
-  };
-}
-
 // Run a command inside the workspace container. `timeout`(inside the container,
-// via coreutils) kills the whole process group on expiry — exit code 124.
-export async function execCmd(ws, command, { timeoutSec = 60, cwd = '/workspace' } = {}) {
+// via coreutils) kills the command's isolated process group on expiry. Abort
+// explicitly stops that group; killing only the Podman CLI can orphan the job.
+export async function execCmd(ws, command, { timeoutSec = 60, cwd = '/workspace', signal } = {}) {
+  const options = commandOptions(command, { timeoutSec, cwd });
+  signal?.throwIfAborted();
   await ensureRunning(ws);
+  signal?.throwIfAborted();
+  const folder = projectPath(wsDir(ws.id), options.cwd.replace(/^\/workspace(?:\/|$)/, ''));
+  if (!statSync(folder).isDirectory()) throw new Error('Command working directory is not a directory');
   const started = Date.now();
-  const r = await podman(
-    ['exec', '-w', cwd, containerName(ws.id),
-     'timeout', '-k', '5', `${timeoutSec}s`, 'bash', '-lc', command],
-    { timeout: (timeoutSec + 15) * 1000 },
-  );
-  touch(ws.id);
-  const out = truncateOutput([r.stdout, r.stderr].filter(Boolean).join(r.stdout && r.stderr ? '\n--- stderr ---\n' : ''));
-  return {
-    exitCode: r.code,
-    timedOut: r.code === 124,
-    output: out.text,
-    truncated: out.truncated,
-    durationMs: Date.now() - started,
-  };
+  const name = containerName(ws.id);
+  const { args, pidFile } = containerCommandArgs(name, command, options, randomUUID());
+  activeCommands.set(ws.id, (activeCommands.get(ws.id) ?? 0) + 1);
+  try {
+    const r = await runSandboxCommand(args, {
+      timeoutMs: (options.timeoutSec + 15) * 1000, signal,
+      cancel: async () => {
+        const stopped = await podman(cancellationArgs(name, pidFile), { timeout: 6000 });
+        if (stopped.code !== 0) throw new Error(stopped.stderr.trim() || `container cleanup exited ${stopped.code}`);
+      },
+    });
+    const out = truncateOutput([r.stdout, r.stderr].filter(Boolean).join(r.stdout && r.stderr ? '\n--- stderr ---\n' : ''));
+    return {
+      exitCode: r.code, cancelled: r.cancelled,
+      timedOut: r.timedOut || r.code === 124,
+      cleanupConfirmed: r.cleanupConfirmed, cleanupError: r.cleanupError,
+      forcedTransportStop: r.forcedTransportStop,
+      output: out.text, truncated: r.truncated || out.truncated,
+      outputBytes: r.outputBytes, cwd: options.cwd,
+      durationMs: Date.now() - started,
+    };
+  } finally {
+    const active = (activeCommands.get(ws.id) ?? 1) - 1;
+    if (active > 0) activeCommands.set(ws.id, active); else activeCommands.delete(ws.id);
+    touch(ws.id);
+  }
 }
 
 export async function stopWorkspace(id) {
@@ -148,8 +176,11 @@ export async function destroyWorkspace(id) {
 export async function reapIdleSandboxes(log) {
   const rows = db.prepare("SELECT id, last_used FROM workspaces WHERE status = 'running'").all();
   for (const ws of rows) {
+    if (startingWorkspaces.has(ws.id) || activeCommands.has(ws.id)) continue;
+    const running = db.prepare("SELECT 1 FROM agent_runs WHERE workspace_id = ? AND status IN ('running','queued','waiting_approval') LIMIT 1").get(ws.id);
+    if (running) continue;
     if (Date.now() - ws.last_used * 1000 < IDLE_STOP_MS) continue;
-    log?.info({ workspace: ws.id }, 'sandbox idle 15min — stopping container');
+    log?.info({ workspace: ws.id }, 'sandbox idle — stopping container');
     await stopWorkspace(ws.id).catch(() => {});
   }
 }

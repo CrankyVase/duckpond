@@ -1,0 +1,7 @@
+{
+  "paramsBackend": "auto",
+  "flashAll": true,
+  "mmap": true,
+  "vaeTile": 256,
+  "vaeOverlap": 0.5
+}

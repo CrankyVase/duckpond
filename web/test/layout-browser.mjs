@@ -92,9 +92,10 @@ assert.equal(await page.getByRole('option').count(),1);
 await page.getByRole('searchbox',{name:'Find a model'}).fill('not-here');
 assert.equal(await page.getByRole('option').count(),0);
 await page.keyboard.press('Escape');
-await page.getByRole('button',{name:'Settings',exact:true}).click();
+await page.getByRole('link',{name:'Settings',exact:true}).click();
 await page.getByRole('heading',{name:'Appearance',exact:true}).waitFor();
 await shot('settings-desktop');
+await page.getByRole('button',{name:/Models & tools/}).click();
 await page.getByRole('button',{name:'Generation',exact:true}).click();
 await page.getByRole('heading',{name:'Generation',exact:true}).waitFor();
 // Navigation between sections must retain edits until Save.
@@ -124,7 +125,11 @@ for (const width of [390,768]) {
   await page.goto(`${previewUrl}/u/1/settings`);
   await page.getByRole('heading',{name:'Appearance',exact:true}).waitFor();
   await noOverflow(); await shot(`settings-${width}`);
-  await page.getByRole('button',{name:'Account',exact:true}).click();
+  if(width<=700) await page.locator('.mobile-section-picker select').selectOption('account');
+  else {
+    await page.getByRole('button',{name:/Access & integrations/}).click();
+    await page.getByRole('button',{name:'Account',exact:true}).click();
+  }
   await page.getByRole('heading',{name:'Account',exact:true}).waitFor();
   await noOverflow();
   await page.goto(`${previewUrl}/u/1/providers`);
@@ -140,6 +145,9 @@ conversation.messages=[{id:1,parent_id:null,role:'user',content:'Build a simple 
 conversation.active_leaf_id=3;
 await page.setViewportSize({width:1440,height:1100});
 await page.goto(`${previewUrl}/u/1/recovery-test+42`);
+await page.getByRole('button',{name:/Agent run/}).waitFor();
+assert.equal(await page.locator('.diffhead').count(),0, 'completed agent details start collapsed');
+await page.getByRole('button',{name:/Agent run/}).click();
 await page.locator('.diffhead').waitFor();
 assert.equal(await page.locator('.diff .lines').count(),0);
 await shot('tools-widgets-desktop');
@@ -160,7 +168,6 @@ for (const width of [1440,390]) {
     await page.goto(`${previewUrl}/u/1/${view}`);
     await page.locator(`.${view} h1`).waitFor();
     if(view==='files') {
-      assert.equal(await page.locator('details.studio').getAttribute('open'),null);
       await page.locator('.files .tabs button').filter({hasText:'Docs'}).click();
       await page.getByText('Project notes.md',{exact:true}).waitFor();
     }
@@ -173,10 +180,11 @@ for(const width of [1440,390]) {
   await page.setViewportSize({width,height:width < 500 ? 844 : 1000});
   await page.goto(`${previewUrl}/u/1/hub`);
   await page.getByRole('button',{name:'View downloads'}).waitFor();
+  await page.getByRole('button',{name:'Discover',exact:true}).click();
   await page.locator('.split .list .rrow').first().waitFor();
   assert.equal(await page.locator('.download-summary').count(),1);
-  assert((await page.locator('.split').boundingBox()).height>200,'catalog remains usable with active downloads');
   await shot(`hub-downloads-${width}`);
+  assert((await page.locator('.split .list .rrow').first().isVisible()),'catalog remains usable with active downloads');
   const before=downloadPolls;
   downloadJobs=downloadJobs.map(j=>({...j,downloadedBytes:5e9,etaSec:50}));
   await page.waitForFunction(()=>document.querySelector('.download-progress')?.textContent.includes('50%'));
@@ -190,6 +198,7 @@ for(const width of [1440,390]) {
 downloadJobs=[];
 await page.setViewportSize({width:1440,height:1000});
 await page.goto(`${previewUrl}/u/1/hub`);
+await page.getByRole('button',{name:'Discover',exact:true}).click();
 await page.locator('.split .list .rrow').first().click();
 await page.locator('.vhead .dlbtn').click();
 await page.getByRole('button',{name:'View downloads'}).waitFor();

@@ -5,6 +5,10 @@ import { mount } from 'svelte';
 import App from './App.svelte';
 import { startFavicon } from './lib/favicon.js';
 import './app.css';
+import './components/hub-ui-library.css';
+import './components/hub-ui-detail.css';
+import './components/hub-ui-browse.css';
+import './workspace.css';
 
 startFavicon();
 

@@ -82,7 +82,11 @@ export function buildPrompt(conv, leafId, { slim = false } = {}) {
 
 export function convForUser(id, userId) {
   const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(id, userId);
-  if (conv) conv._settings = { ...modelSettings(conv.model_id ?? ''), ...JSON.parse(conv.settings_json) };
+  if (conv) {
+    conv._settings = { ...modelSettings(conv.model_id ?? ''), ...JSON.parse(conv.settings_json) };
+    // Old conversation overrides must match the Windows worker's actual context.
+    if (process.env.INFERENCE_HARDWARE_URL && !isRemoteId(conv.model_id)) conv._settings.ctx_size = 32768;
+  }
   return conv;
 }
 
@@ -193,7 +197,7 @@ export function persistInterruptedReply(job, conv, promptLeaf, { aborted = false
     setLeaf(conv.id, asst.id);
     job.finalMsg = asst;
     // Fans out to every attached client (primary + reattach tails)
-    broadcast(job, { type: 'done', msg: asst });
+    broadcast(job, { type: 'done', msg: asst, outcome: aborted ? 'stopped' : 'error' });
     return asst;
   } catch (err) {
     log?.error?.({ err }, 'persistInterruptedReply failed');

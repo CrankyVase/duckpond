@@ -10,6 +10,7 @@ import os from 'node:os';
 import { checkUserContent } from '../contentFilter.js';
 import { bridgeModels, IMAGES_DIR, MEDIA_DIR } from '../imagegen.js';
 import { gpuVram } from '../llama.js';
+import { inferenceHardware, usesRemoteHardware } from '../inferenceHardware.js';
 import { presetEstimates } from '../mediaEta.js';
 import { enhanceMediaPrompt } from '../promptEnhancer.js';
 import { cancelMediaJob, createMediaJob, getMediaJob, listJobs, pruneMediaJobs, mediaQueuePaused, setMediaQueuePaused, retryMediaJob } from '../mediaJobs.js';
@@ -52,10 +53,17 @@ export default async function mediaRoutes(app) {
     const previewEvery = [0, 1, 2, 4, 8].includes(Number(req.query.previewEvery)) ? Number(req.query.previewEvery) : 1;
     const refCount = Math.max(0, Math.min(4, Number(req.query.refCount ?? 0) || 0));
     const enhance = req.query.enhance !== '0';
-    return { ok: true, ...presetEstimates({ shape, n, previewEvery, refCount, enhance }) };
+    const models = await bridgeModels().catch(() => null);
+    const loaded = !!models?.models?.some((model) => model.task === 'image' && model.loaded);
+    return { ok: true, ...presetEstimates({ shape, n, previewEvery, refCount, enhance, loaded }) };
   });
 
   app.get('/api/media/resources', async () => {
+    if (usesRemoteHardware()) {
+      const hw = await inferenceHardware().catch(() => null);
+      return { host: hw?.host ?? 'Windows MR_PC', available: !!hw,
+        ram: hw?.ram ?? null, cpuPercent: hw?.cpuPercent ?? null, vram: hw?.vram ?? null };
+    }
     const total = os.totalmem();
     const gpu = await gpuVram().catch(() => null);
     return {

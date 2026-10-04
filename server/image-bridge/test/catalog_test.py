@@ -87,7 +87,7 @@ class CatalogTests(unittest.TestCase):
         info = inspect_snapshot(self.snap)
         self.assertTrue(info['ready'])
         self.assertTrue(info['supports_image'])
-        self.assertEqual(info['max_references'], 10)
+        self.assertEqual(info['max_references'], 4)
         self.assertEqual(info['default_steps'], 40)
         self.assertEqual(info['task'], 'image')
 
@@ -220,7 +220,7 @@ class CatalogTests(unittest.TestCase):
         self.assertFalse(info['ready'])
         self.assertIn('Qwen/Qwen-Image-2.1', info['reason'])
 
-    def test_qwen21_gguf_ready_with_base_repo(self):
+    def test_qwen21_gguf_requires_runtime_loader_even_with_base_repo(self):
         snap = self.root / 'models--city96--Qwen-Image-2.1-GGUF' / 'snapshots' / 'rev'
         snap.mkdir(parents=True)
         (snap / 'qwen-image-2.1-Q4_0.gguf').write_text('weights')
@@ -232,7 +232,8 @@ class CatalogTests(unittest.TestCase):
         info = inspect_snapshot(snap, repo_id='city96/Qwen-Image-2.1-GGUF')
         self.assertEqual(info['kind'], 'qwen21_gguf')
         self.assertEqual(info['quant'], 'Q4_0')
-        self.assertTrue(info['ready'])
+        self.assertFalse(info['ready'])
+        self.assertIn('cannot load Qwen-Image 2.1 GGUF', info['reason'])
 
     def test_qwen21_gguf_prefers_higher_quality_quant(self):
         snap = self.root / 'models--city96--Qwen-Image-2.1-GGUF' / 'snapshots' / 'rev'
@@ -247,7 +248,7 @@ class CatalogTests(unittest.TestCase):
         info = inspect_snapshot(snap, repo_id='city96/Qwen-Image-2.1-GGUF')
         self.assertEqual(info['quant'], 'Q8_0')
         self.assertIn('Q8_0', info['path'])
-        self.assertTrue(info['ready'])
+        self.assertFalse(info['ready'])
 
     def test_true_cfg_scale_validation(self):
         validate_request({'prompt': 'test', 'true_cfg_scale': 2.5})

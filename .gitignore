@@ -1,4 +1,15 @@
 node_modules/
+models/
+.bridge-venv/
+bridge/windows-cache.json
+bridge/linux-runtime/
+bridge/*.png
+bridge/*.sse
+bridge/*-result.json
+bridge/*-load.json
+bridge/*-timings.json
+bridge/latency-final.json
+bridge/qa-model-list.json
 data/
 dist/
 nohup.out
@@ -11,3 +22,4 @@ __pycache__/
 .deploy-drain
 .deploy-next.*
 .deploy-health.*
+bridge/*.zip

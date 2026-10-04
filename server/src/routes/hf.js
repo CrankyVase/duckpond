@@ -15,6 +15,7 @@ import { ensureLoadedModel, reloadRouterModels, unloadModel } from '../llama.js'
 import { evictBridgeModels } from '../imagegen.js';
 import { activeMediaJobCount } from '../mediaJobs.js';
 import { isEnhancerModel } from '../promptEnhancer.js';
+import { discoverModels } from '../modelDiscovery.js';
 
 // Org/user profile picture, resolved through the server (browser never
 // reaches huggingface.co) and cached in memory for 12h. Lives in its own
@@ -73,6 +74,11 @@ export default async function hfRoutes(app) {
     catch (e) { return reply.code(502).send({ error: e.message }); }
   });
 
+  app.get('/api/hf/discover', async (req, reply) => {
+    try { return await discoverModels({ feed: req.query.feed, query: req.query.q, sort: req.query.sort, cursor: req.query.cursor }); }
+    catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
+  });
+
   app.get('/api/hf/readme/*', async (req, reply) => {
     try { return await modelReadme(req.params['*']); }
     catch (e) { return reply.code(e.status ?? 502).send({ error: e.message }); }
@@ -111,8 +117,21 @@ export default async function hfRoutes(app) {
 
   app.post('/api/hf/download', async (req, reply) => {
     if (req.user.role !== 'owner') return reply.code(403).send({ error: 'owner only' });
-    const { repoId, include, variant, totalBytes } = req.body ?? {};
-    try { return startDownload(repoId, { include, variant, totalBytes }); }
+    const { repoId, include } = req.body ?? {};
+    try {
+      const listing = await modelVariants(repoId);
+      let selected = listing.variants.find((row) => (row.include ?? null) === (include ?? null));
+      // Older download history selected whole quant folders. Preserve retry
+      // only if that folder contains exactly one grouped GGUF version.
+      if (!selected && typeof include === 'string' && include.endsWith('/*')) {
+        const prefix = include.slice(0, -1);
+        const matches = listing.variants.filter((row) => typeof row.include === 'string' && row.include.startsWith(prefix));
+        if (matches.length === 1) selected = matches[0];
+      }
+      if (!selected) return reply.code(409).send({ error: 'This model version is no longer available. Refresh its files.' });
+      if (selected.complete === false) return reply.code(409).send({ error: 'This version has missing or incomplete model files. Choose another version.' });
+      return startDownload(repoId, { include, variant: selected.name, totalBytes: selected.size });
+    }
     catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
   });
 
@@ -176,7 +195,9 @@ export default async function hfRoutes(app) {
       } else {
         return reply.code(400).send({ error: 'unknown source' });
       }
-      if (result.presetRemoved > 0) await reloadRouterModels().catch(() => {});
+      // Auto-discovered downloads may have no preset. Refresh every deletion
+      // so the Windows bridge unloads a removed model and prunes its SSD copy.
+      await reloadRouterModels().catch(() => {});
       return result;
     } catch (e) { return reply.code(e.status ?? 500).send({ error: e.message }); }
   });

@@ -9,7 +9,7 @@ import { checkUserContent } from '../contentFilter.js';
 import { bridgePost, bridgeModels, generateViaBridge, getUserImagePrefs, IMAGES_DIR, MEDIA_DIR, stepsForQuality } from '../imagegen.js';
 import { acquireGpu } from '../gpuqueue.js';
 
-const MIME = { png: 'image/png', mp4: 'video/mp4', wav: 'audio/wav' };
+const MIME = { png: 'image/png', webp: 'image/webp', mp4: 'video/mp4', wav: 'audio/wav' };
 
 export default async function imageRoutes(app) {
   app.addHook('preHandler', requireAuth);
@@ -42,7 +42,7 @@ export default async function imageRoutes(app) {
     const row = db.prepare('SELECT file FROM images WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
     if (!row) return reply.code(404).send({ error: 'not found' });
     const ext = row.file.split('.').pop()?.toLowerCase() ?? 'png';
-    const dir = ext === 'png' ? IMAGES_DIR : MEDIA_DIR;
+    const dir = ext === 'png' || ext === 'webp' ? IMAGES_DIR : MEDIA_DIR;
     reply.header('cache-control', 'private, max-age=60, must-revalidate');
     reply.header('pragma', 'no-cache');
     reply.header('vary', 'Cookie');
@@ -55,8 +55,11 @@ export default async function imageRoutes(app) {
     if (!row || (row.user_id !== req.user.id && req.user.role !== 'owner')) {
       return reply.code(404).send({ error: 'not found' });
     }
+    try { unlinkSync(join(/\.(png|webp)$/i.test(row.file) ? IMAGES_DIR : MEDIA_DIR, row.file)); }
+    catch (error) {
+      if (error.code !== 'ENOENT') return reply.code(500).send({ error: 'Could not remove the saved file. Please try again.' });
+    }
     db.prepare('DELETE FROM images WHERE id = ?').run(row.id);
-    try { unlinkSync(join(row.file.endsWith('.png') ? IMAGES_DIR : MEDIA_DIR, row.file)); } catch { /* already gone */ }
     try {
       const max = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM images').get()?.m ?? 0;
       const keep = Math.max(max, row.id);

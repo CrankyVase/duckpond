@@ -38,18 +38,18 @@
 <div class="wrap">
   <form class="card slide-up" onsubmit={submit}>
     <div class="logo"><Duck px={2} bob interactive /></div>
-    <h1>DuckPond</h1>
+    <h1>duckpond.</h1>
     <p class="hint">
-      {app.setupNeeded ? 'First run — create the owner account.' : 'Your models, your pond.'}
+      {app.setupNeeded ? 'First run — create the owner account.' : 'Sign in to your workspace.'}
     </p>
-    <input placeholder="username" bind:value={username} autocomplete="username" />
-    <input type="password" placeholder="password" bind:value={password}
+    <input aria-label="Username" placeholder="Username" bind:value={username} autocomplete="username" />
+    <input aria-label="Password" type="password" placeholder="Password" bind:value={password}
       autocomplete={app.setupNeeded ? 'new-password' : 'current-password'} />
     {#if error}<p class="error">{error}</p>{/if}
     <button class="primary" disabled={busy || !username || !password}>
       {app.setupNeeded ? 'Create owner account' : 'Sign in'}
     </button>
-    <p class="fine"><LockKeyhole size={11} /> argon2id · rate-limited · sessions stay on this box</p>
+    <p class="fine"><LockKeyhole size={11} /> Your personal AI workspace</p>
   </form>
 </div>
 
@@ -59,22 +59,20 @@
     padding: 16px;
     padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
       max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
-    background:
-      radial-gradient(ellipse 60% 45% at 50% 0%, rgba(166, 124, 82, 0.07), transparent),
-      var(--bg);
+    background: var(--bg);
     box-sizing: border-box;
   }
   .card {
-    width: min(330px, 100%); display: flex; flex-direction: column; gap: 12px;
+    width: min(380px, 100%); display: flex; flex-direction: column; gap: 12px;
     background: var(--bg-sidebar); border: 1px solid var(--border);
     border-radius: 18px; padding: 34px 32px 26px;
-    box-shadow: var(--shadow-lg);
+    box-shadow: none;
     box-sizing: border-box;
   }
   @media (max-width: 420px) {
     .card { padding: 28px 20px 22px; }
   }
-  .logo { display: flex; justify-content: center; margin-bottom: 2px; }
+  .logo { filter: grayscale(1); display: flex; justify-content: center; margin-bottom: 2px; }
   h1 { margin: 0; font-size: 22px; text-align: center; font-weight: 600; letter-spacing: -0.01em; }
   .hint { margin: -6px 0 8px; color: var(--text-dim); font-size: 13px; text-align: center; }
   .error { margin: 0; color: var(--red); font-size: 13px; }
