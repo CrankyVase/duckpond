@@ -634,14 +634,14 @@
     const stamp = querySequence;
     if (stamp === lastQueryStamp) return;
     lastQueryStamp = stamp;
-    if (listEl && !searching) smoothScrollTo(listEl, 0, 260);
+    if (listEl && !searching) smoothScrollTo(listEl.closest('.hub') ?? listEl, 0, 260);
   });
 
   $effect(() => {
     if (!sentinelEl) return;
     const io = new IntersectionObserver((ents) => {
       if (ents.some((e) => e.isIntersecting)) fetchMore();
-    }, { root: listEl ?? null, rootMargin: '400px' });
+    }, { root: null, rootMargin: '400px' });
     io.observe(sentinelEl);
     return () => io.disconnect();
   });

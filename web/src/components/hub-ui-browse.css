@@ -296,3 +296,13 @@
 .hub.hub-studio nav.modebar .modebtn { height: 34px; padding-bottom: 8px; }
 .hub.hub-studio .collection-heading p, .hub.hub-studio .estimate-note { display: none; }
 .hub.hub-studio .collection-heading h2 { font-size: 16px; }
+
+/* ---- one scrolling page on desktop: no nested scroll panes, nothing cut off ---- */
+@media (min-width:901px) {
+  .hub.hub-studio { overflow-y: auto; overflow-x: hidden; }
+  .hub.hub-studio > * { flex-shrink: 0; }
+  .hub.hub-studio .split { flex: 0 0 auto; overflow: visible; align-items: start; }
+  .hub.hub-studio .split .list { overflow: visible; padding-right: 0; }
+  .hub.hub-studio .list .lhead { position: static; }
+  .hub.hub-studio .split .detail { position: sticky; top: 0; align-self: start; max-height: calc(100dvh - 150px); min-height: 0; overflow-y: auto; }
+}
