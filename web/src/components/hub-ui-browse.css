@@ -306,3 +306,24 @@
   .hub.hub-studio .list .lhead { position: static; }
   .hub.hub-studio .split .detail { position: sticky; top: 0; align-self: start; max-height: calc(100dvh - 150px); min-height: 0; overflow-y: auto; }
 }
+
+/* ---- LM Studio / Unsloth style: dense scannable rows with a live fit badge ---- */
+@media (min-width:901px) {
+  .hub.hub-studio .split { grid-template-columns: minmax(0, 1.7fr) minmax(360px, 1fr); }
+  .hub.hub-studio .model-grid { display: flex; flex-direction: column; gap: 6px; }
+  .hub.hub-studio .model-grid .model-card {
+    display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; grid-template-areas: "av name fit" "av tags stats";
+    align-items: center; column-gap: 14px; row-gap: 4px; min-height: 0; padding: 11px 16px; border-radius: 14px;
+  }
+  .hub.hub-studio .model-grid .model-card::before { display: none; }
+  .hub.hub-studio .model-card .model-card-top { display: contents; }
+  .hub.hub-studio .model-card .avatar { grid-area: av; width: 42px; height: 42px; }
+  .hub.hub-studio .model-card .rinfo { grid-area: name; min-width: 0; }
+  .hub.hub-studio .model-card .rname { font-size: 14px; }
+  .hub.hub-studio .model-card .card-arrow, .hub.hub-studio .model-card .card-summary { display: none; }
+  .hub.hub-studio .model-card .card-tags { grid-area: tags; margin: 0; flex-wrap: nowrap; overflow: hidden; }
+  .hub.hub-studio .model-card .card-memory { grid-area: fit; margin: 0; padding: 0; border: 0; justify-content: flex-end; flex-wrap: nowrap; gap: 10px; font-size: 11.5px; }
+  .hub.hub-studio .model-card .card-footer { grid-area: stats; padding: 0; justify-content: flex-end; gap: 12px; font-size: 10.5px; }
+  .hub.hub-studio .model-card .memory-fit { padding: 3px 10px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
+  .hub.hub-studio .model-grid .model-card.active { background: var(--bg-raised); border-color: var(--text-faint); }
+}

@@ -366,3 +366,6 @@
  .studio.studio-redesign .workbench .controls { overflow: visible; }
  .studio.studio-redesign .canvas,.studio.studio-redesign .canvas.image-canvas { height: auto; min-height: 420px; overflow: visible; }
 }
+
+/* image is the only studio now — no tab strip */
+.studio.studio-redesign .tasktabs { display: none; }

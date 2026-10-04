@@ -27,9 +27,6 @@
 
   const TASKS = [
     { id: 'image', label: 'Images', icon: ImageIcon, title: 'Make something worth seeing.', hint: 'Describe the scene, the light, the little details.', example: 'A quiet lakeside cabin at blue hour, warm light in the windows, mist above the water, cinematic photography' },
-    { id: 'video', label: 'Video', icon: Video, title: 'Set an idea in motion.', hint: 'Describe your scene and how it moves.', example: 'A slow camera glide over a mountain lake at sunrise, soft mist drifting across the water' },
-    { id: 'audio', label: 'Music & sound', icon: Music, title: 'Find your next sound.', hint: 'Describe the instruments, mood, rhythm, or atmosphere.', example: 'Mellow instrumental jazz, soft piano and brushed drums, warm vinyl texture, a rainy Sunday afternoon' },
-    { id: 'tts', label: 'Voice', icon: Mic, title: 'Give your words a voice.', hint: 'Write exactly what you want your voice to say.', example: 'Welcome to Duckpond. A little space for your biggest ideas.' },
   ];
   let task = $state('image');
   let models = $state([]);
@@ -510,7 +507,7 @@
 }} />
 <div class="media workspace-panel studio studio-redesign">
   <header class="studio-head">
-    <div class="studio-title-copy"><h1>Media Studio</h1><p>Images, video, music, and voice. All in one place.</p></div>
+    <div class="studio-title-copy"><h1>Media Studio</h1><p>Create images with your local models.</p></div>
     <div class="head-actions">
       <div class="studio-live-status" class:offline={!bridgeOk}><span></span>{loading ? 'Connecting' : bridgeOk ? 'Local engine online' : 'Engine offline'}</div>
       <button class="subtle" onclick={load} disabled={loading} aria-label="Refresh models and gallery"><RefreshCw size={15} /><span>Refresh</span></button>

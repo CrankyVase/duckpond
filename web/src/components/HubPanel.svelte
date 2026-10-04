@@ -107,8 +107,6 @@
   const TABS = [
     ['llm', 'Chat'],
     ['image', 'Image'],
-    ['audio', 'Voice & music'],
-    ['video', 'Video'],
   ];
   const LIST_HEADING = {
     llm: 'Models to explore',
