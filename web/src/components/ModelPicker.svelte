@@ -368,15 +368,6 @@
         </div>
         <div class="picker-actions">
           <button class="browse-models" onclick={() => { app.modelPickerOpen = false; app.view = 'hub'; }}><Download size={14} /> Browse models on this device <ChevronDown size={13} class="browse-arrow" /></button>
-          {#if current && !current.remote && resident(current.status)}
-            <button type="button" class="unload-current" onclick={(e) => unload(current, e)} disabled={unloading === current.id}>
-              <Power size={13} /> {unloading === current.id ? 'Unloading…' : 'Unload memory'}
-            </button>
-          {:else if current && !current.remote}
-            <button type="button" class="unload-current" onclick={(e) => load(current, e)} disabled={loading === current.id}>
-              <Play size={13} /> {loading === current.id ? 'Loading…' : 'Load memory'}
-            </button>
-          {/if}
           {#if current}
             <details class="manage-model">
               <summary>Manage current model</summary>
@@ -538,4 +529,35 @@
     .meta { overflow-wrap: anywhere; }
     .oname { font-size: 12px; }
   }
+
+  /* ---- redesign: roomy list, flat chips, neutral focus ---- */
+  .menu { width: 540px; max-width: min(540px, calc(100vw - 32px)); max-height: min(720px, 86dvh); background: var(--bg-sidebar); border-color: var(--border); border-radius: 20px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
+  .picker-heading { padding: 16px 18px 10px; }
+  .picker-heading strong { font-size: 15px; font-weight: 600; }
+  .model-search { border-radius: 12px; border-color: var(--border-soft); background: var(--bg-input); }
+  .model-search:focus-within { outline: none; border-color: var(--text-faint); }
+  .source-tabs { gap: 6px; border-bottom: 0; margin: 12px 16px 4px; }
+  .source-tabs button { border: 0; border-radius: 999px; padding: 6px 14px; font-size: 12px; background: transparent; color: var(--text-dim); }
+  .source-tabs button:hover { background: var(--bg-hover); }
+  .source-tabs button.active { background: var(--bg-raised); color: var(--text); }
+  .list { flex: 1 1 auto; min-height: 140px; padding: 4px 8px 8px; }
+  .gh { padding: 14px 10px 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); }
+  .opt { min-height: 0; padding: 10px 12px; border-radius: 12px; align-items: center; }
+  .opt.sel { background: var(--bg-raised); }
+  .oname { font-size: 14px; font-weight: 500; }
+  .meta { margin-top: 2px; font-size: 11.5px; }
+  .caps { gap: 5px; margin-top: 6px; }
+  .cap { border: 0; border-radius: 999px; padding: 2px 8px; font-size: 10.5px; font-weight: 500; background: var(--bg-hover); color: var(--text-dim); }
+  .cap[title^='Supports'] { background: color-mix(in srgb, #a78bfa 18%, transparent); color: #c4b5fd; }
+  .cap[title^='Can call'] { background: color-mix(in srgb, #60a5fa 18%, transparent); color: #93c5fd; }
+  .cap[title^='Can see'] { background: color-mix(in srgb, #f472b6 18%, transparent); color: #f9a8d4; }
+  .cap.free { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+  .row-unload { border-radius: 999px; border-color: var(--border); }
+  .check { color: var(--accent); }
+  .picker-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 8px 14px; background: transparent; }
+  .browse-models { width: auto; flex: 1 1 auto; border-radius: 12px; border-color: var(--border-soft); }
+  .manage-model { margin: 0; }
+  .manage-model[open] { flex-basis: 100%; }
+  .foot { display: none; }
+  @media (max-width: 768px) { .menu { max-height: 80dvh; width: auto; } }
 </style>
