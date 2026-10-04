@@ -284,3 +284,15 @@
 .hub.hub-studio .detail .media-file-select {width:100%;min-width:0;max-width:100%;margin:0 0 10px;padding:8px;font-size:11px;border:1px solid var(--border);border-radius:8px;background:var(--bg-input);color:var(--text);}
 .hub.hub-studio .detail .qrow[aria-disabled="true"] {opacity:.5;cursor:not-allowed;}
 .hub.hub-studio .detail .incomplete-label {font-size:10px;color:var(--red);}
+
+/* ---- redesign: compact header so results start high on the screen ---- */
+.hub.hub-studio { --hub-accent-soft: var(--bg-raised); padding: 18px 28px 16px; }
+.hub.hub-studio .head { margin-bottom: 10px; }
+.hub.hub-studio .hub-eyebrow, .hub.hub-studio .title p { display: none; }
+.hub.hub-studio .head h1 { font-size: 24px; font-weight: 650; letter-spacing: -.03em; }
+.hub.hub-studio .device-info summary { min-height: 44px; padding: 7px 12px; border-radius: 14px; }
+.hub.hub-studio .device-info summary .hardware-icon { width: 28px; height: 28px; color: var(--accent); }
+.hub.hub-studio nav.modebar { margin-bottom: 12px; gap: 20px; }
+.hub.hub-studio nav.modebar .modebtn { height: 34px; padding-bottom: 8px; }
+.hub.hub-studio .collection-heading p, .hub.hub-studio .estimate-note { display: none; }
+.hub.hub-studio .collection-heading h2 { font-size: 16px; }
