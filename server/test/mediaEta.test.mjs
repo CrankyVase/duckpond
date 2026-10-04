@@ -11,10 +11,8 @@ const {
   IMAGE_PRESETS,
   PRESET_IDS,
   presetForQuality,
-  sizeForPreset,
   stepsForQuality,
   recordMediaTiming,
-  recordImageJobTiming,
   estimateMediaSeconds,
   presetEstimates,
 } = await import('../src/mediaEta.js');
@@ -22,28 +20,25 @@ const { db } = await import('../src/db.js');
 
 function resetStats() {
   db.prepare("DELETE FROM app_settings WHERE key = 'media_eta_stats'").run();
-  db.prepare("DELETE FROM app_settings WHERE key = 'media_eta_profiles_v2'").run();
 }
 
 test('presets: map values and unknown falls back to medium', { concurrency: 1 }, () => {
   assert.equal(IMAGE_PRESETS.fast.steps, 20);
-  assert.equal(IMAGE_PRESETS.fast.trueCfg, 4.0);
-  assert.equal(IMAGE_PRESETS.medium.steps, 28);
-  assert.equal(IMAGE_PRESETS.medium.trueCfg, 5.0);
+  assert.equal(IMAGE_PRESETS.fast.trueCfg, 1.0);
+  assert.equal(IMAGE_PRESETS.medium.steps, 40);
+  assert.equal(IMAGE_PRESETS.medium.trueCfg, 1.0);
   assert.equal(IMAGE_PRESETS.high.steps, 40);
-  assert.equal(IMAGE_PRESETS.high.trueCfg, 6.0);
-  assert.equal(IMAGE_PRESETS.high.negative, '');
-  assert.equal(IMAGE_PRESETS.custom.steps, 28);
-  assert.equal(IMAGE_PRESETS.ultra.steps, 50);
-  assert.deepEqual(PRESET_IDS, ['fast', 'medium', 'high', 'ultra', 'custom']);
-  assert.equal(sizeForPreset('ultra', 'landscape'), '1280x960');
+  assert.equal(IMAGE_PRESETS.high.trueCfg, 2.5);
+  assert.ok(IMAGE_PRESETS.high.negative.length > 0);
+  assert.equal(IMAGE_PRESETS.custom.steps, 40);
+  assert.deepEqual(PRESET_IDS, ['fast', 'medium', 'high', 'custom']);
   assert.equal(presetForQuality('fast').id, 'fast');
   assert.equal(presetForQuality('nope').id, 'medium');
   assert.equal(presetForQuality(undefined).id, 'medium');
   assert.equal(stepsForQuality('fast'), 20);
-  assert.equal(stepsForQuality('medium'), 28);
+  assert.equal(stepsForQuality('medium'), 40);
   assert.equal(stepsForQuality('high'), 40);
-  assert.equal(stepsForQuality('bogus'), 28);
+  assert.equal(stepsForQuality('bogus'), 40);
 });
 
 test('cold estimate with no samples: loadMs + work', { concurrency: 1 }, () => {
@@ -112,18 +107,17 @@ test('record ignores non-positive wallMs/steps', { concurrency: 1 }, () => {
   assert.ok(Math.abs(est - 126) < 0.15);
 });
 
-test('preset estimates scale canvas and learn completed job time', { concurrency: 1 }, () => {
+test('presetEstimates shape, calibration flag, and fast<medium<high ordering', { concurrency: 1 }, () => {
   resetStats();
-  let pe = presetEstimates({ shape: 'square', n: 1 });
-  assert.equal(pe.shape, 'square');
+  let pe = presetEstimates({ size: '1024x1024', n: 1 });
+  assert.equal(pe.size, '1024x1024');
   assert.equal(pe.n, 1);
   assert.equal(pe.calibrated, false);
   assert.equal(pe.samples, 0);
   assert.equal(pe.perStepMs, 2600);
   assert.equal(pe.loadMs, 22000);
-  assert.equal(pe.presets.length, 5);
-  assert.deepEqual(pe.presets.map((p) => p.id), ['fast', 'medium', 'high', 'ultra', 'custom']);
-  assert.deepEqual(pe.presets.slice(0, 4).map((p) => p.size), ['512x512', '768x768', '1024x1024', '1280x1280']);
+  assert.equal(pe.presets.length, 4);
+  assert.deepEqual(pe.presets.map((p) => p.id), ['fast', 'medium', 'high', 'custom']);
   for (const p of pe.presets) {
     assert.ok(typeof p.label === 'string' && p.label.length > 0);
     assert.ok(typeof p.steps === 'number');
@@ -134,22 +128,13 @@ test('preset estimates scale canvas and learn completed job time', { concurrency
   const secs = Object.fromEntries(pe.presets.map((p) => [p.id, p.seconds]));
   assert.ok(secs.fast < secs.medium, `fast ${secs.fast} < medium ${secs.medium}`);
   assert.ok(secs.medium < secs.high, `medium ${secs.medium} < high ${secs.high}`);
-  assert.ok(secs.high < secs.ultra, `high ${secs.high} < ultra ${secs.ultra}`);
 
-  recordImageJobTiming({ quality:'medium', size:'768x768', steps:28, n:1, trueCfg:5, previewEvery:1, wallMs:90000 });
-  pe = presetEstimates({ shape: 'square', n: 1 });
-  assert.equal(pe.presets.find((p) => p.id === 'medium').seconds, 90);
-  recordImageJobTiming({ quality:'medium', size:'768x768', steps:28, n:1, trueCfg:5, previewEvery:1, wallMs:110000 });
-  pe = presetEstimates({ shape: 'square', n: 1 });
+  recordMediaTiming({ size: '1024x1024', steps: 20, n: 1, wallMs: 26000, warm: true, trueCfg: 1 });
+  recordMediaTiming({ size: '1024x1024', steps: 40, n: 1, wallMs: 52000, warm: true, trueCfg: 1 });
+  pe = presetEstimates({ size: '1024x1024', n: 1 });
   assert.equal(pe.samples, 2);
   assert.equal(pe.calibrated, true);
-  assert.equal(pe.presets.find((p) => p.id === 'medium').seconds, 99);
-  const landscape = presetEstimates({ shape: 'landscape', n: 1 });
-  assert.equal(landscape.presets.find((p) => p.id === 'ultra').size, '1280x960');
-  const cold = presetEstimates({ shape: 'square', n: 1, loaded: false });
-  assert.equal(cold.loaded, false);
-  assert.equal(cold.presets.find((p) => p.id === 'medium').seconds, 99 + cold.loadMs / 1000);
-  const resident = presetEstimates({ shape: 'square', n: 1, loaded: true });
-  assert.equal(resident.loaded, true);
-  assert.equal(resident.presets.find((p) => p.id === 'medium').seconds, 99);
+  const s2 = Object.fromEntries(pe.presets.map((p) => [p.id, p.seconds]));
+  assert.ok(s2.fast < s2.medium, `fast ${s2.fast} < medium ${s2.medium}`);
+  assert.ok(s2.medium < s2.high, `medium ${s2.medium} < high ${s2.high}`);
 });

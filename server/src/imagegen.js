@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
 import { mediaTask } from './modelKind.js';
-import { isEnhancerModel, enhanceMediaPrompt } from './promptEnhancer.js';
+import { isEnhancerModel } from './promptEnhancer.js';
 import { presetForQuality, recordMediaTiming } from './mediaEta.js';
 export { IMAGE_PRESETS, PRESET_IDS, presetForQuality, stepsForQuality } from './mediaEta.js';
 
@@ -128,8 +128,6 @@ export async function bridgeModels() {
       loaded: !!info.loaded, device: info.device ?? null, ready: !!info.ready, reason: info.reason ?? null, cloning: !!info.cloning,
       maxDuration: info.max_duration ?? null, className: info.class ?? null,
       supportsImage: !!info.supports_image, needsImage: !!info.needs_image,
-      supportsPreview: info.supports_preview !== false,
-      outputFormats: info.output_formats ?? ['png','webp'],
       maxReferences: info.max_references ?? null, defaultSteps: info.default_steps ?? null,
       lyrics: !!info.lyrics, durationIsCap: !!info.duration_is_cap,
       instruct: !!info.instruct, speakers: info.speakers ?? null,
@@ -209,19 +207,7 @@ export async function generateViaBridge({
   const t0 = Date.now();
   const models = await bridgeModels();
   const warm = !!(models.models?.some(m => m.loaded && (task === 'image' ? m.task === 'image' : true)));
-  let enhancedPrompt = null;
-  if (task === 'image' && enhance && !body.images_b64?.length) {
-    onProgress({ type: 'progress', phase: 'enhancing' });
-    const polished = await enhanceMediaPrompt({ prompt: body.prompt, task, modelId: resolvedModel });
-    if (polished) {
-      const { checkUserContent } = await import('./contentFilter.js');
-      const safe = checkUserContent(userId, polished.text, 'image');
-      if (!safe.ok) throw Object.assign(new Error(safe.reason), { code: 'UNSAFE_PROMPT' });
-      body.prompt = enhancedPrompt = polished.text;
-    }
-    body.enhance = false;
-  }
-  // The Fedora CPU helper runs independently; preserve it when reclaiming VRAM.
+  // The prompt-improver LLM shares the GPU with media — spare it, evict rest.
   const reclaimExceptEnhancer = (id) => (isEnhancerModel(id) ? false : reclaimIdleModel(id));
   await prepareMediaGpu({ models, requested: resolvedModel, task,
     memory: gpuVram, list: listModels, reclaim: reclaimExceptEnhancer, onProgress, signal });
@@ -381,7 +367,7 @@ export async function generateViaBridge({
       const info = db.prepare(`
         INSERT INTO images (user_id, prompt, enhanced_prompt, model, size, steps, file)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-        userId, prompt.trim(), result.r.prompt_enhanced ?? enhancedPrompt,
+        userId, prompt.trim(), result.r.prompt_enhanced ?? null,
         result.r.model_used ?? resolvedModel, body.size,
         result.r.steps_used ?? body.steps ?? null, file);
       // ?v=filename busts browser caches if an id is ever reused
@@ -391,9 +377,8 @@ export async function generateViaBridge({
     if (!saved.length) throw new Error('The media engine returned no usable output. No creation was saved.');
     return {
       images: saved,
-      enhanced: result.r.prompt_enhanced ?? enhancedPrompt,
+      enhanced: result.r.prompt_enhanced ?? null,
       model_used: result.r.model_used ?? null,
-      load_ms: Number(result.r.load_ms) || 0,
       steps_used: result.r.steps_used ?? body.steps ?? null,
       steps_requested: result.r.steps_requested ?? body.steps ?? null,
       steps_capped: !!result.r.steps_capped,

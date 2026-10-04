@@ -8,14 +8,8 @@
 //   node scripts/admin.mjs list-bans
 //   node scripts/admin.mjs list-users
 import { createInterface } from 'node:readline/promises';
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-// Shell admin commands must use the same restored database as the service.
-// Set the path before importing SQLite; explicit overrides still win.
-const restoredDb = fileURLToPath(new URL('../../data/duckpond-live-restored.db', import.meta.url));
-if (!process.env.DUCKPOND_DB && existsSync(restoredDb)) process.env.DUCKPOND_DB = restoredDb;
-const { db } = await import('../src/db.js');
-const { createUser, hashPassword } = await import('../src/auth.js');
+import { db } from '../src/db.js';
+import { createUser, hashPassword } from '../src/auth.js';
 
 const [cmd, arg] = process.argv.slice(2);
 

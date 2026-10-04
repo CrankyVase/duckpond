@@ -45,9 +45,7 @@ export function modelSettings(modelId) {
     // llama-only knobs have no effect remotely; keep values but harmless
   }
   const row = db.prepare('SELECT json FROM model_settings WHERE model_id = ?').get(modelId);
-  const settings = { ...defaults, ...(row ? JSON.parse(row.json) : {}) };
-  if (process.env.INFERENCE_HARDWARE_URL && !isRemoteId(modelId)) settings.ctx_size = 32768;
-  return settings;
+  return { ...defaults, ...(row ? JSON.parse(row.json) : {}) };
 }
 
 const fmtPrice = (v) => (v == null ? null : `$${Number(v).toFixed(2)}/1M`);
@@ -117,7 +115,6 @@ export default async function modelRoutes(app) {
         h.blurb = [card.blurb, ctxBlurb(m.ctxSize)].filter(Boolean).join(' ');
         h.card = { repo: card.repo, url: card.url };
       }
-      if (m.executionHost === 'Fedora') h.blurb += ' Runs on the Fedora CPU, so Windows can render photos at the same time.';
       return {
         ...m,
         kind: modelKind(m.id, card?.pipeline_tag),

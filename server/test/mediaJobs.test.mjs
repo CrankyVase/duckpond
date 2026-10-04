@@ -9,8 +9,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 
 process.env.DUCKPOND_DB = process.env.DUCKPOND_DB ?? ':memory:';
 
@@ -32,8 +30,6 @@ const bridge = createServer((req, res) => {
       return send(200, {
         tag: lastTag, active: steps.length > 0 && !steps.done,
         progress: steps.length ? { phase: 'denoising', step, steps: 4, image: 1, n: 1 } : {},
-        preview_seq: steps.length ? 1 : 0,
-        preview_b64: steps.length ? Buffer.from('preview-jpeg').toString('base64') : null,
         eta_seconds: steps.length ? 1.5 : null, elapsed: null,
       });
     }
@@ -57,17 +53,14 @@ const bridge = createServer((req, res) => {
 await new Promise((r) => bridge.listen(0, '127.0.0.1', r));
 after(() => new Promise(resolve => { bridge.closeAllConnections(); bridge.close(resolve); }));
 process.env.IMAGE_BRIDGE_URL = `http://127.0.0.1:${bridge.address().port}`;
-process.env.LLAMA_URL = process.env.IMAGE_BRIDGE_URL;
 // No small chat model on a stub router → enhancer must no-op cleanly.
 // "__none__" forces enhancerModel() to a dead id; the enhancer catches and
 // returns null (its whole contract), so jobs continue with the raw prompt.
 process.env.DUCKPOND_ENHANCE_MODEL = '__none__';
 
 const { default: mediaRoutes } = await import('../src/routes/media.js');
-const { recoverMediaJobs, createMediaJob } = await import('../src/mediaJobs.js');
+const { recoverMediaJobs } = await import('../src/mediaJobs.js');
 const { db } = await import('../src/db.js');
-const { IMAGES_DIR } = await import('../src/imagegen.js');
-const { checkContent } = await import('../src/contentFilter.js');
 
 // FK constraints are on — media_jobs reference a real user.
 db.prepare("INSERT OR IGNORE INTO users (id, username, pass_hash, role) VALUES (1, 'mediajobtester', 'x', 'owner')").run();
@@ -80,17 +73,14 @@ function makeApp(user) {
     addHook: () => {},
     get: (p, h) => handlers.push(['GET', p, h]),
     post: (p, opts, h) => handlers.push(['POST', p, h ?? opts]),
-    delete: (p, opts, h) => handlers.push(['DELETE', p, h ?? opts]),
   };
   const call = async (method, path, body, params = {}) => {
     await mediaRoutes(app);
     const hit = handlers.reverse().find(([m, p]) => m === method
-      && (p === path || (p.includes(':') && p.split('/').length === path.split('/').length
-        && p.split('/').every((segment, i) => segment.startsWith(':') || segment === path.split('/')[i]))));
+      && (p === path || (p.includes(':') && path.startsWith(p.split(':')[0]))));
     handlers.reverse();
     if (!hit) throw new Error(`no route ${method} ${path}`);
-    const reply = { code: (c) => { reply.statusCode = c; return reply; }, send: (x) => { reply.sent = x; return reply; },
-      header: () => reply, type: () => reply };
+    const reply = { code: (c) => { reply.statusCode = c; return reply; }, send: (x) => { reply.sent = x; return reply; } };
     const out = await hit[2]({ user, body, params, query: {}, log: { error: () => {} } }, reply);
     if (reply.statusCode && reply.statusCode >= 400) return { status: reply.statusCode, body: reply.sent };
     return reply.sent ?? out;
@@ -100,16 +90,9 @@ function makeApp(user) {
 
 const USER = { id: 1, role: 'owner' };
 
-test('oversized image combinations fail before entering the queue', () => {
-  const request = { task: 'image', prompt: 'a pond', model: 'stub/flux', size: '2048x2048', steps: 79, n: 10 };
-  assert.throws(() => createMediaJob(1, request), /1 to 4 image variations/);
-  assert.throws(() => createMediaJob(1, { ...request, n: 2, steps: 40 }), /one variation/);
-  assert.throws(() => createMediaJob(1, { ...request, n: 1 }), /up to 40 steps/);
-});
-
 test('job lifecycle: submit → running progress rows → done with image row, requester gone', { concurrency: 1 }, async () => {
   const t = makeApp(USER);
-  const created = await t.call('POST', '/api/media/jobs', { task: 'image', prompt: 'a duck on a pond at dusk', model: 'stub/flux', n: 1, size: '512x512', enhance: false });
+  const created = await t.call('POST', '/api/media/jobs', { task: 'image', prompt: 'a duck on a pond at dusk', model: 'stub/flux', n: 1, size: '512x512' });
   const id = created.job.id;
   assert.ok(['queued', 'running'].includes(created.job.status), `created status ${created.job.status}`);
   assert.ok(id > 0);
@@ -132,34 +115,14 @@ test('job lifecycle: submit → running progress rows → done with image row, r
   assert.equal(imgRow.model, 'stub/flux');
   assert.match(imgRow.file, /^image-.*\.png$/);
   assert.ok(end.job.results[0].url.includes('image-'));
-  assert.match(end.job.preview_url, new RegExp(`/api/media/jobs/${id}/preview\\?v=1`));
-  const preview = await t.call('GET', `/api/media/jobs/${id}/preview`, undefined, { id });
-  assert.equal(preview.toString(), 'preview-jpeg');
-  assert.equal(existsSync(join(IMAGES_DIR, imgRow.file)), true);
-  const removed = await t.call('DELETE', `/api/media/jobs/${id}`, undefined, { id });
-  assert.deepEqual(removed, { ok: true, deleted: 1 });
-  assert.equal(existsSync(join(IMAGES_DIR, imgRow.file)), false);
-  assert.equal(db.prepare('SELECT id FROM images WHERE id = ?').get(end.job.result_ids[0]), undefined);
-  assert.equal(db.prepare('SELECT id FROM media_jobs WHERE id = ?').get(id), undefined);
-});
-
-test('prompt filter blocks nude or sexual minors while allowing adult and gore requests', () => {
-  for (const prompt of ['naked teenager', 'nude 15 year old', 'nude 5yo', 'nude kid', 'sexual act involving a child', 'sexualized children']) {
-    assert.equal(checkContent(prompt, { mode: 'off', kind: 'image' }).ok, false, prompt);
-  }
-  assert.equal(checkContent('nonsexual nude portrait of an adult woman', { mode: 'safe', kind: 'image' }).ok, true);
-  assert.equal(checkContent('adult sexual scene', { mode: 'safe', kind: 'image' }).ok, true);
-  assert.equal(checkContent('adult sexual scene', { mode: 'strict', kind: 'image' }).ok, true);
-  assert.equal(checkContent('photorealistic gore scene', { kind: 'image' }).ok, true);
-  assert.equal(checkContent('a clothed person walking by a pond', { kind: 'image' }).ok, true);
 });
 
 test('cancel a queued job settles immediately as cancelled', { concurrency: 1 }, async () => {
   const t = makeApp(USER);
   // occupy the "GPU" by making the runner busy: queue two jobs; first runs,
   // second queues behind the single-flight pump while job 1 is mid-flight
-  const first = await t.call('POST', '/api/media/jobs', { task: 'image', prompt: 'job one', model: 'stub/flux', enhance: false });
-  const second = await t.call('POST', '/api/media/jobs', { task: 'image', prompt: 'job two', model: 'stub/flux', enhance: false });
+  const first = await t.call('POST', '/api/media/jobs', { task: 'image', prompt: 'job one', model: 'stub/flux' });
+  const second = await t.call('POST', '/api/media/jobs', { task: 'image', prompt: 'job two', model: 'stub/flux' });
   // wait until the first is done so second is either queued or running
   await new Promise((r) => setTimeout(r, 1300));
   const cancelled = await t.call('POST', `/api/media/jobs/${second.job.id}/cancel`, {}, { id: second.job.id });

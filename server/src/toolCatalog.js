@@ -5,17 +5,11 @@
 // panel, not the LLM-facing tool descriptions.
 export const TOOL_CATALOG = [
   { id: 'start_project', label: 'Start project', category: 'Coding', description: 'Lets the model spin up a sandboxed workspace to build real, multi-file software instead of just answering in chat.' },
-  { id: 'update_plan', label: 'Track plan', category: 'Coding', description: 'Lets the model keep a visible checklist of the work it plans to do, what it is doing, and what it has completed.' },
   { id: 'list_files', label: 'List files', category: 'Coding', description: 'Lets the model see what files exist in a project workspace.' },
-  { id: 'search_files', label: 'Search source', category: 'Coding', description: 'Lets the model find files and text matches with line numbers, without scanning dependencies or build output.' },
   { id: 'read_file', label: 'Read file', category: 'Coding', description: 'Lets the model open and read a file in a project workspace.' },
   { id: 'write_file', label: 'Write file', category: 'Coding', description: 'Lets the model create or edit a file in a project workspace.' },
   { id: 'edit_file', label: 'Edit file', category: 'Coding', description: 'Lets the model make targeted search-and-replace edits to a file instead of rewriting the whole thing.' },
   { id: 'run_command', label: 'Run command', category: 'Coding', description: 'Lets the model run a shell command in the sandboxed workspace (tests, builds, scripts).' },
-  { id: 'start_server', label: 'Start preview server', category: 'Coding', description: 'Lets the model start a managed development server and get a project preview link.' },
-  { id: 'server_status', label: 'Check preview server', category: 'Coding', description: 'Lets the model inspect preview readiness and recent server logs.' },
-  { id: 'stop_server', label: 'Stop preview server', category: 'Coding', description: 'Lets the model stop the project’s managed development server.' },
-  { id: 'browser', label: 'Inspect in browser', category: 'Coding', description: 'Lets the model inspect rendered pages, interact with controls, and read browser errors. Available to the owner in a separate project browser session.' },
   { id: 'screenshot', label: 'Screenshot', category: 'Coding', description: 'Lets the model take a picture of a web page or a local HTML file so it can see what it built.' },
   { id: 'github_repo_info', label: 'GitHub: repo info', category: 'GitHub', description: 'Lets the model look up a repository’s default branch, language, and whether it can push.' },
   { id: 'github_list_files', label: 'GitHub: list files', category: 'GitHub', description: 'Lets the model browse the file tree of a repository.' },
@@ -55,5 +49,5 @@ export const TOOL_CATALOG = [
   { id: 'forget_memory', label: 'Forget memory', category: 'Memory', description: 'Lets the model delete one of its memories when you ask it to forget something.' },
 ];
 
-export const TOOL_CATEGORIES = ['Coding', 'GitHub', 'Search', 'Media', 'Widgets', 'Memory'];
+export const TOOL_CATEGORIES = ['Coding', 'Search', 'Media', 'Widgets', 'Memory'];
 export const ALL_TOOL_IDS = TOOL_CATALOG.map((t) => t.id);

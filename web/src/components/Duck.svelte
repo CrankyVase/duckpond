@@ -2,8 +2,6 @@
   // App moods override the shared brain; previews and still poses select directly.
   import { onMount, untrack } from 'svelte';
   import { DUCK, ANIM } from '../lib/duck.js';
-  import { createDuckPlayer } from '../lib/duck-player.js';
-  import { duckThought } from '../lib/duck-signals.js';
   import { mind, startMascotBrain, petDuck, pokeGaze } from '../lib/mascot.svelte.js';
   import { theme } from '../lib/theme.svelte.js';
   import Pixel from './Pixel.svelte';
@@ -18,26 +16,14 @@
     paused = false,
     replayKey = 0,
     frameIndex = null,
-    playback = null,
-    speed = 1,
-    loopMode = 'auto',
-    motionEnabled = true,
   } = $props();
 
   $effect(() => {
-    if (preview) return;
-    // Start outside this duck's effect tree. Boot and message ducks unmount;
-    // the shared root must survive them until App explicitly stops the brain.
-    let mounted = true;
-    queueMicrotask(() => { if (mounted) startMascotBrain(); });
-    return () => { mounted = false; };
+    if (!preview) untrack(startMascotBrain);
   });
 
-  const player = createDuckPlayer(ANIM, { maxElapsedMs: 1000 });
-  let clockState = $state(player.snapshot);
-  let duckEl;
+  let frame = $state(0);
   let hidden = $state(true);
-  let offscreen = $state(false);
   let reducedMotion = $state(false);
 
   onMount(() => {
@@ -46,24 +32,15 @@
     const syncVisibility = () => { hidden = document.hidden; };
     syncMotion();
     syncVisibility();
-    const unsubscribe = player.subscribe((state) => { clockState = state; });
-    const observer = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver(([entry]) => {
-      offscreen = !entry.isIntersecting;
-    }) : null;
-    if (duckEl) observer?.observe(duckEl);
     media.addEventListener('change', syncMotion);
     document.addEventListener('visibilitychange', syncVisibility);
     return () => {
       media.removeEventListener('change', syncMotion);
       document.removeEventListener('visibilitychange', syncVisibility);
-      observer?.disconnect();
-      unsubscribe();
-      player.destroy();
     };
   });
 
   const scene = $derived.by(() => {
-    if (playback && Object.hasOwn(ANIM, playback.animation)) return { name: playback.animation, startedAt: null };
     if (preview || still || (mood && mood !== 'idle')) {
       return { name: Object.hasOwn(ANIM, mood) ? mood : 'idle', startedAt: null };
     }
@@ -74,70 +51,39 @@
     if (beat && Object.hasOwn(ANIM, beat.name)) {
       return { name: beat.name, startedAt: beat.startedAt };
     }
-    if (mind.composing) return { name: 'write', startedAt: null };
     return { name: 'idle', startedAt: null };
   });
   const anim = $derived(ANIM[scene.name]);
-  const external = $derived(!!playback);
-  const playbackKey = $derived(`${scene.name}:${scene.startedAt ?? ''}:${preview}:${still}:${replayKey}:${playback?.performanceId ?? ''}`);
+  const playbackKey = $derived(`${scene.name}:${scene.startedAt ?? ''}:${preview}:${still}:${replayKey}`);
   const pinned = $derived(frameIndex !== null && Number.isFinite(frameIndex));
-  const clockSuspended = $derived(hidden || offscreen || reducedMotion || theme.effects.anim === 'off');
-  const suspended = $derived(clockSuspended || still || paused || (!playback && pinned) || !!playback?.suspended);
-  const finished = $derived(playback ? playback.ended : clockState.ended);
+  const suspended = $derived(still || pinned || paused || hidden || reducedMotion || theme.effects.anim === 'off');
+  const finished = $derived(!preview && anim.loop === false && frame === anim.frames.length - 1);
 
   // Reset only for a new performance, never for pause/resume or gaze changes.
   $effect(() => {
     playbackKey;
-    if (external) { untrack(() => player.pause()); return; }
-    const name = scene.name, startedAt = scene.startedAt;
-    untrack(() => {
-      player.select(name);
-      if (startedAt !== null) player.seekTime(Math.max(0, mind.now - startedAt));
-      player.setSuspended(clockSuspended);
-      if (!still && !paused && !pinned) player.play();
-      else player.pause();
-    });
+    frame = 0;
   });
 
-  // Exact frame-boundary timing; pausing preserves the rest of the current hold.
+  // One pending tick at most; completed one-shots leave no running timer.
   $effect(() => {
-    if (external) return;
-    const nextMode = loopMode, nextSpeed = speed;
-    untrack(() => { player.setMode(nextMode); player.setSpeed(nextSpeed); });
-  });
-  $effect(() => {
-    if (external) return;
-    const shouldSuspend = clockSuspended;
-    const shouldPause = still || paused || pinned;
-    untrack(() => {
-      player.setSuspended(shouldSuspend);
-      if (shouldPause) player.pause();
-      else if (!shouldSuspend) {
-        if (scene.startedAt !== null) player.seekTime(Math.max(0, mind.now - scene.startedAt));
-        if (!player.snapshot.ended) player.play();
-      }
-    });
-  });
-  $effect(() => {
-    if (!playback && pinned) {
-      const index = frameIndex;
-      untrack(() => player.seek(index));
-    }
+    playbackKey;
+    const a = anim;
+    const index = frame;
+    if (suspended || finished || a.frames.length <= 1) return;
+    const hold = preview && a.loop === false && index === a.frames.length - 1 ? 600 : 0;
+    const timer = setTimeout(() => { frame = (index + 1) % a.frames.length; }, a.ms + hold);
+    return () => clearTimeout(timer);
   });
 
   // An explicit frame wins even over still, for deterministic filmstrip shots.
-  const displayedFrame = $derived(playback
-    ? Math.max(0, Math.min(anim.frames.length - 1, playback.frameIndex))
-    : pinned
+  const displayedFrame = $derived(pinned
     ? Math.max(0, Math.min(anim.frames.length - 1, Math.floor(frameIndex)))
-    : still ? 0 : Math.min(clockState.frameIndex, anim.frames.length - 1));
+    : still ? 0 : Math.min(frame, anim.frames.length - 1));
   const sprite = $derived({ map: anim.frames[displayedFrame], palette: DUCK.palette });
   const motion = $derived(bob ? 'bob' : (anim.css || ''));
   const label = $derived(`Dumpling the duck (${scene.name})`);
   const canPet = $derived(interactive && !preview);
-  const thought = $derived(duckThought(scene.name, mind.affection));
-  const effectiveSpeed = $derived(playback?.speed ?? speed);
-  const motionFrozen = $derived(suspended || finished || !motionEnabled || (playback && !playback.playing));
 
   const lean = $derived.by(() => {
     if (preview || suspended || finished || (mood && mood !== 'idle')) return 0;
@@ -160,16 +106,15 @@
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_no_noninteractive_tabindex -->
 <span
   class="duck"
-  bind:this={duckEl}
   class:interactive={canPet}
-  class:frozen={motionFrozen}
-  style="--lean:{lean};--duck-speed:{effectiveSpeed};"
+  class:frozen={suspended || finished}
+  style="--lean:{lean};"
   data-animation={scene.name}
   data-frame={displayedFrame}
   role={canPet ? 'button' : undefined}
   tabindex={canPet ? 0 : undefined}
-  aria-label={canPet ? `Pet ${label}. ${thought}` : undefined}
-  title={canPet ? `${thought} Click to pet Dumpling.` : undefined}
+  aria-label={canPet ? `Pet ${label}` : undefined}
+  title={canPet ? 'pet Dumpling' : undefined}
   onclick={onClick}
   onkeydown={(e) => {
     if (!canPet || (e.key !== 'Enter' && e.key !== ' ')) return;
@@ -197,13 +142,12 @@
   }
   .handoff { display: inline-block; line-height: 0; animation: handoff 0.18s ease-out; }
   @keyframes handoff { from { opacity: 0.25; } }
-  .pose.breathe { animation: breathe calc(4.2s / var(--duck-speed, 1)) ease-in-out infinite; }
-  .pose.bob { animation: bob calc(2.6s / var(--duck-speed, 1)) ease-in-out infinite; }
-  .pose.sway { animation: sway calc(3.4s / var(--duck-speed, 1)) ease-in-out infinite; }
-  .pose.shake { animation: shake calc(0.32s / var(--duck-speed, 1)) ease-in-out infinite; }
-  .pose.hop { animation: hop calc(0.5s / var(--duck-speed, 1)) ease-in-out infinite; }
-  .duck.frozen .pose { animation-play-state: paused; }
-  .duck.frozen .handoff { animation: none; opacity: 1; }
+  .pose.breathe { animation: breathe 4.2s ease-in-out infinite; }
+  .pose.bob { animation: bob 2.6s ease-in-out infinite; }
+  .pose.sway { animation: sway 3.4s ease-in-out infinite; }
+  .pose.shake { animation: shake 0.32s ease-in-out infinite; }
+  .pose.hop { animation: hop 0.5s ease-in-out infinite; }
+  .duck.frozen .pose, .duck.frozen .handoff { animation: none; }
   .duck.frozen .lean { transform: none; transition: none; }
   @keyframes breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2%); } }
   @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5%); } }

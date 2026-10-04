@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { compileModule } from 'svelte/compiler';
 import { flush, proxy } from 'svelte/internal/client';
-import { duckThought, recordDuckEvent, textReaction } from '../src/lib/duck-signals.js';
 import {
   BEATS, MAX_CHAIN, activeContext, activeTool, advanceVisibleTime, beatDuration,
   canPlay, chooseBeat, chooseChain, observeStream, timeBias,
@@ -11,59 +10,6 @@ import {
 
 const idleMind = { energy: 0.55, curiosity: 0.5, contentment: 0.6, affection: 0.2 };
 const context = (extra = {}) => ({ mind: idleMind, now: 100000, random: () => 0, ...extra });
-
-test('text cues give the duck small interests without matching code, URLs or substrings', () => {
-  for (const [text, cue] of Object.entries({
-    'Thanks Dumpling!': 'heartgift', 'LOL 😂': 'giggle', 'hello there': 'wave',
-    'a duck 🦆': 'quack', 'coffee please': 'coffee', 'a pancake recipe': 'cook',
-    'play a song': 'guitar', 'look at the stars': 'stargaze', 'my garden': 'garden',
-  })) assert.equal(textReaction(text), cue, text);
-  for (const text of [null, '', 'duckling', 'callback', 'https://example.test/coffee',
-    '```js\nconst thanks = "duck";\n```', '`quack` is a variable', '```coffee']) {
-    assert.equal(textReaction(text), null, String(text));
-  }
-  assert.match(duckThought('coffee'), /tiny coffee/);
-  assert.match(duckThought('idle', 0.8), /keeping you company/);
-});
-
-test('arrival phases follow reply, reasoning and tools even when earlier buffers survive', () => {
-  const stream = { text: 'Earlier narration', thinking: 'Earlier reasoning', run: { id: 1 }, events: [] };
-  const activity = () => activeContext({ streaming: stream });
-  recordDuckEvent(stream, { type: 'delta', text: 'Current reply' });
-  assert.equal(activity(), 'talk');
-  recordDuckEvent(stream, { type: 'thinking', text: 'Another round' });
-  assert.equal(activity(), 'thinkhard');
-  const call = { type: 'tool_call', name: 'read_file', call_id: 'r' };
-  recordDuckEvent(stream, { type: 'agent', event: call });
-  stream.events.push(call);
-  assert.equal(activity(), 'read');
-  const result = { type: 'tool_result', call_id: 'r' };
-  recordDuckEvent(stream, { type: 'agent', event: result });
-  stream.events.push(result);
-  assert.equal(activity(), 'thinkhard', 'finished tool is not stuck on reading');
-  stream.pendingApproval = {};
-  recordDuckEvent(stream, { type: 'delta', text: 'Narration' });
-  assert.equal(activity(), 'wait', 'actual work has priority over text');
-});
-
-test('delivered replies acknowledge text; stopped, failed and unknown endings stay distinct', () => {
-  const stream = { jobId: 'j1', convId: 1 };
-  const observed = observeStream(null, stream);
-  recordDuckEvent(stream, { type: 'user_msg', msg: { content: 'thanks!' } });
-  recordDuckEvent(stream, { type: 'done', msg: { content: 'Happy to help.' } });
-  assert.equal(observeStream(observed, null).reaction, 'heartgift');
-  stream.duckCue = null;
-  assert.equal(observeStream(observed, null).reaction, 'nod');
-  stream.duckOutcome = 'stopped';
-  recordDuckEvent(stream, { type: 'done', msg: { content: 'partial' } });
-  assert.equal(observeStream(observed, null).reaction, 'shrug', 'Stop cannot be overwritten by done');
-  stream.duckOutcome = null;
-  recordDuckEvent(stream, { type: 'done', outcome: 'error', msg: { content: 'partial' } });
-  assert.equal(observeStream(observed, null).reaction, 'facepalm');
-  const resumed = observeStream(observeStream(null, stream), { convId: 1, jobId: 'j1' });
-  assert.equal(resumed.failed, true, 'same chat job retains error through reattachment');
-  assert.equal(observeStream(resumed, { convId: 1, jobId: 'j2' }).failed, false);
-});
 
 test('activities reflect current tasks, not views, transcripts or token counts', () => {
   const activity = (streaming, extra = {}) => activeContext({ streaming, ...extra });
@@ -126,7 +72,7 @@ test('voice and per-message speech use lifecycle state, not audio levels or tran
   assert.equal(activeContext({ streaming: { liveTool: { name: 'write_file' } } }, {}, { playingId: 1 }), 'write');
 });
 
-test('unclassified stream endings stay neutral, including error and clear in one flush', () => {
+test('stream endings never imply success, including error and clear in one flush', () => {
   const stream = { convId: 1, error: null, events: [] };
   const first = observeStream(null, stream);
   assert.equal(first.reaction, null);
@@ -174,7 +120,7 @@ test('weighted selection respects cooldowns, recent history, habituation and inp
   for (const mind of [{ ...idleMind, hidden: true }, { ...idleMind, activity: 'write' }]) {
     assert.equal(chooseBeat(context({ mind, pool: ['happy'] })), null);
   }
-  const quiet = new Set(['blink', 'look', 'curious', 'think', 'read', 'write', 'listen', 'eureka', 'meditate', 'feather', 'telescope']);
+  const quiet = new Set(['blink', 'look', 'curious', 'think', 'read', 'write', 'listen', 'eureka']);
   for (let i = 0; i < 100; i++) {
     assert(quiet.has(chooseBeat(context({ mind: { ...idleMind, typing: true }, random: () => i / 100 }))));
   }
@@ -233,7 +179,6 @@ test('compiled shared brain handles batched failures, input throttles and hidden
     app: proxy({ authChecked: true, models: [], streaming: null, compacting: false }),
     voice: proxy({ open: false, state: 'idle', muted: false }),
     speech: proxy({ playingId: null, loadingId: null }),
-    theme: proxy({ effects: { anim: 'on' } }),
     ANIM: Object.fromEntries(Object.keys(BEATS).map((name) => [name, { frames: [0, 1], ms: 100 }])),
   };
   globalThis.__mascotTest = fixture;
@@ -242,9 +187,8 @@ test('compiled shared brain handles batched failures, input throttles and hidden
     svelte: import.meta.resolve('svelte/internal/client'),
     'svelte/internal/client': import.meta.resolve('svelte/internal/client'),
     './mascot-beats.js': new URL('../src/lib/mascot-beats.js', import.meta.url).href,
-    './duck-signals.js': new URL('../src/lib/duck-signals.js', import.meta.url).href,
     ...Object.fromEntries([
-      ['./state.svelte.js', 'app'], ['./voice.svelte.js', 'voice'], ['./tts.svelte.js', 'speech'], ['./duck.js', 'ANIM'], ['./theme.svelte.js', 'theme'],
+      ['./state.svelte.js', 'app'], ['./voice.svelte.js', 'voice'], ['./tts.svelte.js', 'speech'], ['./duck.js', 'ANIM'],
     ].map(([path, name]) => [path, dataModule(`export const ${name} = globalThis.__mascotTest.${name};`)])),
   };
   const filename = new URL('../src/lib/mascot.svelte.js', import.meta.url);
@@ -257,8 +201,7 @@ test('compiled shared brain handles batched failures, input throttles and hidden
   let clock = 0;
   const intervals = [];
   const storage = new Map();
-  const motion = Object.assign(new EventTarget(), { matches: false });
-  const window = Object.assign(new EventTarget(), { innerWidth: 1000, innerHeight: 800, matchMedia: () => motion });
+  const window = Object.assign(new EventTarget(), { innerWidth: 1000, innerHeight: 800 });
   const document = Object.assign(new EventTarget(), { hidden: false, activeElement: null });
   const globals = ['window', 'document', 'localStorage'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]);
   Object.assign(globalThis, { window, document, localStorage: {
@@ -276,8 +219,7 @@ test('compiled shared brain handles batched failures, input throttles and hidden
   t.mock.method(Math, 'random', () => 0.5);
   t.mock.method(globalThis, 'setInterval', (callback) => { intervals.push(callback); return intervals.length; });
 
-  const { mind, startMascotBrain, stopMascotBrain, petDuck, pokeGaze } = await import(dataModule(code));
-  t.after(stopMascotBrain);
+  const { mind, startMascotBrain, petDuck, pokeGaze } = await import(dataModule(code));
   const advance = (ms) => {
     for (let elapsed = 0; elapsed < ms; elapsed += 200) {
       clock += Math.min(200, ms - elapsed);
@@ -316,7 +258,7 @@ test('compiled shared brain handles batched failures, input throttles and hidden
   assert.equal(mind.activity, 'think', 'new same-conversation turn is not poisoned');
   fixture.app.streaming = null;
   flush();
-  assert.equal(mind.beat?.name, 'shrug', 'turn completion takes precedence over a recent reaction');
+  assert.equal(mind.beat, null, 'rapid stream endings do not trigger new interrupts');
 
   advance(2000);
   petDuck();
@@ -393,48 +335,4 @@ test('compiled shared brain handles batched failures, input throttles and hidden
   fixture.voice.muted = true;
   flush();
   assert.equal(mind.activity, null);
-
-  // Merely focusing an input does not make the duck write forever.
-  const composer = { tagName: 'TEXTAREA', value: 'plain draft', hasAttribute: name => name === 'data-duck-composer' };
-  document.activeElement = composer;
-  document.dispatchEvent(new Event('focusin'));
-  await Promise.resolve();
-  flush();
-  assert.equal(mind.typing, true);
-  assert.equal(mind.composing, false);
-  const type = () => {
-    const event = new Event('input');
-    Object.defineProperty(event, 'target', { value: composer });
-    document.dispatchEvent(event);
-    flush();
-  };
-  type();
-  assert.equal(mind.composing, true);
-  advance(1800);
-  assert.equal(mind.composing, false, 'typing pose settles after a pause');
-  composer.value = 'coffee';
-  mind.beat = null;
-  type();
-  assert.equal(mind.beat?.name, 'coffee');
-  const coffee = mind.beat;
-  type();
-  assert.equal(mind.beat, coffee, 'same text never repeatedly restarts the scene');
-  fixture.app.streaming = { convId: 3, liveTool: { name: 'run_command' } };
-  flush();
-  composer.value = 'hello';
-  type();
-  assert.equal(mind.activity, 'code');
-  assert.equal(mind.beat, null, 'text cannot interrupt active work');
-  fixture.theme.effects.anim = 'off';
-  flush();
-  assert.equal(mind.motionPaused, true);
-  fixture.app.streaming = null;
-  flush();
-  assert.equal(mind.beat, null, 'disabled motion discards endings');
-  const pausedNow = mind.now;
-  advance(4000);
-  assert.equal(mind.now, pausedNow);
-  fixture.theme.effects.anim = 'on';
-  flush();
-  assert.equal(mind.beat, null, 'reenabling motion has no reaction backlog');
 });

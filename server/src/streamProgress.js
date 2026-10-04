@@ -35,9 +35,7 @@ export function trackStreamProgress(onDelta, { messages = [], tools, now = Date.
   };
   report.finish = usage => {
     if (Number.isFinite(usage?.prompt_tokens) && Number.isFinite(usage?.completion_tokens)) {
-      report('', { final: true, timings: { ...measured, prompt_n: usage.prompt_tokens, predicted_n: usage.completion_tokens, predicted_per_second: measured?.predicted_per_second ?? null, estimated: false } });
-    } else if (measured) {
-      report('', { final: true, timings: { ...measured, estimated: false } });
+      report('', { final: true, timings: { prompt_n: usage.prompt_tokens, predicted_n: usage.completion_tokens, predicted_per_second: null, estimated: false } });
     }
   };
   return report;

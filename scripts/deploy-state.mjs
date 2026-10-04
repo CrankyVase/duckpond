@@ -8,7 +8,6 @@ export function sourceGroup(path) {
   if (/^web\/(?:src\/|public\/|index\.html$|vite\.config\.[^/]+$|package(?:-lock)?\.json$)/.test(path)) return 'web';
   if (/^server\/(?:src\/|package(?:-lock)?\.json$)/.test(path)) return 'server';
   if (/^server\/image-bridge\/(?:[^/]+\.py|requirements[^/]*\.txt)$/.test(path)) return 'bridge';
-  if (/^bridge\/(?!(?:test_|verify_|benchmark))(?:[^/]+\.(?:py|ps1|ini)|requirements[^/]*\.txt)$/.test(path)) return 'bridge';
   if (path === 'deploy.sh' || path.startsWith('scripts/deploy-')) return 'deploy';
   return null;
 }

@@ -1,6 +1,6 @@
 <script>
   import {
-    cancelMediaJob, deleteMediaJob, refreshMediaJobs, retryMediaJob,
+    cancelMediaJob, refreshMediaJobs, retryMediaJob,
   } from '../lib/mediaJobs.svelte.js';
   import { toast } from '../lib/toast.svelte.js';
   import { confirmDialog } from '../lib/confirm.svelte.js';
@@ -21,11 +21,11 @@
   const TASK_ICON = { image: ImageIcon, video: Video, audio: Music, tts: Mic };
   const TASK_LABEL = { image: 'Image', video: 'Video', audio: 'Music', tts: 'Voice' };
   const PHASE_LABEL = {
-    freeing_memory: 'Making room on the GPU', loading: 'Loading into memory', queued: 'Waiting in queue', starting: 'Loading your model', enhancing: 'Polishing your prompt', preparing: 'Loading model and polishing prompt', encoding_reference: 'Reading reference photos',
+    freeing_memory: 'Making room on the GPU', loading: 'Loading into memory', queued: 'Waiting in queue', starting: 'Loading your model', enhancing: 'Polishing your prompt',
     generating: 'Creating', denoising: 'Bringing it to life', saving: 'Saving your creation',
     image_done: 'Finishing up', done: 'Finished',
   };
-  let { jobs = [], onDeleted = () => {} } = $props(); // finished-or-active job views, newest first
+  let { jobs = [] } = $props(); // finished-or-active job views, newest first
   let now = $state(Date.now());
   $effect(() => {
     const id = setInterval(() => { now = Date.now(); }, 500);
@@ -103,11 +103,11 @@
       message: 'This removes the saved file from your library.',
       confirmLabel: 'Delete', danger: true,
     })) return;
-    try {
-      await deleteMediaJob(job.id);
-      toast('Deleted', 'ok');
-      void Promise.resolve(onDeleted()).catch(() => {});
-    } catch (error) { toast(error.message ?? 'Delete failed', 'err'); }
+    for (const r of job.results ?? []) {
+      try { await fetch(`/api/images/${r.id}`, { method: 'DELETE' }); } catch { /* already gone */ }
+    }
+    toast('Deleted', 'ok');
+    await refreshMediaJobs();
   }
 </script>
 
@@ -116,7 +116,6 @@
     {#each live as job (job.id)}
       {@const Icon = TASK_ICON[job.task] ?? ImageIcon}
       {@const pct = stepPct(job)}
-      {@const previewOff = job.params?.previewEvery != null && Number(job.params.previewEvery) === 0}
       <article class="job card-live" aria-live="polite">
         <div class="job-head">
           <span class="job-kind"><Icon size={14} /> {TASK_LABEL[job.task] ?? job.task}</span>
@@ -131,15 +130,8 @@
             <p>{job.enhanced_prompt}</p>
           </details>
         {/if}
-        {#if job.task === 'image'}
-          <div class="job-preview">
-            {#if job.preview_url}<img src={job.preview_url} alt={`Generation preview at step ${job.step ?? 0} of ${job.steps ?? '?'}`} />
-            {:else}<div class="preview-wait"><ImageIcon size={27} /><span>{previewOff ? 'Preview is off. Your image appears when it finishes.' : job.status === 'queued' ? 'Waiting for the image engine' : 'Your image appears when it finishes. A preview may appear during generation.'}</span></div>{/if}
-            <div class="preview-caption"><span>{job.preview_url ? 'Live work in progress' : previewOff ? 'Preview off' : 'Generation progress'}</span><strong>{job.step != null && job.steps ? `Step ${job.step} / ${job.steps}` : phaseLabel(job)}</strong></div>
-          </div>
-        {/if}
         <div class="job-meta"><span>{meta(job) || 'Starting'}</span>
-          <button class="icon-btn" title={job.cancel_requested ? 'Waiting for the engine to stop' : 'Stop this generation'} disabled={job.cancel_requested} onclick={() => cancel(job)}><Square size={13} /> {job.cancel_requested ? 'Stopping…' : 'Stop'}</button>
+          <button class="icon-btn" title="Stop this generation" onclick={() => cancel(job)}><Square size={13} /> Stop</button>
         </div>
         <div class="track" class:indeterminate={pct == null} role="progressbar" aria-label={phaseLabel(job)} aria-valuemin="0" aria-valuemax="100" aria-valuenow={pct ?? undefined}>
           <div style:width={`${pct ?? 35}%`}></div>
@@ -147,9 +139,6 @@
       </article>
     {/each}
 
-    {#if settled.length}<details class="job-history">
-      <summary>Recent jobs <span>{settled.length}</span></summary>
-      <div class="job-history-list">
     {#each settled.slice(0, 12) as job (job.id)}
       {@const Icon = TASK_ICON[job.task] ?? ImageIcon}
       <article class="job card-done" class:card-error={job.status === 'error'} class:card-cancel={job.status === 'cancelled'}>
@@ -194,17 +183,11 @@
         </div>
       </article>
     {/each}
-      </div>
-    </details>{/if}
   </div>
 {/if}
 
 <style>
   .media-jobs { display:flex; flex-direction:column; gap:10px; margin:0 0 18px; }
-  .job-history { border:1px solid var(--border-soft); border-radius:10px; background:var(--bg-card); }
-  .job-history > summary { cursor:pointer; padding:12px 14px; color:var(--text-dim); font-size:12px; font-weight:600; }
-  .job-history > summary span { margin-left:7px; color:var(--text-faint); font-weight:400; }
-  .job-history-list { display:flex; flex-direction:column; gap:8px; padding:0 10px 10px; }
   .job { border:1px solid var(--border-soft); border-radius:12px; background:var(--bg-raised); padding:13px 15px; display:flex; flex-direction:column; gap:9px; min-width:0; }
   .card-live { border-color:color-mix(in srgb, var(--accent) 35%, var(--border-soft)); }
   .card-error { border-color:color-mix(in srgb, var(--red) 30%, transparent); }
@@ -229,12 +212,7 @@
   .job-meta .spacer { flex:1; }
   .icon-btn { display:inline-flex; align-items:center; gap:5px; border:0; background:none; padding:4px 6px; border-radius:7px; font-size:11px; color:var(--text-dim); cursor:pointer; }
   .icon-btn:hover { background:var(--bg-hover); color:var(--text); }
-  .icon-btn:disabled { opacity:.55; cursor:wait; }
   .job-results { display:flex; flex-wrap:wrap; gap:8px; }
-  .job-preview { position:relative; overflow:hidden; border:1px solid var(--border-soft); border-radius:10px; background:var(--bg-hover); min-height:185px; display:grid; place-items:center; }
-  .job-preview img { display:block; width:100%; max-height:430px; object-fit:contain; }
-  .preview-wait { display:flex; flex-direction:column; align-items:center; gap:10px; padding:45px 12px; color:var(--text-faint); font-size:12px; }
-  .preview-caption { position:absolute; left:0; right:0; bottom:0; display:flex; justify-content:space-between; gap:8px; padding:9px 12px; font-size:11px; color:var(--text); background:color-mix(in srgb, var(--bg-raised) 88%, transparent); backdrop-filter:blur(8px); }
   .thumb { width:76px; height:76px; border-radius:9px; overflow:hidden; border:1px solid var(--border-soft); display:block; position:relative; }
   .thumb img, .thumb video { width:100%; height:100%; object-fit:cover; display:block; }
   .thumb.audio { display:grid; place-items:center; color:var(--accent); background:color-mix(in srgb, var(--accent) 6%, var(--bg-raised)); }

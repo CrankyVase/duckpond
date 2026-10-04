@@ -5,11 +5,7 @@ const origin = process.env.PREVIEW_URL || 'http://127.0.0.1:5198';
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE, args: ['--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
 const errors = [];
-let chatStarts = 0;
 page.on('pageerror', e => errors.push(e.message));
-page.on('request', request => {
-  if (request.method() === 'POST' && /\/api\/conversations\/\d+\/chat$/.test(new URL(request.url()).pathname)) chatStarts++;
-});
 page.on('console', m => { if (m.type() === 'error') console.error(m.text()); });
 const conversations = [
   { id: 42, mode: 'agent', workspace_id: 1, title: 'Portfolio refresh', model_id: 'test-model', settings: {}, messages: [], updated_at: Date.now()/1000 },
@@ -48,13 +44,10 @@ await page.route('**/api/**', async route => {
 try {
   await page.goto(`${origin}/u/1/portfolio-refresh+42`);
   await page.getByRole('heading', { name: 'What do you want to build?' }).waitFor();
-  await page.getByRole('button', { name: 'Make a change' }).click();
-  assert.match(await page.locator('.composer textarea').inputValue(), /Help me make a change in this project/);
-  assert.equal(chatStarts, 0, 'unfinished suggestion fills the composer instead of spending a model turn');
   const panel = page.getByRole('complementary', { name: 'Project workbench' });
   await page.frameLocator('iframe[title="Project preview"]').getByText('Static portfolio').waitFor();
   const width = (await panel.boundingBox()).width;
-  await page.getByRole('button', { name: /^Source 3$/ }).click();
+  await page.getByRole('button', { name: /^Files 3$/ }).click();
   assert.equal((await panel.boundingBox()).width, width, 'Switching tabs keeps pane width stable');
   await page.getByRole('searchbox', { name: 'Filter project files' }).fill('App');
   assert.equal(await page.locator('.tree .rowwrap').count(), 1);
@@ -74,7 +67,7 @@ try {
   await page.getByRole('button', { name: 'Project setup', exact: true }).click();
   await page.getByRole('dialog').waitFor();
   assert.deepEqual(await page.locator('.chat').boundingBox(), before, 'Project setup must not displace conversation');
-  await page.getByLabel('Priorities and conventions').fill('Run tests before finishing.');
+  await page.getByLabel('Instructions for this agent conversation').fill('Run tests before finishing.');
   await page.getByRole('button', { name: 'Save instructions' }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.equal(conversations[0].settings.system_prompt, 'Run tests before finishing.');
@@ -84,12 +77,12 @@ try {
   assert.equal(await page.locator('.composer textarea').inputValue(), '');
   await page.locator('.composer textarea').fill('Chat draft is separate');
   assert.equal(conversations[1].settings.system_prompt, undefined);
-  await page.getByRole('button', { name: 'Coding', exact: true }).click();
+  await page.getByRole('button', { name: 'Agent', exact: true }).click();
   await panel.waitFor();
   assert.equal(await page.locator('.composer textarea').inputValue(), 'Agent draft stays with my project');
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await page.locator('.settings-main').waitFor();
-  await page.getByRole('button', { name: 'Coding', exact: true }).click();
+  await page.getByRole('button', { name: 'Agent', exact: true }).click();
   await panel.waitFor();
   assert.equal(await page.locator('.composer textarea').inputValue(), 'Agent draft stays with my project');
   conversations[0].messages = [{ id: 1, role: 'assistant', content: 'I found the project files.', run_id: 7 }];
@@ -108,14 +101,14 @@ try {
   for (const width of [768, 390]) {
     await page.setViewportSize({ width, height: 844 });
     await page.reload();
-    await page.locator('.composer .mobile-files').click();
+    await page.getByTitle('Show project files').click();
     await panel.waitFor();
     const box = await panel.boundingBox();
     assert(box.width <= width && box.x >= 0);
     await page.getByRole('button', { name: 'Live app', exact: true }).click();
     await page.frameLocator('iframe[title="Project preview"]').getByText('Live portfolio').waitFor();
     await page.screenshot({ path: `/tmp/duckpond-agent-workbench-${width}.png` });
-    await page.getByRole('button', {name: 'Hide project pane'}).click();
+    await page.getByTitle('Hide files').click();
     await page.getByRole('button', { name: 'Project setup', exact: true }).click();
     await page.getByRole('dialog').waitFor();
     await page.keyboard.press('Escape');

@@ -50,11 +50,6 @@ try {
   writeFileSync(join(root,'web/src/app.js'), 'source');
   writeFileSync(join(root,'server/package.json'), '{}');
   const before = sourceState(root);
-  assert.equal(sourceGroup('bridge/windows-worker.ps1'), 'bridge');
-  assert.equal(sourceGroup('bridge/image_worker.py'), 'bridge');
-  assert.equal(sourceGroup('bridge/windows-cache.json'), null);
-  assert.equal(sourceGroup('bridge/test_lifecycle.py'), null);
-  assert.equal(sourceGroup('bridge/benchmark_extra.py'), null);
   let finishBackground;
   const background = guard.runBackground(() => new Promise(resolve => { finishBackground = resolve; }));
   assert.equal(guard.status().busy, true);

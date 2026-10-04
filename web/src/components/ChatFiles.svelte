@@ -13,8 +13,8 @@
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   
 
-  let { open = $bindable(!window.matchMedia('(max-width: 1100px)').matches) } = $props();
-  let panelWidth = $state(440);
+  let open = $state(!window.matchMedia('(max-width: 768px)').matches);
+  let panelWidth = $state(480);
   let fileFilter = $state('');
   let showLogs = $state(false);
   let showChanges = $state(false);
@@ -43,21 +43,17 @@
     return () => { alive = false; clearTimeout(timer); };
   });
   const visibleFiles = $derived(files.filter(f => f.path.toLowerCase().includes(fileFilter.toLowerCase())));
-  const fileCount = $derived(files.filter(f => !f.dir).length);
-  const folderCount = $derived(files.filter(f => f.dir).length);
-  const clampPanelWidth = width => Math.max(300, Math.min(680, window.innerWidth * 0.6, width));
   function resizePanel(event) {
     const handle = event.currentTarget;
     handle.setPointerCapture(event.pointerId);
     const start = event.clientX, width = panelWidth;
-    const move = e => panelWidth = clampPanelWidth(width + start - e.clientX);
-    const end = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end); handle.removeEventListener('lostpointercapture', end); };
-    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end); handle.addEventListener('lostpointercapture', end);
+    const move = e => panelWidth = Math.max(280, Math.min(window.innerWidth * 0.6, width + start - e.clientX));
+    const end = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('lostpointercapture', end); };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('lostpointercapture', end);
   }
   let files = $state([]);
   let wsName = $state('');
   let viewer = $state(null); // { path, content, error }
-  const sourceLines = $derived(viewer && !viewer.error ? viewer.content.split('\n').length : 0);
   let preview = $state(false);
   let previewPath = $state('');
   let previewNonce = $state(0);
@@ -110,7 +106,7 @@
         if (!autoOpened && files.some(f => !f.dir && /\.html?$/i.test(f.path))) {
           autoOpened = true;
           // Show the result as soon as the agent creates its first HTML file.
-          if (!window.matchMedia('(max-width: 1100px)').matches) void openPreview();
+          if (!window.matchMedia('(max-width: 768px)').matches) void openPreview();
         }
       } catch (err) { if (request === refreshId && workspaceId === wsId) treeError = err.message; }
     }, version ? 400 : 0);
@@ -120,7 +116,6 @@
   const depth = (p) => p.split('/').length - 1;
   const name = (p) => p.split('/').pop();
   const isHtml = (p) => /\.(html?|svg)$/i.test(p);
-  const fileSize = bytes => typeof bytes !== 'number' ? '' : bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
   const htmlFiles = $derived(files.filter((f) => !f.dir && isHtml(f.path)));
   function pickDefaultHtml() {
@@ -206,35 +201,35 @@
   </button>
 {:else}
   <aside class="panel" class:withpreview={preview} style:--panel-width={`${panelWidth}px`} aria-label="Project workbench">
-    <button class="resize" aria-label="Resize project pane" title="Drag to resize; use arrow keys for smaller adjustments" onpointerdown={resizePanel} onkeydown={e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); panelWidth = clampPanelWidth(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }}></button>
+    <button class="resize" aria-label="Resize project pane" title="Drag to resize; use arrow keys for smaller adjustments" onpointerdown={resizePanel} onkeydown={e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); panelWidth = Math.max(280, Math.min(window.innerWidth * .6, panelWidth + (e.key === 'ArrowLeft' ? 24 : -24))); } }}></button>
     <div class="head">
       <FolderOpen size={14} />
       <div class="names">
         <span class="title">Project</span>
         {#if wsName}<span class="ws">{wsName}</span>{/if}
       </div>
-      <button class="hbtn" class:dim={!htmlFiles.length} disabled={!htmlFiles.length} aria-label="Preview project HTML"
+      <button class="hbtn" class:dim={!htmlFiles.length}
         onclick={() => openPreview()}
         title={htmlFiles.length
           ? 'Preview project HTML'
           : 'No HTML files to preview yet'}>
         <Globe size={14} />
       </button>
-      <button class="hbtn" onclick={() => (open = false)} title="Hide project pane" aria-label="Hide project pane">
+      <button class="hbtn" onclick={() => (open = false)} title="Hide files">
         <PanelRightClose size={15} />
       </button>
     </div>
-    <div class="viewtabs" role="group" aria-label="Project view">
-      <button class:active={!preview && !showChanges} aria-pressed={!preview && !showChanges} onclick={() => { showChanges = false; preview = false; viewer = null; }}>Source <span>{fileCount}</span></button>
-      <button class:active={showChanges} aria-pressed={showChanges} onclick={() => { showChanges = true; preview = false; viewer = null; }}>Changes <span>{changes.length}</span></button>
-      <button class:active={preview && !livePreview} aria-pressed={preview && !livePreview} onclick={() => { livePreview = false; openPreview(); }} disabled={!htmlFiles.length}>Preview</button>
-      {#if server?.base}<button class:active={preview && livePreview} aria-pressed={preview && livePreview} onclick={() => { showChanges = false; livePreview = true; viewer = null; preview = true; open = true; }}>Live app</button>{/if}
-      {#if preview}<button class="hbtn" onclick={reloadPreview} title="Reload preview" aria-label="Reload preview"><RefreshCw size={14} /></button>{/if}
+    <div class="viewtabs">
+      <button class:active={showChanges} onclick={() => { showChanges = true; preview = false; viewer = null; }}>Changes <span>{changes.length}</span></button>
+      {#if server?.base}<button class:active={preview && livePreview} onclick={() => { showChanges = false; livePreview = true; viewer = null; preview = true; open = true; }}>Live app</button>{/if}
+      <button class:active={preview && !livePreview} onclick={() => { livePreview = false; openPreview(); }} disabled={!htmlFiles.length}>Preview</button>
+      <button class:active={!preview && !showChanges} onclick={() => { showChanges = false; preview = false; viewer = null; }}>Files <span>{files.filter(f => !f.dir).length}</span></button>
+      {#if preview}<button class="hbtn" onclick={reloadPreview} title="Reload preview"><RefreshCw size={14} /></button>{/if}
     </div>
     {#if treeError}<div class="cerr">{treeError}<button class="hbtn" onclick={() => app.filesVersion++}>Retry</button></div>{/if}
     {#if showChanges}
       <div class="changes-view">
-        <div class="changes-summary"><div><strong>Latest task changes</strong><span class="section-caption">{changes.length} changed file{changes.length === 1 ? '' : 's'}</span></div><span>{runId ? `Run ${runId}` : 'No run yet'}</span></div>
+        <div class="changes-summary"><strong>Latest task changes</strong><span>{runId ? `Run ${runId}` : 'No run yet'}</span></div>
         {#if changeError}<p class="cerr" role="alert">{changeError}<button onclick={() => app.filesVersion++}>Retry</button></p>
         {:else if changesLoading && !changes.length}<p class="empty">Loading changes…</p>
         {:else if !changes.length}<p class="empty">No recorded file edits yet. Changes made with file tools will appear here.</p>
@@ -253,11 +248,11 @@
         {#if showLogs}<pre class="serverlogs">{server?.logs || 'No server output yet.'}</pre>{/if}
       {:else}
       <div class="previewtools">
-        <select class="pick" bind:value={previewPath} title="Pick HTML file" aria-label="Preview source file">
+        <select class="pick" bind:value={previewPath} title="Pick HTML file">
           {#each htmlFiles as f (f.path)}<option value={f.path}>{f.path}</option>{/each}
         </select>
         <span class="livehint">Updates after file changes</span>
-        <button class="hbtn" onclick={() => peek(previewPath)} title="View source" aria-label="View preview source"><FileIcon size={14} /></button>
+        <button class="hbtn" onclick={() => peek(previewPath)} title="View source"><FileIcon size={14} /></button>
       </div>
       {/if}
       {#if runtimeError}<div class="cerr" role="status">Preview error: {runtimeError}</div>{/if}
@@ -267,32 +262,32 @@
       {:else}<div class="empty">Opening preview…</div>{/if}
     {:else if viewer}
       <div class="chead">
-        <button class="hbtn" onclick={() => { viewer = null; peekId++; }} title="Back to files" aria-label="Back to project files"><Folder size={15} /></button>
-        <div class="source-heading"><code class="cpath" title={viewer.path}>{viewer.path}</code>{#if !viewer.error}<span class="section-caption">{sourceLines} line{sourceLines === 1 ? '' : 's'} · Source</span>{/if}</div>
-        <button class="hbtn" onclick={() => download(viewer.path)} title="Download source" aria-label="Download source file"><Download size={14} /></button>
+        <button class="hbtn" onclick={() => { viewer = null; peekId++; }} title="Back to files"><Folder size={15} /></button>
+        <code class="cpath" title={viewer.path}>{viewer.path}</code>
+        <button class="hbtn" onclick={() => download(viewer.path)} title="Download source"><Download size={14} /></button>
       </div>
       {#if viewer.error}<div class="cerr" role="alert">{viewer.error}</div>
       {:else}<pre class="cbody">{viewer.content}</pre>{/if}
     {:else}
-    <div class="file-search"><div class="file-summary"><span>Project source</span><span class="section-caption">{fileCount} files · {folderCount} folders</span></div><input type="search" aria-label="Filter project files" placeholder="Filter files by name or path…" bind:value={fileFilter} /></div>
+    <div class="file-search"><input type="search" aria-label="Filter project files" placeholder="Find a file…" bind:value={fileFilter} /></div>
     <div class="tree">
       {#each visibleFiles as f (f.path)}
         {#if f.dir}
-          <div class="row dir" style="padding-left: {14 + (fileFilter ? 0 : depth(f.path) * 14)}px" title={f.path}>
-            <Folder size={13} /><span class="nm">{fileFilter ? f.path : name(f.path)}</span>{#if f.skipped}<span class="file-size">Not indexed</span>{/if}
+          <div class="row dir" style="padding-left: {10 + depth(f.path) * 13}px">
+            <Folder size={12} /><span class="nm">{name(f.path)}</span>
           </div>
         {:else}
-          <div class="rowwrap" style="padding-left: {14 + (fileFilter ? 0 : depth(f.path) * 14)}px">
-            <button class="row" onclick={() => peek(f.path)} title={f.path}>
-              <FileIcon size={13} /><span class="nm">{fileFilter ? f.path : name(f.path)}</span><span class="file-size">{fileSize(f.size)}</span>
+          <div class="rowwrap" style="padding-left: {10 + depth(f.path) * 13}px">
+            <button class="row" onclick={() => peek(f.path)}>
+              <FileIcon size={12} /><span class="nm">{name(f.path)}</span>
             </button>
             {#if isHtml(f.path)}
-              <button class="pv" title="Preview in-canvas" aria-label={`Preview ${f.path}`} onclick={() => openPreview(f.path)}>
-                <Globe size={13} />
+              <button class="pv" title="Preview in-canvas" onclick={() => openPreview(f.path)}>
+                <Globe size={11} />
               </button>
             {/if}
-            <button class="pv" title="Download" aria-label={`Download ${f.path}`} onclick={() => download(f.path)}>
-              <Download size={13} />
+            <button class="pv" title="Download" onclick={() => download(f.path)}>
+              <Download size={11} />
             </button>
           </div>
         {/if}
@@ -306,37 +301,30 @@
 
 
 <style>
-  .changes-view { flex:1; min-height:0; overflow:auto; padding:18px 16px; }
-  .changes-summary { display:flex; justify-content:space-between; align-items:baseline; gap:12px; font-size:12px; margin-bottom:18px; }
-  .changes-summary > div { display:grid; gap:5px; min-width:0; }
-  .changes-summary > span { flex-shrink:0; font-size:11px; }
-  .section-caption { font-size:10.5px; line-height:1.5; font-weight:400; }
-  .file-summary { display:flex; align-items:baseline; justify-content:space-between; gap:10px; font-size:12px; font-weight:550; margin-bottom:10px; }
-  .source-heading { display:flex; flex-direction:column; flex:1; gap:3px; min-width:0; }
-  .file-size { flex-shrink:0; margin-left:auto; padding-left:8px; padding-right:6px; font:10px var(--mono); }
+  .changes-view { min-height:0; overflow:auto; padding:16px; }
+  .changes-summary { display:flex; justify-content:space-between; gap:12px; font-size:12px; margin-bottom:18px; }
   .changes-summary span,.changes-scope { color:var(--text-dim); }
   .changes-scope { font-size:11px; line-height:1.7; margin-top:18px; }
   .change-picker { display:flex; flex-direction:column; gap:8px; font-size:11px; color:var(--text-dim); }
   .change-picker select { width:100%; min-width:0; }
-  .change-meta { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin:12px 0; font-size:11px; color:var(--text-dim); }
+  .change-meta { display:flex; justify-content:space-between; align-items:center; margin:12px 0; font-size:11px; color:var(--text-dim); }
   .change-meta button { font-size:11px; }
   .resize { position: absolute; left: -5px; top: 0; bottom: 0; width: 9px; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: col-resize; touch-action: none; z-index: 2; }
   .resize:hover, .resize:focus-visible { background: var(--accent-dim); opacity: .5; }
-  .file-search { padding: 16px 14px 10px; flex-shrink:0; }
-  .file-search input { width: 100%; min-height:34px; font-size: 12px; }
+  .file-search { padding: 12px; }
+  .file-search input { width: 100%; font-size: 12px; }
   .server-state { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); }
   .server-state span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); }
   .server-state.running span { background: var(--accent); }
   .log-toggle { margin-left: auto; font-size: 12px; background: transparent; border: 0; }
   .serverlogs { margin: 0; padding: 12px; max-height: 180px; overflow: auto; font: 11px/1.6 var(--mono); background: var(--bg-input); border-bottom: 1px solid var(--border-soft); }
-  .viewtabs { display: flex; align-items: center; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border-soft); overflow-x:auto; flex-shrink:0; }
+  .viewtabs { display: flex; align-items: center; gap: 4px; padding: 0 10px; border-bottom: 1px solid var(--border-soft); overflow-x:auto; flex-shrink:0; }
   .viewtabs button { white-space:nowrap; }
-  .viewtabs button { border: 0; background: none; color: var(--text-dim); border-radius: 0; padding: 11px 9px; min-height:42px; font-size: 12px; border-bottom: 2px solid transparent; }
-  .viewtabs button:not(.hbtn) { flex:1 0 auto; }
+  .viewtabs button { border: 0; background: none; color: var(--text-dim); border-radius: 0; padding: 12px; font-size: 12px; border-bottom: 2px solid transparent; }
   .viewtabs button.active { color: var(--text); border-bottom-color: var(--text); }
   .viewtabs .hbtn { margin-left: auto; }
   .viewtabs span { color: var(--text-faint); margin-left: 4px; }
-  .previewtools { display: flex; align-items: center; gap: 8px; padding: 10px 14px; flex-shrink:0; }
+  .previewtools { display: flex; align-items: center; gap: 8px; padding: 10px 12px; }
   .previewtools .pick { flex: 1; min-width: 0; max-width: none; }
   .livehint { font-size: 10px; color: var(--text-faint); }
   @media(max-width: 1100px) { .livehint { display: none; } }
@@ -361,7 +349,11 @@
   @media (max-width: 768px) {
     .resize { display: none; }
     .rail {
-      display: none;
+      position: fixed; right: 10px; bottom: max(72px, calc(56px + env(safe-area-inset-bottom)));
+      z-index: 25; flex-direction: row; gap: 6px;
+      padding: 10px 12px; margin: 0;
+      writing-mode: horizontal-tb;
+      box-shadow: var(--shadow-lg);
     }
     .railtxt { writing-mode: horizontal-tb; letter-spacing: 0.02em; }
     .panel {
@@ -374,31 +366,29 @@
       }
   .head {
     display: flex; align-items: center; gap: 7px;
-    padding: 12px 14px; border-bottom: 1px solid var(--border-soft); flex-shrink:0;
+    padding: 9px 11px; border-bottom: 1px solid var(--border-soft);
     color: var(--text-dim);
   }
-  .names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap:3px; }
+  .names { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .title { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-faint); }
-  .ws { font-size: 12px; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .hbtn { all: unset; cursor: pointer; box-sizing:border-box; min-width:32px; min-height:32px; padding: 7px; flex-shrink:0; border-radius: calc(6px * var(--rf)); color: var(--text-faint); display: grid; place-items: center; }
+  .ws { font-size: 11.5px; color: var(--text-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hbtn { all: unset; cursor: pointer; padding: 7px; border-radius: calc(6px * var(--rf)); color: var(--text-faint); display: grid; place-items: center; }
   .hbtn:hover { color: var(--text); background: var(--bg-hover); }
   .hbtn.dim { opacity: 0.35; }
-  .hbtn:disabled { cursor:default; }
 
-  .tree { overflow-y: auto; flex: 1; min-height:0; padding: 4px 0 14px; }
-  .rowwrap { display: flex; align-items: center; gap: 2px; padding-right: 8px; }
+  .tree { overflow-y: auto; flex: 1; padding: 4px 0; }
+  .rowwrap { display: flex; align-items: center; gap: 2px; padding-right: 4px; }
   .row {
     all: unset; box-sizing: border-box; flex: 1; min-width: 0; cursor: pointer;
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 6px;
     padding-top: 8px; padding-bottom: 8px; padding-right: 4px;
-    font-size: 12.5px; color: var(--text-dim);
+    font-size: 12px; color: var(--text-dim);
   }
   .row:hover { background: var(--bg-hover); color: var(--text); }
   .row.dir { cursor: default; color: var(--text-faint); width: 100%; }
-  .row :global(svg) { flex-shrink:0; }
   .pv {
     all: unset; cursor: pointer; flex-shrink: 0;
-    display: grid; place-items: center; width: 28px; height: 28px;
+    display: grid; place-items: center; width: 20px; height: 20px;
     border-radius: 5px; color: var(--text-faint);
   }
   .pv:hover { color: var(--accent); background: var(--bg-hover); }
@@ -407,27 +397,20 @@
 
   .chead {
     display: flex; align-items: center; gap: 10px;
-    padding: 12px 14px; border-bottom: 1px solid var(--border-soft); flex-shrink:0;
+    padding: 10px 14px; border-bottom: 1px solid var(--border-soft);
   }
   .cpath { flex: 1; font-family: var(--mono); font-size: 12.5px; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cbody {
-    margin: 0; padding: 16px; overflow: auto;
-    font-family: var(--mono); font-size: 12.5px; line-height: 1.7; tab-size:2;
+    margin: 0; padding: 14px 16px; overflow: auto;
+    font-family: var(--mono); font-size: 12px; line-height: 1.6;
     color: var(--text-dim); white-space: pre; flex: 1; min-height: 0;
   }
   .cerr { overflow-wrap: anywhere; max-height: 130px; overflow-y: auto; padding: 16px; color: var(--red); font-size: 13px; }
 
-  .previewframe { flex: 1; width:100%; min-height: 0; border: none; background: #fff; }
+  .previewframe { flex: 1; min-height: 0; border: none; background: #fff; }
   .pick {
     max-width: 220px; font-family: var(--mono); font-size: 11.5px;
     background: var(--bg-input); color: var(--text); border: 1px solid var(--border-soft);
-    border-radius: 6px; min-height:32px; padding: 5px 8px;
-  }
-  @media (max-width:768px) {
-    .head { padding:12px 16px; }
-    .hbtn { min-width:36px; min-height:36px; }
-    .pv { width:32px; height:32px; }
-    .row { padding-top:10px; padding-bottom:10px; }
-    .file-search { padding:16px 16px 10px; }
+    border-radius: 6px; padding: 3px 6px;
   }
 </style>

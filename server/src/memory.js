@@ -164,14 +164,9 @@ export async function updateMemory({ userId, id, text, tier }) {
 // durable facts, now also judging PERMANENCE (tier) and how SERIOUSLY the
 // fact was stated (seed confidence). Candidates that near-duplicate an
 // existing memory reinforce it (repetition = evidence) instead of piling up.
-export async function rememberFromExchange({ model, userText, replyText, userId, convId, log, signal }) {
-  signal?.throwIfAborted();
-  // Extraction cannot save a fact when the embedding pipeline is explicitly
-  // disabled. Avoid a model pass that would discard every extracted candidate.
-  if (process.env.EMBED_ENABLED === '0') return null;
+export async function rememberFromExchange({ model, userText, replyText, userId, convId, log }) {
   const { content } = await streamChat({
     model,
-    abortSignal: signal,
     messages: [{
       role: 'user',
       content: 'Did the user STATE any durable fact about themselves in the message below — a preference, '
@@ -193,7 +188,6 @@ export async function rememberFromExchange({ model, userText, replyText, userId,
     }],
     params: { max_tokens: 600, temperature: 0.1, chat_template_kwargs: { enable_thinking: false } },
   });
-  signal?.throwIfAborted();
   // Hallucination guard: a fact only counts if its supporting quote really
   // appears in the user's message (fuzzy: most of the quote's words present).
   // Extractor models invent "facts" on fact-free exchanges — this kills those.
@@ -226,10 +220,8 @@ export async function rememberFromExchange({ model, userText, replyText, userId,
     VALUES (?, ?, ?, ?, ?, ?, 'extracted')`);
   let added = 0;
   for (const f of facts) {
-    signal?.throwIfAborted();
     try {
-      const v = await embed(f.text, 'document', { signal });
-      signal?.throwIfAborted();
+      const v = await embed(f.text, 'document');
       let best = null;
       for (const e of existing) {
         if (!e.vec) continue;
@@ -247,7 +239,7 @@ export async function rememberFromExchange({ model, userText, replyText, userId,
       const r = insert.run(userId, f.text, toBlob(v), convId ?? null, f.tier, f.confidence);
       existing.push({ id: r.lastInsertRowid, vec: toBlob(v), tier: f.tier });
       added++;
-    } catch (err) { signal?.throwIfAborted(); log?.warn?.({ err: String(err) }, 'memory embed failed'); }
+    } catch (err) { log?.warn?.({ err: String(err) }, 'memory embed failed'); }
   }
   if (added) log?.info?.({ added }, 'memories learned');
   return added;

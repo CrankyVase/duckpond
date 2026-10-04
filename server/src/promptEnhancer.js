@@ -15,7 +15,10 @@ const TIMEOUT_MS = 15_000;
 const MAX_TOKENS = 180;
 const FAST_IMAGE_MODEL = 'lfm2-700m-q4-0';
 
-// The 700M helper runs on Fedora CPU, independently of Windows photo VRAM.
+// The prompt-improver is the one router model allowed to share the GPU with
+// a loaded media-bridge model (it's ~1B, so both fit). Every other LLM load
+// force-unloads the bridge first, and every media run spares this model when
+// reclaiming VRAM — see routes/models.js and imagegen.js.
 export function isEnhancerModel(id) {
   const s = String(id ?? '');
   return s === FAST_IMAGE_MODEL || (!!ENV_MODEL && s === ENV_MODEL);
@@ -26,20 +29,18 @@ const CACHE_MS = 10 * 60_000;
 
 function bFromName(name) {
   const m = String(name).match(/(\d+(?:\.\d+)?)\s*b\b/i);
-  const millions = String(name).match(/(\d+(?:\.\d+)?)\s*m\b/i);
-  return m ? Number(m[1]) : millions ? Number(millions[1])/1000 : null;
+  return m ? Number(m[1]) : null;
 }
 
 function looksLikeChatModel(id) {
   const s = String(id).toLowerCase();
   if (/(embed|vision|mmproj|whisper|tts|vl-|reranker|music|flux|sdxl|image|video|diffusion|codertwo|coder)/.test(s)) return false;
-  return /(lfm|qwen|llama|gemma|phi|smol|tiny|granite|olmo|minicpm|internlm|deepseek)/.test(s);
+  return /(qwen|llama|gemma|phi|smol|tiny|granite|olmo|minicpm|internlm|deepseek)/.test(s);
 }
 
 async function pickSmallestLoaded() {
   const models = await listModels();
-  const usable = models.filter((m) => ['loaded','sleeping'].includes(m.status) && looksLikeChatModel(m.id)
-    && bFromName(m.id) != null && bFromName(m.id) <= MAX_PARAMS_B);
+  const usable = models.filter((m) => looksLikeChatModel(m.id));
   if (!usable.length) return null;
   const withB = usable.filter((m) => bFromName(m.id) != null);
   if (withB.length) return withB.sort((a, b) => bFromName(b.id) - bFromName(a.id)).pop().id;
@@ -155,9 +156,7 @@ export async function enhanceMediaPrompt({ prompt, task = 'image', modelId = '' 
       ],
       params: {
         max_tokens: MAX_TOKENS,
-        temperature: 0.3,
-        min_p: 0.15,
-        repeat_penalty: 1.05,
+        temperature: 0.7,
         chat_template_kwargs: { enable_thinking: false },
       },
       abortSignal: abort.signal,

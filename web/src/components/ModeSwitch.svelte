@@ -42,8 +42,8 @@
   </button>
   <button type="button" class:chosen={app.mode === 'agent'} aria-pressed={app.mode === 'agent'}
     disabled={busy}
-    onclick={() => pick('agent')} title="Coding — workbench with project files">
-    <Code size={14} /><span>Coding</span>
+    onclick={() => pick('agent')} title="Agent — coding workbench with project files">
+    <Code size={14} /><span>Agent</span>
   </button>
 </div>
 

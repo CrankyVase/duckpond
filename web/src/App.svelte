@@ -1,14 +1,21 @@
 <script>
-  import { onDestroy } from 'svelte';
-  import { stopMascotBrain } from './lib/mascot.svelte.js';
   import AgentProject from './components/AgentProject.svelte';
   import Chat from './components/Chat.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
+  import CostsPanel from './components/CostsPanel.svelte';
   import Duck from './components/Duck.svelte';
   import DuckGallery from './components/DuckGallery.svelte';
+  import FilesPanel from './components/FilesPanel.svelte';
+  import HubPanel from './components/HubPanel.svelte';
   import Invite from './components/Invite.svelte';
   import Login from './components/Login.svelte';
+  import MediaPanel from './components/MediaPanel.svelte';
+  import ProvidersPanel from './components/ProvidersPanel.svelte';
+  import SettingsPanel from './components/SettingsPanel.svelte';
   import Sidebar from './components/Sidebar.svelte';
+  import SpeechPanel from './components/SpeechPanel.svelte';
+  import StatsPanel from './components/StatsPanel.svelte';
+  import ThemeStudio from './components/ThemeStudio.svelte';
   import Toast from './components/Toast.svelte';
   import Topbar from './components/Topbar.svelte';
   import { applyPrefs } from './lib/prefs.svelte.js';
@@ -16,7 +23,7 @@
     parsePath, pathForState, rememberNext, setPath, takeNext, userHome,
   } from './lib/router.js';
   import {
-    app, checkAuth, closeSidebarIfMobile, loadConversations, loadModels, newConversation, openConversation, pollStatus,
+    app, checkAuth, loadConversations, loadModels, newConversation, openConversation, pollStatus,
   } from './lib/state.svelte.js';
   import { toast } from './lib/toast.svelte.js';
 
@@ -119,7 +126,7 @@
       lastPushedKey = key;
       return;
     }
-    setPath(`${path}${ducklab ? '#ducklab' : ''}`, { replace: replace || titleOnly });
+    setPath(path, { replace: replace || titleOnly });
     lastPushedKey = key;
   }
 
@@ -188,7 +195,7 @@
     if (!app.user || !booted) return;
     const p = location.pathname;
     if (p === '/' || p === '/login') {
-      setPath(`${userHome(app.user.id)}${ducklab ? '#ducklab' : ''}`, { replace: true });
+      setPath(userHome(app.user.id), { replace: true });
     }
   });
 
@@ -207,9 +214,7 @@
     return () => window.removeEventListener('dp:unauthorized', kicked);
   });
 
-  onDestroy(stopMascotBrain);
-
-  // The animation workshop is also available in the signed-in production app.
+  // Dumpling Lab: dev harness for the mascot, opened with #ducklab
   let ducklab = $state(typeof location !== 'undefined' && location.hash === '#ducklab');
   $effect(() => {
     const onHash = () => (ducklab = location.hash === '#ducklab');
@@ -227,18 +232,8 @@
 
   function shortcuts(e) {
     if (!app.user) return;
-    // Keep navigation shortcuts from opening controls behind a modal dialog.
-    if (document.querySelector('dialog[open]')) {
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || (e.shiftKey && e.key.toLowerCase() === 'o'))) e.preventDefault();
-      return;
-    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); app.modelPickerOpen = !app.modelPickerOpen; }
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') {
-      e.preventDefault();
-      app.view = 'chat'; app.themeStudioOpen = false; app.modelPickerOpen = false;
-      newConversation().then(() => closeSidebarIfMobile())
-        .catch(error => toast(`Could not create ${app.mode === 'agent' ? 'task' : 'chat'}: ${error.message}`, 'error'));
-    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newConversation(); }
     if (e.key === 'Escape' && app.view === 'settings') app.view = 'chat';
     else if (e.key === 'Escape' && app.themeStudioOpen) app.themeStudioOpen = false;
     // phone: Escape / back also closes the nav drawer
@@ -256,28 +251,20 @@
     document.body.classList.toggle('dp-drawer-open', open);
     return () => document.body.classList.remove('dp-drawer-open');
   });
-
-  // A desktop window narrowed to phone width should start with the drawer
-  // closed, just like a page opened directly on a phone.
-  $effect(() => {
-    const narrow = window.matchMedia('(max-width: 768px)');
-    const onChange = (event) => { if (event.matches) app.sidebarCollapsed = true; };
-    narrow.addEventListener('change', onChange);
-    return () => narrow.removeEventListener('change', onChange);
-  });
 </script>
 
 <svelte:window onkeydown={shortcuts} />
 
-{#if inviteToken}
+{#if ducklab && import.meta.env.DEV}
+  <!-- dev server only: the lab is reachable without auth for mascot QA -->
+  <DuckGallery />
+{:else if inviteToken}
   <Invite token={inviteToken} />
 {:else if !app.authChecked}
   <div class="boot"><span class="pulse"><Duck px={2} /></span></div>
 {:else if !app.user}
   <!-- Deep links never skip auth — only the login form is shown -->
   <Login />
-{:else if ducklab}
-  <svelte:boundary onerror={appCrashed}><DuckGallery /></svelte:boundary>
 {:else}
   <!-- Last-resort boundary: in Svelte 5 an uncaught render error anywhere in
        the layout kills the whole effect graph — every button stops responding
@@ -295,61 +282,21 @@
             <div class="modewrap" class:from-agent={app.view === 'chat' && app.mode === 'agent'}>
               {#if app.view === 'chat' && app.mode === 'agent'}<AgentProject />{/if}
               {#if app.view === 'stats'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/StatsPanel.svelte')}
-                    <div class="panel-loading">Opening stats…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open stats. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><StatsPanel /></div>
               {:else if app.view === 'speech'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/SpeechPanel.svelte')}
-                    <div class="panel-loading">Opening speech…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open speech. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><SpeechPanel /></div>
               {:else if app.view === 'files'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/FilesPanel.svelte')}
-                    <div class="panel-loading">Opening files…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open files. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><FilesPanel /></div>
               {:else if app.view === 'media'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/MediaPanel.svelte')}
-                    <div class="panel-loading">Opening Studio…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open Studio. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><MediaPanel /></div>
               {:else if app.view === 'providers'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/ProvidersPanel.svelte')}
-                    <div class="panel-loading">Opening providers…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open providers. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><ProvidersPanel /></div>
               {:else if app.view === 'costs'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/CostsPanel.svelte')}
-                    <div class="panel-loading">Opening costs…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open costs. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><CostsPanel /></div>
               {:else if app.view === 'hub'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/HubPanel.svelte')}
-                    <div class="panel-loading">Opening Model Hub…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open Model Hub. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><HubPanel /></div>
               {:else if app.view === 'settings'}
-                <div class="panel-enter view-panel">
-                  {#await import('./components/SettingsPanel.svelte')}
-                    <div class="panel-loading">Opening settings…</div>
-                  {:then panel}<panel.default />
-                  {:catch}<div class="panel-loading">Could not open settings. Reload to try again.</div>{/await}
-                </div>
+                <div class="panel-enter view-panel"><SettingsPanel /></div>
               {:else}
                 <div class="view-panel"><Chat /></div>
               {/if}
@@ -357,12 +304,7 @@
           {/key}
         </div>
       </main>
-      {#if app.themeStudioOpen}
-        {#await import('./components/ThemeStudio.svelte')}
-          <div class="panel-loading">Opening Theme Studio…</div>
-        {:then panel}<panel.default />
-        {:catch}<div class="panel-loading">Could not open Theme Studio. Reload to try again.</div>{/await}
-      {/if}
+      <ThemeStudio />
     </div>
     {#snippet failed({ error })}
       <div class="crashed">
@@ -380,7 +322,6 @@
 
 <style>
   .boot { height: 100%; height: 100dvh; display: grid; place-items: center; }
-  .panel-loading { padding: 32px; color: var(--text-dim); font-size: 14px; }
   .pulse { animation: pulse 1.2s ease infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .layout {

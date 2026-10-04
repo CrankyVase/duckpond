@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
 import { workspacePreviewRoutes } from './workspacePreview.js';
 import { healOrphanedPrompts } from './chatkit.js';
-import { activeChatJobCount } from './liveJobs.js';
 import { createDeploymentGuard } from './deployment.js';
 import { downloadBusy, reapOrphans } from './downloadManager.js';
 import { reapIdleModels } from './llama.js';
@@ -25,7 +24,7 @@ import { BUILD, versionLine } from './version.js';
 import hfRoutes, { publicHfRoutes } from './routes/hf.js';
 import imageRoutes from './routes/images.js';
 import mediaRoutes from './routes/media.js';
-import { recoverMediaJobs, pruneMediaJobs, activeMediaJobCount } from './mediaJobs.js';
+import { recoverMediaJobs, pruneMediaJobs } from './mediaJobs.js';
 import mapRoutes from './routes/maps.js';
 import modelRoutes from './routes/models.js';
 import docRoutes from './routes/docs.js';
@@ -50,7 +49,7 @@ process.on('unhandledRejection', (err) => { console.error('UNHANDLED_REJECTION',
 
 const app = Fastify({ logger: { level: 'info' } });
 app.log.info(`duckpond server ${versionLine()}`);
-const deployment = createDeploymentGuard({ extraBusy: () => downloadBusy() || activeRunCount() > 0 || activeChatJobCount() > 0 || activeMediaJobCount() > 0 });
+const deployment = createDeploymentGuard({ extraBusy: () => downloadBusy() || activeRunCount() > 0 });
 deployment.install(app);
 await app.register(fastifyCookie);
 await app.register(fastifyWebsocket);
@@ -125,11 +124,9 @@ try {
   if (n) app.log.info({ n }, 'reclaimed orphan agent runs on boot');
 } catch (err) { app.log.warn({ err }, 'orphan run reclaim failed'); }
 
-// Recover interrupted HF transfers from their partial cache blobs.
-try {
-  const n = reapOrphans();
-  if (n) app.log.info({ n }, 'resuming interrupted model downloads');
-} catch (err) { app.log.warn({ err }, 'download recovery failed'); }
+// Kill any download workers orphaned by a previous DuckPond process, and
+// re-adopt their job records so the UI shows them as cancelled, not "running".
+try { reapOrphans(); } catch (err) { app.log.warn({ err }, 'download orphan reap failed'); }
 
 // Media Studio background jobs: requeue queued rows left by a restart and
 // settle running ones as cancelled-with-retry so no card hangs forever.

@@ -1,7 +1,8 @@
-// Embeddings are optional. This deployment disables them until a Windows
-// embedding worker is configured; never fall back to Fedora inference.
+// Client for the dedicated embedding side-service (duckpond-embed.service):
+// llama-server --embeddings with nomic-embed-text-v1.5 on :8083, CPU-only so
+// it never competes for VRAM. Shared infrastructure for semantic search,
+// long-term memory, and document RAG.
 const EMBED_URL = process.env.EMBED_URL ?? 'http://127.0.0.1:8083';
-const enabled = () => process.env.EMBED_ENABLED !== '0';
 
 // nomic-embed is prefix-trained: documents and queries embed differently.
 const PREFIX = { document: 'search_document: ', query: 'search_query: ' };
@@ -9,13 +10,10 @@ const PREFIX = { document: 'search_document: ', query: 'search_query: ' };
 // ~2048-token service context; clip long inputs instead of erroring
 const MAX_CHARS = 6000;
 
-export async function embed(text, kind = 'document', { signal } = {}) {
-  signal?.throwIfAborted();
-  if (!enabled()) throw new Error('Semantic embeddings are disabled until a Windows embedding worker is configured');
+export async function embed(text, kind = 'document') {
   const input = (PREFIX[kind] ?? PREFIX.document) + String(text ?? '').slice(0, MAX_CHARS);
   const res = await fetch(EMBED_URL + '/v1/embeddings', {
     method: 'POST',
-    signal,
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ input }),
   });
@@ -33,7 +31,6 @@ export async function embed(text, kind = 'document', { signal } = {}) {
 }
 
 export async function embedAvailable() {
-  if (!enabled()) return false;
   try {
     const res = await fetch(EMBED_URL + '/health', { signal: AbortSignal.timeout(1500) });
     return res.ok;

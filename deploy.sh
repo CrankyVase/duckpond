@@ -2,13 +2,9 @@
 # Timer-driven source deployment. Generated files never trigger a restart.
 set -euo pipefail
 REPO="${DUCKPOND_REPO:-/home/cranky/duckpond}"
-NODE_BIN="${DUCKPOND_NODE_BIN:-/home/cranky/bin}"
-BRIDGE_PYTHON="${DUCKPOND_BRIDGE_PYTHON:-$REPO/.bridge-venv/bin/python}"
+NODE_BIN="${DUCKPOND_NODE_BIN:-/home/cranky/.nvm/versions/node/v22.23.1/bin}"
 HEALTH="${DUCKPOND_DEPLOY_HEALTH:-http://127.0.0.1:3000/api/health}"
 export PATH="$NODE_BIN:$PATH"
-if ! command -v npm >/dev/null 2>&1; then
-  npm() { node "${DUCKPOND_NPM_CLI:-/home/cranky/.local/share/federation-tools/npm/bin/npm-cli.js}" "$@"; }
-fi
 cd "$REPO"
 exec 9> .deploy.lock
 flock -n 9 || exit 0
@@ -47,20 +43,6 @@ if ! probe idle; then
   echo 'Deploy deferred: service busy, unavailable, or needs the initial deployment-guard restart.'
   exit 0
 fi
-worker_idle() {
-  # Explicit model loads are asynchronous and outlive their website request.
-  # Check both workers before deploying, including during the admission drain.
-  for endpoint in http://127.0.0.1:8081/bridge/status http://127.0.0.1:8765/v1/progress; do
-    curl -fsS --max-time 5 "$endpoint" > "$HEALTH_FILE" || return 1
-    node --input-type=module - "$HEALTH_FILE" <<'JS' || return 1
-import { readFileSync } from 'node:fs';
-const s = JSON.parse(readFileSync(process.argv[2], 'utf8'));
-process.exit(Object.hasOwn(s, 'active') && !s.active
-  && !['loading', 'unloading'].includes(s.status) ? 0 : 1);
-JS
-  done
-}
-if ! worker_idle; then echo 'Deploy deferred: Windows worker is busy or unavailable.'; exit 0; fi
 changed() {
   node --input-type=module - "$STATE" "$NEXT" "$1" <<'JS'
 import { readFileSync } from 'node:fs';
@@ -83,12 +65,9 @@ for attempt in 1 2 3 4 5; do
   if probe draining; then READY=1; break; fi
   sleep 2
 done
-if [ "$READY" != 1 ] || ! worker_idle; then echo 'Deploy deferred: active work is still finishing.'; exit 0; fi
+if [ "$READY" != 1 ]; then echo 'Deploy deferred: active work is still finishing.'; exit 0; fi
 if changed serverDeps; then (cd server && npm ci); fi
-if changed bridge; then
-  "$BRIDGE_PYTHON" bridge/sync_worker.py
-  systemctl --user restart duckpond-windows-bridge.service
-fi
+if changed bridge; then systemctl --user restart image-gen-bridge-8765.service; fi
 systemctl --user restart duckpond.service
 HEALTHY=0
 for attempt in 1 2 3 4 5; do
