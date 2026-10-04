@@ -40,6 +40,16 @@
   let showThinking = $state(prefs.autoExpandThinking);
   $effect(() => { if (allThinking && !streaming) showThinking = true; });
   let thinkEl = $state(null);
+  // seconds spent thinking, ticking live until the first answer token arrives
+  let thinkStart = $state(0);
+  let thinkNow = $state(Date.now());
+  const thinkSecs = $derived(thinkStart ? Math.max(0, Math.round((thinkNow - thinkStart) / 1000)) : 0);
+  $effect(() => {
+    if (!(streaming && msg.thinking && !msg.content)) return;
+    if (!thinkStart) thinkStart = Date.now();
+    const t = setInterval(() => { thinkNow = Date.now(); }, 500);
+    return () => clearInterval(t);
+  });
   let copied = $state(false);
 
   const blocks = $derived(splitBlocks(msg.content ?? ''));
@@ -194,8 +204,9 @@
       {#if msg.thinking}
         {#if streaming && !msg.content}
           <div class="tbar live">
-            <span class="tspin"><LoaderCircle size={13} /></span>
-            <span class="shimmer">Thinking…</span>
+            <span class="thinkorb" aria-hidden="true"></span>
+            <span class="shimmer">Thinking</span>
+            <span class="ttime">{thinkSecs}s</span>
           </div>
           <div class="tbody live" bind:this={thinkEl}>{msg.thinking}<span class="dp-caret think" aria-hidden="true"></span></div>
         {:else}
@@ -578,4 +589,16 @@
   .actions { margin-top: 14px; }
   .speed { flex-shrink: 0; padding: 1px 8px; border-radius: 999px; background: var(--bg-raised); color: var(--text-dim); font: 11px var(--mono); font-variant-numeric: tabular-nums; }
   .speed.live { color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
+
+  /* ---- redesign: thinking + waiting motion ---- */
+  .thinkorb { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); animation: thinkPulse 1.5s ease-out infinite; }
+  @keyframes thinkPulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+  .ttime { margin-left: 2px; color: var(--text-faint); font: 11px var(--mono); font-variant-numeric: tabular-nums; }
+  .tbody.live { max-height: 150px; overflow: hidden; color: var(--text-faint); font-size: 12.5px; line-height: 1.65; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 34px); mask-image: linear-gradient(to bottom, transparent 0, #000 34px); }
+  .typing { gap: 6px; padding: 12px 4px 8px; }
+  .typing span { width: 8px; height: 8px; background: var(--accent); animation: typeWave 1.2s cubic-bezier(.45,0,.25,1) infinite; }
+  .typing span:nth-child(2) { animation-delay: .15s; }
+  .typing span:nth-child(3) { animation-delay: .3s; }
+  @keyframes typeWave { 0%, 60%, 100% { transform: translateY(0) scale(.7); opacity: .35; } 30% { transform: translateY(-5px) scale(1); opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .thinkorb { animation: none; } }
 </style>

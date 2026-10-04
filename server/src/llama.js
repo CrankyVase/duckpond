@@ -177,8 +177,7 @@ export async function ensureLoadedModel(model, log) {
     const target = models.find((m) => m.id === model);
     for (const m of models) {
       if (m.id === model) continue;
-      // The Fedora CPU helper and Windows GPU models have independent workers.
-      if (target?.executionHost && m.executionHost && target.executionHost !== m.executionHost) continue;
+      // One model in memory at a time, even across the Windows GPU and Fedora CPU workers.
       if (m.status !== 'loaded' && m.status !== 'loading' && m.status !== 'sleeping') continue;
       if ((activity.get(m.id)?.active ?? 0) > 0) {
         throw Object.assign(new Error(`Model ${m.id} is serving a request; stop it before loading another model on that worker`), { statusCode: 409 });

@@ -2,7 +2,7 @@
   "unsloth/Qwen3.8-27B-UD-Q4_K_M": {
     "threads": 6,
     "threadsBatch": 12,
-    "fitMargin": 256,
+    "fitMargin": 1536,
     "specType": "draft-mtp",
     "cpuMask": "",
     "opOffload": true,

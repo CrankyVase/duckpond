@@ -13,6 +13,7 @@ import { smoothScrollTo } from '../lib/motion.js';
 import ChatFiles from './ChatFiles.svelte';
   import Message from './SafeMessage.svelte';
   import RunFeed from './RunFeed.svelte';
+  import LoadStatus from './LoadStatus.svelte';
   import Welcome from './Welcome.svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import FileText from '@lucide/svelte/icons/file-text';
@@ -147,6 +148,12 @@ import ChatFiles from './ChatFiles.svelte';
   // the stream in app.streaming may belong to a conversation the user has
   // since navigated away from — only show its live bubble on that conversation
   const streamingHere = $derived(app.streaming && app.conv && app.streaming.convId === app.conv.id ? app.streaming : null);
+  // Bring a new stream (and its loading / thinking panel) into view as soon as it appears.
+  $effect(() => {
+    if (!streamingHere) return;
+    void streamingHere.loading;
+    requestAnimationFrame(() => scrollToBottom(true));
+  });
 
   const IMG_PHASE = {
     starting: 'starting the image…',
@@ -207,21 +214,39 @@ import ChatFiles from './ChatFiles.svelte';
 
   // rAF-batched flush: SSE deltas accumulate in plain vars, one paint per frame.
   // Keeps token arrival smooth even when the model dumps large chunks.
+  //
+  // Text is released at a steady, backlog-aware cadence instead of in whatever
+  // chunks the network delivers: a calm floor of ~50 chars/s that speeds up in
+  // proportion to the backlog, so the reply always reads like smooth typing and
+  // never falls more than ~150ms behind the model.
+  let lastTick = 0;
+  const calmMotion = () => document.documentElement.dataset.anim === 'off';
+  const release = (backlog, dt, floor) => Math.min(backlog, Math.max(1, Math.round(Math.max(floor, backlog * 7) * dt)));
   function scheduleFlush() {
     if (raf) return;
-    raf = requestAnimationFrame(() => {
-      raf = 0;
-      if (!app.streaming) return;
-      const stick = prefs.autoScroll && nearBottom();
-      // Drain whatever arrived this frame in one write so the DOM isn't thrashing
-      if (pendText) { app.streaming.text += pendText; pendText = ''; }
-      if (pendThink) { app.streaming.thinking += pendThink; pendThink = ''; }
-      if (toolBuf) app.streaming.liveTool = parseLiveTool(toolBuf);
-      if (stick) {
-        // next frame: scroll after layout so the caret stays in view without jump
-        requestAnimationFrame(() => scrollToBottom(true));
-      }
-    });
+    lastTick = performance.now();
+    raf = requestAnimationFrame(tick);
+  }
+  function tick(now) {
+    raf = 0;
+    if (!app.streaming) return;
+    const dt = Math.min(0.064, Math.max(0.001, (now - lastTick) / 1000));
+    lastTick = now;
+    const stick = prefs.autoScroll && nearBottom();
+    if (pendText) {
+      const n = calmMotion() ? pendText.length : release(pendText.length, dt, 50);
+      app.streaming.text += pendText.slice(0, n); pendText = pendText.slice(n);
+    }
+    if (pendThink) {
+      const n = calmMotion() ? pendThink.length : release(pendThink.length, dt, 90);
+      app.streaming.thinking += pendThink.slice(0, n); pendThink = pendThink.slice(n);
+    }
+    if (toolBuf) app.streaming.liveTool = parseLiveTool(toolBuf);
+    if (pendText || pendThink) raf = requestAnimationFrame(tick);
+    if (stick) {
+      // next frame: scroll after layout so the caret stays in view without jump
+      requestAnimationFrame(() => scrollToBottom(true));
+    }
   }
 
   // true while `convId` (the conversation this stream belongs to) is the one
@@ -1142,7 +1167,7 @@ import ChatFiles from './ChatFiles.svelte';
           {:else if streamingHere.queued}
             <span class="shimmer">waiting for the GPU… {streamingHere.queued} ahead of you</span>
           {:else if streamingHere.loading}
-            <span class="shimmer">loading {app.conv?.model_id}…</span>
+            <LoadStatus modelId={app.conv?.model_id} />
           {:else if streamingHere.pendingApproval}
             <span class="shimmer">waiting for your approval…</span>
           {:else if duckState === 'search'}

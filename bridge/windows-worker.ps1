@@ -55,13 +55,13 @@ try {
     foreach ($asset in $request.assets) { $cachedPath = Cache-File $asset '/lease'; if (-not $modelPath) { $modelPath = $cachedPath } }
     Write-Output ("cache_ready_seconds=" + $stopwatch.Elapsed.TotalSeconds)
     $tuning = $request.tuning
-    $threads = 12; $threadsBatch = 12; $fitMargin = 512; $specType = 'none'
+    $threads = 12; $threadsBatch = 12; $fitMargin = 1536; $specType = 'none'
     # Match the native defaults; per-model profiles can tune prompt batching
     # independently without changing context, weight precision or sampling.
     $batchSize = 2048; $ubatchSize = 512
     if ($tuning) {
         if ([int]$tuning.threads -lt 1 -or [int]$tuning.threads -gt 24 -or [int]$tuning.threadsBatch -lt 1 -or [int]$tuning.threadsBatch -gt 24) { throw 'Invalid thread count' }
-        if ([int]$tuning.fitMargin -notin @(256,512,768,1024)) { throw 'Invalid VRAM reserve' }
+        if ([int]$tuning.fitMargin -notin @(256,512,768,1024,1536,2048)) { throw 'Invalid VRAM reserve' }
         if ($tuning.specType -notin @('none','ngram-simple','ngram-map-k','ngram-map-k4v','ngram-mod','ngram-cache','draft-mtp')) { throw 'Invalid speculative mode' }
         $threads = [int]$tuning.threads; $threadsBatch = [int]$tuning.threadsBatch; $fitMargin = [int]$tuning.fitMargin; $specType = $tuning.specType
         if ($null -ne $tuning.batchSize) {

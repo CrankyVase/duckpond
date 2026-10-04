@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 PROFILE_FILE = Path(__file__).resolve().parent / 'runtime-profiles.json'
-DEFAULT = {'threads': 12, 'threadsBatch': 12, 'fitMargin': 512, 'specType': 'none', 'cpuMask': '',
+DEFAULT = {'threads': 12, 'threadsBatch': 12, 'fitMargin': 1536, 'specType': 'none', 'cpuMask': '',
            'opOffload': True, 'cpuFfn': 0, 'specDraftMax': 3,
            'batchSize': 2048, 'ubatchSize': 512}
 
@@ -20,7 +20,7 @@ def validate(value):
             raise ValueError('Batch size must be a supported power of two from 128 to 8192')
     if result['ubatchSize'] > result['batchSize']:
         raise ValueError('Physical batch size cannot exceed logical batch size')
-    if type(result['fitMargin']) is not int or result['fitMargin'] not in (256, 512, 768, 1024):
+    if type(result['fitMargin']) is not int or result['fitMargin'] not in (256, 512, 768, 1024, 1536, 2048):
         raise ValueError('Keep a supported VRAM reserve')
     if result['specType'] not in ('none', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v', 'ngram-mod', 'ngram-cache', 'draft-mtp'):
         raise ValueError('Unsupported speculative decoding mode')

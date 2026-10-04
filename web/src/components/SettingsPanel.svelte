@@ -873,7 +873,7 @@
             Connected as <b>{gh.login}</b> · token {gh.token_hint}
             {#if gh.scopes}· scopes {gh.scopes}{/if}
           </div>
-          <input placeholder="default repo, e.g. CrankyVase/duckpond"
+          <input placeholder="default repo, e.g. CrankyVase/duckpond" name="gh-default-repo" autocomplete="off" data-1p-ignore data-lpignore="true"
             value={gh.default_repo ?? ''} onchange={(e) => saveDefaultRepo(e.target.value)} />
           <div class="hint">The model assumes this repo when you don't name one. It can read anything your token can see; commits, branches and pull requests always ask you first, and it will never commit to your default branch.</div>
           <button class="wide danger" onclick={disconnectGithub}>Disconnect</button>
@@ -884,8 +884,8 @@
             Use a fine-grained personal access token with <b>Contents: read &amp; write</b> and
             <b>Pull requests: read &amp; write</b>.
           </div>
-          <input type="password" placeholder="personal access token (ghp_… or github_pat_…)"
-            bind:value={ghToken} autocomplete="off" />
+          <input class="secret-input" type="text" placeholder="personal access token (ghp_… or github_pat_…)"
+            bind:value={ghToken} name="gh-pat-field" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" />
           <button class="wide" onclick={connectGithub} disabled={ghBusy || ghToken.length < 10}>
             {ghBusy ? 'Checking…' : 'Connect GitHub'}
           </button>
@@ -910,8 +910,8 @@
       <section id="sec-account" hidden={activeSec !== 'account'}>
         <div class="stitle"><KeyRound size={13} />Account</div>
         <div class="hint">Signed in as <b>{app.user?.username}</b> · {app.user?.role}</div>
-        <input type="password" placeholder="current password" bind:value={pwCurrent} autocomplete="current-password" />
-        <input type="password" placeholder="new password (min 8 chars)" bind:value={pwNext} autocomplete="new-password" />
+        <input class="secret-input" type="text" placeholder="current password" bind:value={pwCurrent} name="pw-current-field" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" />
+        <input class="secret-input" type="text" placeholder="new password (min 8 chars)" bind:value={pwNext} name="pw-next-field" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" />
         <button class="wide" onclick={changePassword} disabled={pwBusy || !pwCurrent || pwNext.length < 8}>
           {pwBusy ? 'Changing…' : 'Change password'}
         </button>
@@ -959,8 +959,8 @@
 
           <div class="substitle">Add user manually</div>
           <div class="invite">
-            <input placeholder="username" bind:value={newUser} autocomplete="off" />
-            <input type="password" placeholder="password" bind:value={newPass} autocomplete="new-password" />
+            <input placeholder="username" bind:value={newUser} name="new-account-name" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" />
+            <input class="secret-input" type="text" placeholder="password" bind:value={newPass} name="new-account-secret" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" />
             <button class="wide" onclick={addUser} disabled={addBusy || !newUser || newPass.length < 8}>
               <UserPlus size={14} />{addBusy ? 'Adding…' : 'Add user'}
             </button>
@@ -1211,4 +1211,6 @@
     .endpoint { overflow-wrap: anywhere; }
     textarea { max-width: 100%; }
   }
+  /* masked like a password field, but not one: browsers never offer saved logins for it */
+  .secret-input { -webkit-text-security: disc; text-security: disc; }
 </style>

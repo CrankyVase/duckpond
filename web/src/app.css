@@ -537,22 +537,24 @@ html[data-lab='on'] aside .item:hover { transform: translateX(2px); }
    markdown, which component scoping can't reach. ---- */
 .dp-caret {
   display: inline-block;
-  width: 2px;
+  width: 3px;
   height: 1.05em;
-  margin-left: 2px;
+  margin-left: 3px;
   vertical-align: -0.15em;
-  background: var(--text-dim);
-  border-radius: 1px;
-  animation: dpCaretBlink 1.05s ease-in-out infinite;
+  background: var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 65%, transparent);
+  animation: dpCaretBlink 1.3s ease-in-out infinite;
 }
 .dp-caret.think {
   height: 0.95em;
   vertical-align: -0.1em;
   background: var(--text-faint);
+  box-shadow: none;
 }
 @keyframes dpCaretBlink {
-  0%, 42% { opacity: 1; }
-  50%, 100% { opacity: 0.12; }
+  0%, 100% { opacity: 1; transform: scaleY(1); }
+  50% { opacity: 0.35; transform: scaleY(0.82); }
 }
 /* caret styles (prefs: beam | block | dot) */
 html[data-caret='block'] .dp-caret { width: 0.55em; border-radius: 2px; }
