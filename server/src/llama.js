@@ -79,10 +79,31 @@ async function remoteCall({ model, messages, params, onDelta, abortSignal, onEve
 export const IDLE_UNLOAD_MS = Number(process.env.IDLE_UNLOAD_MS ?? 10 * 60 * 1000);
 const activity = new Map(); // model -> { lastUsed, active }
 export function markUse(model) {
-  const a = activity.get(model) ?? { lastUsed: 0, active: 0 };
+  const a = activity.get(model) ?? { lastUsed: 0, active: 0, counting: 0 };
   a.lastUsed = Date.now();
   activity.set(model, a);
   return a;
+}
+
+/** Replies currently generating on `model` (token-count probes never block an unload). */
+export const activeCount = (model) => activity.get(model)?.active ?? 0;
+
+// Marks a generation as running until it ends OR its abort signal fires, whichever
+// comes first. Stopping a reply must free the model at once: the request's own
+// promise can take minutes to unwind when it is parked behind a model load, and
+// until then Unload would be refused for a reply nobody is waiting on.
+export function holdActive(act, signal) {
+  act.active++;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    act.active--;
+    signal?.removeEventListener('abort', release);
+  };
+  if (signal?.aborted) release();
+  else signal?.addEventListener('abort', release, { once: true });
+  return release;
 }
 
 // Called only when media needs VRAM. An active response keeps its model.
@@ -232,7 +253,7 @@ export async function countInputTokens(model, messages, { signal } = {}) {
   const body = JSON.stringify({ model, messages });
   return tokenCounts.get(body, async requestSignal => {
     const act = markUse(model);
-    act.active++;
+    act.counting++;
     try {
       const r = await jfetch('/v1/chat/completions/input_tokens', {
         method: 'POST', body, signal: AbortSignal.any([requestSignal, AbortSignal.timeout(120_000)]),
@@ -240,7 +261,7 @@ export async function countInputTokens(model, messages, { signal } = {}) {
       // shape: { input_tokens: N } (fallbacks for other builds)
       return r.input_tokens ?? r.prompt_tokens ?? r.tokens ?? null;
     } finally {
-      act.active--;
+      act.counting--;
       act.lastUsed = Date.now();
     }
   }, { signal });
@@ -281,7 +302,7 @@ const LOCAL_RETRY_BASE_MS = 500;
 export async function streamChat({ model, messages, params = {}, onDelta, abortSignal, onEvent, startupTimeoutMs, idleTimeoutMs }) {
   if (isRemoteId(model)) return remoteCall({ model, messages, params, onDelta, abortSignal, onEvent, startupTimeoutMs, idleTimeoutMs });
   const act = markUse(model);
-  act.active++;
+  const release = holdActive(act, abortSignal);
   try {
     let lastErr;
     let effectiveParams = params;
@@ -314,7 +335,7 @@ export async function streamChat({ model, messages, params = {}, onDelta, abortS
     }
     throw lastErr;
   } finally {
-    act.active--;
+    release();
     act.lastUsed = Date.now();
   }
 }
