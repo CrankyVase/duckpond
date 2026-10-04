@@ -353,3 +353,16 @@
 .studio.studio-redesign .blank h2,.studio.studio-redesign .image-canvas .blank h2 {font-size:22px; letter-spacing:-.025em; font-weight:500;}
 .studio.studio-redesign .canvas .blank,.studio.studio-redesign .image-canvas .blank {min-height:280px; padding:32px 20px;}
 @media(max-width:768px) { .studio.studio-redesign {padding:18px 14px;} .studio.studio-redesign .studio-head h1 {font-size:23px;} }
+
+/* ---- redesign: Studio scrolls as one page on desktop, neutral selection tint ---- */
+.studio.studio-redesign { --studio-soft: var(--bg-raised); --studio-wash: transparent; }
+.studio.studio-redesign .studio-title-copy p { display: none; }
+.studio.studio-redesign .studio-head { margin-bottom: 14px; }
+.studio.studio-redesign h1 { font-size: 24px; }
+@media (min-width:1001px) {
+ .studio.studio-redesign { padding: 18px 28px 20px; overflow-y: auto; overflow-x: hidden; }
+ .studio.studio-redesign > * { flex-shrink: 0; }
+ .studio.studio-redesign .workbench,.studio.studio-redesign .workbench.image-workbench,.studio.studio-redesign .workbench.image-workbench.empty-image-workbench { flex: 0 0 auto; overflow: visible; align-items: start; }
+ .studio.studio-redesign .workbench .controls { overflow: visible; }
+ .studio.studio-redesign .canvas,.studio.studio-redesign .canvas.image-canvas { height: auto; min-height: 420px; overflow: visible; }
+}
