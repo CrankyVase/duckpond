@@ -4,6 +4,64 @@ import { createHash } from 'node:crypto';
 export const EDIT_ONLY_TOOLS = new Set(['run_command', 'start_server', 'server_status', 'stop_server', 'browser', 'screenshot', 'generate_image', 'github_create_branch', 'github_commit', 'github_open_pr']);
 export const EDIT_ONLY_INSTRUCTION = 'This run is in edit-only mode. Read, search, plan, and edit project files. Do not execute commands, install dependencies, start or stop servers, use a browser, capture screenshots, generate images, or publish to GitHub. Honor this even if an earlier message asks for verification. Explain that runtime verification was not performed.';
 
+// OpenCode-style primary modes. Plan explores without changing source, build
+// implements and verifies, and edit keeps the existing "edit but don't run"
+// contract. Older rows used 'execute' for build.
+export const AGENT_MODES = new Set(['plan', 'build', 'edit']);
+export function normalizeAgentMode(value, fallback = 'build') {
+  if (value === 'execute') return 'build';
+  return AGENT_MODES.has(value) ? value : fallback;
+}
+
+// Tools that cannot change project files or run mutating work. `run_command`
+// stays offered because permissions.js can still allow read-only commands;
+// exec/write calls are denied by the gate while plan mode is active.
+export const PLAN_TOOLS = new Set([
+  'update_plan', 'list_files', 'search_files', 'read_file',
+  'web_search', 'fetch_page', 'server_status', 'browser', 'screenshot',
+  'github_repo_info', 'github_list_files', 'github_read_file',
+  'run_command', 'compact_context', 'set_agent_mode',
+]);
+
+const MODE_MARK = (mode) => `<!-- duckpond:${mode}-mode -->`;
+
+export const PLAN_MODE_INSTRUCTION = `${MODE_MARK('plan')}
+## Plan mode (read-only)
+You are in plan mode. Explore and design before touching the project. Read files, search source, inspect history and logs, and use read-only shell commands. Do NOT create, edit, or delete project files, install packages, start or stop servers, generate media, or publish anything.
+Use update_plan to keep a concrete implementation plan. When the plan is ready and the next action is implementation, call set_agent_mode with mode "build" yourself — do not wait for the user to flip a switch. If the request is ambiguous, ask a short question instead of inventing requirements.`;
+
+export const BUILD_MODE_INSTRUCTION = `${MODE_MARK('build')}
+## Build mode
+You are in build mode. Implement the requested work and verify it with real tool results. You may call set_agent_mode with mode "plan" when the approach needs investigation without changing files, then return to build. Do not use plan mode to avoid work, and do not stop halfway through an approved implementation.`;
+
+/** Replace any previous mode block with the current one. */
+export function applyModeInstruction(messages, mode) {
+  if (!messages?.length) return messages;
+  const clean = (text) => String(text ?? '')
+    .replace(new RegExp(`\\n*${MODE_MARK('plan').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?(?=\\n*<!-- duckpond:|$)`, 'g'), '')
+    .replace(new RegExp(`\\n*${MODE_MARK('build').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?(?=\\n*<!-- duckpond:|$)`, 'g'), '')
+    .trimEnd();
+  const instruction = mode === 'plan' ? PLAN_MODE_INSTRUCTION : mode === 'build' ? BUILD_MODE_INSTRUCTION : '';
+  if (!instruction) return messages;
+  if (messages[0]?.role === 'system') {
+    messages[0] = { ...messages[0], content: `${clean(messages[0].content)}\n\n${instruction}` };
+  } else {
+    messages.unshift({ role: 'system', content: instruction });
+  }
+  return messages;
+}
+
+/** Tool schemas offered in a mode. Build/edit are handled by execTool's gate. */
+export function toolsForAgentMode(tools, mode) {
+  if (mode !== 'plan') return tools;
+  return tools.filter((tool) => PLAN_TOOLS.has(tool.function?.name));
+}
+
+export function canEnterMode(run, next) {
+  if (run.user_execution === 'edit') return false;
+  return next === 'plan' || next === 'build';
+}
+
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 function validateValue(value, schema = {}, path = 'arguments', depth = 0) {
   if (depth > 12) return `${path} is nested too deeply`;
@@ -98,6 +156,7 @@ export function recoveryHint(name, outcome) {
 
 export function createRunHarness({ maxSteps = 80, executionMode = 'execute', now = Date.now } = {}) {
   const started = now();
+  let mode = normalizeAgentMode(executionMode);
   const failures = new Map();
   const files = new Set();
   let plan = { steps: [], explanation: '' };
@@ -111,6 +170,7 @@ export function createRunHarness({ maxSteps = 80, executionMode = 'execute', now
   const progress = (phase = 'thinking') => ({ step, maxSteps, toolCalls, successfulTools, failedTools, blockedTools, elapsedMs: Math.max(0, now() - started), phase, lastTool });
   return {
     setStep(value) { step = value; },
+    setExecutionMode(value) { mode = normalizeAgentMode(value, mode); },
     progress,
     blockReason(name, args) {
       const previous = failures.get(fingerprint(name, args));
@@ -146,6 +206,6 @@ export function createRunHarness({ maxSteps = 80, executionMode = 'execute', now
       return outcome;
     },
     setPlan(args) { plan = { steps: args.steps.map(step => ({ ...step })), explanation: args.explanation ?? '' }; },
-    summary(status) { return { ...progress('complete'), status, executionMode, changedFiles: [...files], verification: { ...verification }, plan }; },
+    summary(status) { return { ...progress('complete'), status, executionMode: mode, changedFiles: [...files], verification: { ...verification }, plan }; },
   };
 }

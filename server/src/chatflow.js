@@ -20,6 +20,7 @@ import {
   insertMessage, setLeaf, stripFakeImages,
 } from './chatkit.js';
 import { slugify, withToolsPolicy, wsNameFrom } from './chatpolicy.js';
+import { normalizeAgentMode, toolsForAgentMode } from './agentHarness.js';
 import { createNormalToolLedger, createReadAhead, createUsageAccumulator, parseNormalToolCall, terminalChatParams } from './normalChatHarness.js';
 import { repoInfo as ghRepoInfo, listFiles as ghListFiles, readFile as ghReadFile } from './github.js';
 
@@ -490,20 +491,31 @@ let loopMessages = promptMessages;
 let firstResult = res;
 let runId = null;
 const agentTools = filterTools(imgPrefs.allowed ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.function.name !== 'generate_image'), disabledTools);
-const agentToolNames = new Set(agentTools.map((t) => t.function.name));
+const runMode = normalizeAgentMode(conv._settings.agent_execution);
+const offeredAgentTools = toolsForAgentMode(agentTools, runMode);
+const agentToolNames = new Set(offeredAgentTools.map((t) => t.function.name));
 // gate call: start_project(name, plan) creates the workspace; the
 // rest of the gate step is recorded AFTER the subscription below so
 // the chips/diff show up live, not just in the replay
-const gateCall = wsRow ? null
-  : (res.toolCalls.find((t) => t.function.name === 'start_project') ?? res.toolCalls[0]);
+const gateCall = wsRow ? null : (res.toolCalls.find((t) => t.function.name === 'start_project') ?? null);
 let gargs = {};
 if (gateCall) {
   try { gargs = JSON.parse(gateCall.function.arguments || '{}'); } catch { /* bad JSON from model */ }
+}
+if (!wsRow) {
+  // Plan mode may legitimately open with read-only tools before any
+  // start_project call. Give the run a workspace and execute those calls for
+  // real instead of rewriting them into a fake start_project receipt.
   wsRow = createWorkspaceRow(req.user.id, slugify(gargs.name) || wsNameFrom(promptLeaf.content));
   db.prepare('UPDATE conversations SET workspace_id = ? WHERE id = ?').run(wsRow.id, conv.id);
 }
 const run = createRun(wsRow.id, req.user.id, conv.model_id, promptLeaf.content);
-run.agent_execution = conv._settings.agent_execution === 'edit' ? 'edit' : 'execute';
+run.agent_execution = runMode;
+run.user_execution = runMode === 'edit' ? 'edit' : 'build';
+run.conv_id = conv.id;
+try {
+  db.prepare('UPDATE agent_runs SET agent_execution = ? WHERE id = ?').run(runMode, run.id);
+} catch { /* migration not applied yet */ }
 runId = run.id;
 bindRunAbort(run.id, abort);
 send({ type: 'agent_start', run, workspace: wsRow });

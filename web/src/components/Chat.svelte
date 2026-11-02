@@ -343,6 +343,11 @@ import ChatFiles from './ChatFiles.svelte';
         } else if (e.type === 'status') {
           if (e.status !== 'waiting_approval') s.pendingApproval = null;
           s.events?.push(e);
+        } else if (e.type === 'mode') {
+          // The model switched plan/build itself; keep the project bar in sync
+          // without reloading the conversation mid-run.
+          if (here && app.conv) app.conv.settings = { ...app.conv.settings, agent_execution: e.mode };
+          s.events?.push(e);
         } else {
           s.events?.push(e);
         }

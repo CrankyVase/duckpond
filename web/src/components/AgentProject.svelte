@@ -10,7 +10,7 @@
   let dialog;
   let setupMode = $state('new');
   let expanded = $state(false), error = $state(''), busy = $state(false), priorities = $state('');
-  let execution = $state('execute');
+  let execution = $state('build');
   const working = $derived(app.streaming?.convId === app.conv?.id);
   $effect(() => { if (expanded) dialog?.showModal(); else dialog?.close(); });
   const project = $derived(projects.find(p => String(p.id) === selected));
@@ -18,7 +18,8 @@
     const id = app.conv?.id;
     selected = String(app.conv?.workspace_id || '');
     priorities = app.conv?.settings?.system_prompt || '';
-    execution = app.conv?.settings?.agent_execution === 'edit' ? 'edit' : 'execute';
+    execution = app.conv?.settings?.agent_execution === 'edit' ? 'edit'
+      : app.conv?.settings?.agent_execution === 'plan' ? 'plan' : 'build';
     let alive = true;
     if (id) api('/api/workspaces').then(rows => { if (alive) projects = rows; }).catch(e => { if (alive) error = e.message; });
     return () => { alive = false; };
@@ -67,7 +68,9 @@
       const settings = { ...conv.settings, agent_execution: next };
       await api(`/api/conversations/${conv.id}`, { method: 'PATCH', body: { settings } });
       if (app.conv?.id === conv.id) { app.conv.settings = settings; execution = next; }
-      toast(next === 'edit' ? 'Agent will edit files without running code' : 'Agent can edit and verify changes');
+      toast(next === 'edit' ? 'Agent will edit files without running code'
+        : next === 'plan' ? 'Agent will plan read-only, then switch to build when ready'
+        : 'Agent can edit and verify changes');
     } catch (e) { control.value = execution; error = e.message; } finally { busy = false; }
   }
 </script>
@@ -97,8 +100,9 @@
     </div>
     <div class="project-actions">
       <select class="execution-select" aria-label="Agent execution mode" value={execution}
-        disabled={busy || working} onchange={saveExecution} title="Choose whether the agent may run project code">
-        <option value="execute">Edit & verify</option>
+        disabled={busy || working} onchange={saveExecution} title="Plan read-only, build with verification, or edit files without running code">
+        <option value="plan">Plan · read-only</option>
+        <option value="build">Build · edit &amp; verify</option>
         <option value="edit">Edit files only</option>
       </select>
       <button class="setup-trigger" onclick={() => expanded = true} aria-haspopup="dialog"
@@ -108,6 +112,7 @@
     </div>
   </div>
   {#if execution === 'edit'}<div class="workflow-note">File changes only · execution and publishing disabled</div>{/if}
+  {#if execution === 'plan'}<div class="workflow-note">Plan mode · read-only until the agent switches to build</div>{/if}
   <dialog bind:this={dialog} onclose={() => expanded = false}>
     <div class="dialog-head"><div><h2>Project setup</h2><p>Open your source folder or start a new project.</p></div><button class="close" onclick={() => expanded = false} aria-label="Close project setup"><X size={18} /></button></div>
     <div class="setup">

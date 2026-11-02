@@ -20,6 +20,7 @@ import {
 } from './memory.js';
 import { corePrompt } from './settings.js';
 import { broadcast, hasActiveJob } from './liveJobs.js';
+import { recordThinkingFile } from './thinkingLog.js';
 // remote providers + cost saver (feat/remote-providers)
 import { isRemoteId } from './chatBackend.js';
 import { modelRowForRemoteId, priceRemoteTurn, recordEvent } from './costs.js';
@@ -105,6 +106,14 @@ export function insertMessage(convId, parentId, role, content, extra = {}) {
       searchJson: extra.searchJson ?? null,
     });
   const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
+  // Keep a lightweight file copy of reasoning. The DB row still powers the
+  // thinking panel; these JSONL files are for logs/postmortems.
+  if (msg?.thinking) {
+    recordThinkingFile({
+      thinking: msg.thinking, convId, messageId: msg.id, runId: extra.runId ?? null,
+      modelId: extra.modelId ?? msg.model_id, source: 'message',
+    });
+  }
   indexMessage(msg); // fire-and-forget: semantic-search vector for this message
   return msg;
 }

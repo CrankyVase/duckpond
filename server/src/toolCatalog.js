@@ -6,6 +6,8 @@
 export const TOOL_CATALOG = [
   { id: 'start_project', label: 'Start project', category: 'Coding', description: 'Lets the model spin up a sandboxed workspace to build real, multi-file software instead of just answering in chat.' },
   { id: 'update_plan', label: 'Track plan', category: 'Coding', description: 'Lets the model keep a visible checklist of the work it plans to do, what it is doing, and what it has completed.' },
+  { id: 'set_agent_mode', label: 'Plan / build mode', category: 'Coding', description: 'Lets the model switch itself between read-only planning and implementation, like a coding agent’s Plan and Build modes.' },
+  { id: 'compact_context', label: 'Compact context', category: 'Coding', description: 'Lets the model compact older history at a clean checkpoint and continue from a handover brief instead of hitting the context wall.' },
   { id: 'list_files', label: 'List files', category: 'Coding', description: 'Lets the model see what files exist in a project workspace.' },
   { id: 'search_files', label: 'Search source', category: 'Coding', description: 'Lets the model find files and text matches with line numbers, without scanning dependencies or build output.' },
   { id: 'read_file', label: 'Read file', category: 'Coding', description: 'Lets the model open and read a file in a project workspace.' },

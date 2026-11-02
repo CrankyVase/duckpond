@@ -39,12 +39,14 @@ import { GITHUB_READ_TOOLS, hasGithub } from '../github.js';
 import {
   GEN_PARAM_KEYS, MEMORY_TOOLS, MEMORY_TOOL_NAMES, START_PROJECT_TOOL,
   WIDGET_TOOLS, WIDGET_TOOL_NAMES,
-  buildPrompt, convForUser, filterTools, insertMessage,
+  buildPrompt, convForUser, insertMessage,
   persistInterruptedReply, recordUsage, setLeaf, stripFakeImages,
 } from '../chatkit.js';
 import {
   RESEARCH_MODES, ULTRA_DIRECTIVE, makeSpeculator, selectTurnWidgets, withToolsPolicy,
 } from '../chatpolicy.js';
+import { normalizeAgentMode, applyModeInstruction, toolsForAgentMode } from '../agentHarness.js';
+import { compactPromptLimit, localOutputBudget } from '../tokenBudget.js';
 import {
   autoCompactMessages, makeTurnDelta, replayCacheHit,
   runAgentTurn, runDiffusionTurn, runImageTurn, runInlineSearch,
@@ -225,7 +227,8 @@ export function registerChatPost(app) {
         : null;
       const imgPrefs = getUserImagePrefs(req.user.id);
       const disabledTools = new Set(conv._settings.disabledTools ?? []);
-      const editOnly = conv.mode === 'agent' && conv._settings.agent_execution === 'edit';
+      const agentMode = normalizeAgentMode(conv._settings.agent_execution);
+      const editOnly = conv.mode === 'agent' && agentMode === 'edit';
       if (editOnly) for (const name of EDIT_ONLY_TOOLS) disabledTools.add(name);
       // remote models: sandbox/agent tooling stays local-only (a paid API
       // model driving shell loops would be a bill and a half). Inline tools —
@@ -249,20 +252,28 @@ export function registerChatPost(app) {
       // tool must not be described to the model as something it can call.
       const memTools = memoryEnabled(req.user.id) ? MEMORY_TOOLS : [];
       const ghOn = hasGithub(req.user.id);
-      const turnTools = constrained ? [] : filterTools(
-        wsRow
-          ? AGENT_TOOLS
-          : [START_PROJECT_TOOL, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
-            ...(ghOn ? GITHUB_READ_TOOLS : []),
-            ...WIDGET_TOOLS.filter((t) => requestedWidgets.has(t.function.name)), ...memTools],
-        disabledTools,
-      ).filter((t) => imgPrefs.allowed || t.function.name !== 'generate_image');
+      const modeControlTools = conv.mode === 'agent'
+        ? AGENT_TOOLS.filter((t) => ['set_agent_mode', 'compact_context'].includes(t.function.name))
+        : [];
+      const rawTurnTools = wsRow
+        ? AGENT_TOOLS
+        : [START_PROJECT_TOOL, ...modeControlTools, GENERATE_IMAGE_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL,
+          ...(ghOn ? GITHUB_READ_TOOLS : []),
+          ...WIDGET_TOOLS.filter((t) => requestedWidgets.has(t.function.name)), ...memTools];
+      const turnTools = constrained ? [] : (conv.mode === 'agent'
+        ? toolsForAgentMode(rawTurnTools, agentMode)
+        : rawTurnTools
+      ).filter((t) => !disabledTools.has(t.function.name))
+        .filter((t) => imgPrefs.allowed || t.function.name !== 'generate_image');
       const availableTools = new Set(turnTools.map((t) => t.function.name));
       let promptMessages = constrained
         ? buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id)
         : withToolsPolicy(
           buildPrompt(conv, promptLeaf?.id ?? conv.active_leaf_id), wsRow,
           imgPrefs.allowed, userLoc, disabledTools, requestedWidgets, availableTools);
+      if (conv.mode === 'agent' && agentMode === 'plan') {
+        applyModeInstruction(promptMessages, 'plan');
+      }
       if (editOnly && promptMessages[0]?.role === 'system') {
         promptMessages[0] = { ...promptMessages[0], content: `${promptMessages[0].content}\n\n${EDIT_ONLY_INSTRUCTION}` };
       }
@@ -359,7 +370,10 @@ export function registerChatPost(app) {
       } catch (err) {
         req.log.warn({ err }, 'upload inject failed');
       }
-      const params = { max_tokens: -1 };
+      const params = {
+        max_tokens: conv._settings.max_tokens ?? 2048,
+        cache_prompt: conv._settings.cache_prompt !== false,
+      };
       for (const k of GEN_PARAM_KEYS) params[k] = conv._settings[k];
       // Mirostat (llama.cpp native): when on, the entropy controller replaces
       // top-k/top-p sampling. Passed straight through to llama-server.
@@ -530,12 +544,16 @@ export function registerChatPost(app) {
         // first, exact router count only when the estimate says we're close.
         const est = estimateTokens(promptMessages);
         const budget = Number(conv._settings.ctx_size) > 0 ? Number(conv._settings.ctx_size) : 32_768;
-        if (est > budget * 0.75) {
+        // Leave real output headroom: compact before the prompt is so large
+        // that thinking + the answer cannot fit. The old 80% trigger let a
+        // thinking model hit the wall with nothing left to say.
+        const compactAt = compactPromptLimit(budget, { desiredOutput: 8192 });
+        if (est > compactAt * 0.94) {
           let used = est;
           try { used = await countInputTokens(conv.model_id, promptMessages, { signal: abort.signal }) ?? est; } catch { /* estimate stands */ }
-          if (used > budget * 0.8) {
+          if (used > compactAt) {
             send({ type: 'notice', message: `Auto-compacting older history to fit the context window (~${Math.round(used / 1000)}k → ${Math.round(budget / 1000)}k tokens)…` });
-            req.log.info({ used, budget }, 'local auto-compaction fired');
+            req.log.info({ used, budget, compactAt }, 'local auto-compaction fired');
             const r = await autoCompactMessages(promptMessages, conv.model_id, abort.signal, req.log);
             if (r) {
               promptMessages = r.messages;
@@ -546,6 +564,19 @@ export function registerChatPost(app) {
             }
           }
         }
+      }
+      // Local output is not a flat 2,048-token ceiling. Thinking may consume
+      // every token still available in the context window; auto-compaction
+      // above keeps that window from painting the model into a corner.
+      if (!remote) {
+        const thinkingOn = conv._settings.thinking !== 'none'
+          && params.chat_template_kwargs?.enable_thinking !== false;
+        params.max_tokens = localOutputBudget({
+          ctxSize: conv._settings.ctx_size,
+          promptTokens: estimateTokens(promptMessages),
+          requested: params.max_tokens,
+          thinking: thinkingOn,
+        });
       }
       if (remote) {
         const cacheOn = cacheEligible({
@@ -714,6 +745,43 @@ export function registerChatPost(app) {
         finalLoopMessages = r.messages ?? null;
       }
 
+      if (typeof text !== 'string' || !text.trim()) {
+        // A thinking model can legitimately burn the whole output window on
+        // private reasoning. Do not throw away the turn: hand the reasoning
+        // back once and ask for the answer (or a final tool call).
+        if (reasoning?.trim() && !abort.signal.aborted) {
+          send({ type: 'notice', message: 'The model used its output while thinking — asking it to finish the answer…' });
+          req.log.info({ conv: conv.id, reasoningChars: reasoning.length }, 'empty answer after thinking — one recovery pass');
+          const recoveryMessages = [
+            ...(finalLoopMessages ?? promptMessages),
+            { role: 'assistant', content: `[Internal reasoning from the previous attempt]\n${reasoning.slice(-8000)}` },
+            { role: 'user', content: 'You already did the reasoning above, but that attempt produced no user-visible answer. Give the final answer now. Do not repeat the reasoning.' },
+          ];
+          const recoveryParams = { ...params };
+          if (!remote) {
+            recoveryParams.max_tokens = localOutputBudget({
+              ctxSize: conv._settings.ctx_size,
+              promptTokens: estimateTokens(recoveryMessages),
+              requested: params.max_tokens,
+              thinking: conv._settings.thinking !== 'none',
+            });
+          }
+          try {
+            const recovered = await streamChat({
+              model: conv.model_id, messages: recoveryMessages, params: recoveryParams,
+              abortSignal: abort.signal, onDelta,
+            });
+            if (recovered.content?.trim()) {
+              text = recovered.content;
+              reasoning = recovered.reasoning || reasoning;
+              timings = recovered.timings ?? timings;
+              usage = recovered.usage ?? usage;
+            }
+          } catch (err) {
+            req.log.warn({ err, conv: conv.id }, 'answer-after-thinking recovery failed');
+          }
+        }
+      }
       if (typeof text !== 'string' || !text.trim()) {
         throw new Error('The model finished without an answer. Please try again.');
       }

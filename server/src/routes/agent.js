@@ -1,10 +1,12 @@
 import { estimateAgentPrompt, agentInputLimit, calibratedPromptEstimate, trimAgentToolHistory } from '../agentContext.js';
-import { createRunHarness, EDIT_ONLY_INSTRUCTION, EDIT_ONLY_TOOLS, parseAgentCall, recoveryHint } from '../agentHarness.js';
+import { applyModeInstruction, canEnterMode, createRunHarness, EDIT_ONLY_INSTRUCTION, EDIT_ONLY_TOOLS, normalizeAgentMode, parseAgentCall, recoveryHint, toolsForAgentMode } from '../agentHarness.js';
 import { projectBrowser, closeProjectBrowser, closeBrowsers } from '../projectBrowser.js';
 import { atomicProjectWrite } from '../atomicProjectWrite.js';
 import { toolJournal } from '../toolJournal.js';
 import { summarizeRunChanges } from '../runChanges.js';
 import { modelHasVision } from '../uploads.js';
+import { recordThinkingFile } from '../thinkingLog.js';
+import { desiredOutputTokens, localOutputBudget } from '../tokenBudget.js';
 import { resolveRemote, parseCaps } from '../providers.js';
 import { previews } from '../workspacePreview.js';
 import { projectPath, searchProject, projectBrief } from '../projectFiles.js';
@@ -28,6 +30,7 @@ import {
   stopWorkspace, truncateOutput, wsDir,
 } from '../sandbox.js';
 import { auditTool, decideTool, describeCall, RISK } from '../permissions.js';
+import { modelSettings } from './models.js';
 import {
   commitFiles as ghCommit, createBranch as ghCreateBranch, listFiles as ghListFiles,
   openPullRequest as ghOpenPr, pullIntoWorkspace as ghPull, readFile as ghReadFile,
@@ -59,11 +62,29 @@ const runApprovals = new Map(); // runId -> { eventId, resolve }
 
 export function emit(runId, type, data, { store = true } = {}) {
   let id = null;
+  let payload = data;
+  // Agent steps don't become chat messages. Keep their reasoning in the
+  // lightweight per-run file and store only a pointer in the event log, so a
+  // long run's reasoning does not bloat every replay payload.
+  if (type === 'assistant' && data?.thinking) {
+    const logged = recordThinkingFile({
+      thinking: data.thinking, runId, modelId: null,
+      source: 'agent_step',
+    });
+    if (logged) {
+      payload = {
+        ...data,
+        thinking: undefined,
+        thinking_file: `data/thinking/${logged.name}`,
+        thinking_chars: String(data.thinking).length,
+      };
+    }
+  }
   if (store) {
     id = db.prepare('INSERT INTO agent_events (run_id, type, json) VALUES (?, ?, ?)')
-      .run(runId, type, JSON.stringify(data)).lastInsertRowid;
+      .run(runId, type, JSON.stringify(payload)).lastInsertRowid;
   }
-  const evt = { id, run_id: runId, type, ...data };
+  const evt = { id, run_id: runId, type, ...payload };
   for (const send of runSubs.get(runId) ?? []) send(evt);
   return id;
 }
@@ -154,6 +175,22 @@ export const GENERATE_IMAGE_TOOL = { type: 'function', function: {
 } };
 
 export const AGENT_TOOLS = [
+  { type: 'function', function: {
+    name: 'set_agent_mode',
+    description: 'Switch yourself between plan and build. Plan is read-only: inspect, search, and design. Build may edit files, run commands, and verify. Call this yourself when you have finished planning and are ready to implement, or when implementation needs a read-only rethink. Do not wait for the user to switch it.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      mode: { type: 'string', enum: ['plan', 'build'], description: 'plan = investigate only; build = implement and verify' },
+      reason: { type: 'string', maxLength: 600, description: 'one short sentence the user can see in the activity feed' },
+    }, required: ['mode'] },
+  } },
+  { type: 'function', function: {
+    name: 'compact_context',
+    description: 'Compact the current conversation when you reach a clean checkpoint and the context is getting long (for example after finishing a milestone, before starting a new phase, or when older tool output is no longer needed). The server summarizes older messages into a handover brief and keeps the recent work verbatim. Do not call in the middle of an unfinished edit or before verifying a change. Continue working immediately after it returns.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      reason: { type: 'string', maxLength: 600, description: 'why this is a safe checkpoint' },
+      keep_recent: { type: 'integer', minimum: 4, maximum: 20, description: 'recent messages to keep verbatim (default 8)' },
+    } },
+  } },
   { type: 'function', function: {
     name: 'update_plan', description: 'Keep a short visible plan for multi-step coding work. Use pending, in_progress, or completed; mark completed only after the work is done. At most one step may be in_progress. Update when the approach or progress changes.',
     parameters: { type: 'object', additionalProperties: false, properties: {
@@ -251,6 +288,9 @@ function agentSystemPrompt(ws) {
     '',
     'Rules:',
     '- AGENTIC MEANS TOOLS, NOT TEXT: never deliver code as chat markdown or draft it in your reasoning. Every file is created with write_file or edit_file; the reply text is only short progress notes and the final summary.',
+    '- You own the plan/build workflow. In plan mode, investigate and design without changing project files. When the plan is ready, call set_agent_mode with mode "build" yourself and start implementing. If you get stuck and need a read-only rethink, switch back to plan, then return to build.',
+    '- At a clean checkpoint, when the context is getting long, call compact_context yourself instead of waiting for the window to overflow. Compact after a milestone or verification, never halfway through an edit.',
+    '- Keep moving autonomously: inspect, implement, test, fix, and re-test without asking "shall I proceed?". Ask only when a real product decision or permission prompt needs the user.',
     '- Look before you leap: list or read files before editing them.',
     '- For multi-step tasks, publish a short update_plan and keep it current. Inspect, implement, and verify in that order; mark steps completed only when their work is done.',
     '- Treat tool errors as evidence: inspect the cause, change the relevant code or arguments, and retry. Never repeat the same failed call unchanged or route around a denial.',
@@ -277,6 +317,18 @@ function agentSystemPrompt(ws) {
 export async function gateToolCall(run, name, args) {
   const verdict = decideTool(run.user_id, name, args);
   const detail = describeCall(name, args);
+
+  // Plan mode is a hard read-only boundary even if a write tool somehow still
+  // reached the dispatcher (models can invent schemas from earlier turns).
+  if (normalizeAgentMode(run.agent_execution) === 'plan'
+      && !['update_plan', 'set_agent_mode', 'compact_context'].includes(name)
+      && verdict.risk !== RISK.READ) {
+    auditTool({
+      userId: run.user_id, runId: run.id, tool: name, risk: verdict.risk,
+      decision: 'deny', approvedBy: 'plan-mode', detail,
+    });
+    return `DENIED by plan mode: ${name} can change the project or run code. Keep investigating with read-only tools, or call set_agent_mode with mode "build" when you are ready to implement.`;
+  }
 
   if (verdict.decision === 'deny') {
     auditTool({
@@ -311,6 +363,35 @@ export async function execTool(run, ws, name, args, abortSignal) {
   const denied = await gateToolCall(run, name === 'start_server' ? 'run_command' : name, args);
   if (denied) return denied;
   switch (name) {
+    case 'set_agent_mode': {
+      const next = normalizeAgentMode(args.mode, 'build');
+      if (!canEnterMode(run, next)) {
+        return run.user_execution === 'edit'
+          ? 'DENIED: this conversation is pinned to edit-only mode by the user. Keep reading and editing files without running code; do not try to switch modes.'
+          : `ERROR: cannot switch to ${next} in this run.`;
+      }
+      const previous = normalizeAgentMode(run.agent_execution);
+      if (next === previous) return `Already in ${next} mode. Continue with the work.`;
+      run.agent_execution = next;
+      const reason = String(args.reason ?? '').trim().slice(0, 600);
+      try {
+        db.prepare('UPDATE agent_runs SET agent_execution = ? WHERE id = ?').run(next, run.id);
+      } catch { /* older rows may not have the column yet */ }
+      if (run.conv_id != null) {
+        try {
+          const row = db.prepare('SELECT settings_json FROM conversations WHERE id = ?').get(run.conv_id);
+          const settings = { ...(row ? JSON.parse(row.settings_json || '{}') : {}), agent_execution: next };
+          db.prepare('UPDATE conversations SET settings_json = ? WHERE id = ?').run(JSON.stringify(settings), run.conv_id);
+        } catch { /* persistence is best-effort; the live run still switches */ }
+      }
+      emit(run.id, 'mode', { mode: next, previous, reason });
+      return next === 'plan'
+        ? `Switched to PLAN mode (read-only). Investigate and update the plan; call set_agent_mode with mode "build" when ready to implement.${reason ? `\nReason: ${reason}` : ''}`
+        : `Switched to BUILD mode. Implement the plan, verify with real tools, and continue until the requested work is complete.${reason ? `\nReason: ${reason}` : ''}`;
+    }
+    case 'compact_context':
+      // The loop handles this one because it owns the live transcript.
+      return 'Context compaction is handled by the run loop.';
     case 'update_plan': {
       const checked = parseAgentCall(name, args, AGENT_TOOLS);
       if (checked.error) return checked.error;
@@ -583,9 +664,11 @@ function cutIndexForCompaction(rest, keepFromEnd) {
   // A safe cut is immediately before an assistant-with-tool_calls message:
   // everything before it ends on a completed assistant/tool pair (or the task
   // user message), so no dangling tool results are left behind.
-  let j = Math.max(0, rest.length - keepFromEnd);
-  while (j > 0 && rest[j].role === 'tool') j -= 1;
-  if (j > 0 && rest[j]?.role === 'assistant' && rest[j].tool_calls?.length) return j;
+  const start = Math.max(1, rest.length - keepFromEnd);
+  for (let j = start; j > 0; j -= 1) {
+    if (rest[j]?.role === 'tool') continue;
+    if (rest[j]?.role === 'assistant' && rest[j].tool_calls?.length) return j;
+  }
   return -1;
 }
 
@@ -595,13 +678,15 @@ function cutIndexForCompaction(rest, keepFromEnd) {
  * in as a user message right before the recent verbatim tail. Returns true
  * when the transcript was rewritten and the loop may retry its step.
  */
-export async function compactAgentLoopMessages({ messages, model, abortSignal, log, reason = 'context pressure' }) {
-  const KEEP = 8;
-  if (messages.length <= KEEP + 4) return false;
+export async function compactAgentLoopMessages({
+  messages, model, abortSignal, log, reason = 'context pressure', keep = 8,
+}) {
+  const KEEP = Math.max(4, Math.min(20, Number(keep) || 8));
+  if (messages.length <= KEEP + 4) return { ok: false, compacted: 0, kept: messages.length };
   const sys = messages[0]?.role === 'system' ? messages[0] : null;
   const rest = sys ? messages.slice(1) : [...messages];
   const cut = cutIndexForCompaction(rest, KEEP);
-  if (cut <= 1) return false;
+  if (cut <= 1) return { ok: false, compacted: 0, kept: rest.length };
   const middle = rest.slice(0, cut);
   const kept = rest.slice(cut);
   const textOf = (m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''));
@@ -616,7 +701,7 @@ export async function compactAgentLoopMessages({ messages, model, abortSignal, l
       model,
       messages: [{
         role: 'user',
-        content: 'This coding run is still IN PROGRESS and just ran out of context window. '
+        content: 'This coding run is still IN PROGRESS and is compacting at a clean checkpoint. '
           + 'Compress the transcript below into a handover brief so the next model instance continues seamlessly. '
           + 'Keep under headings: Goal / Decisions / Facts (paths, identifiers, versions) / Work done (every file '
           + 'created or edited, with paths; commands run and their outcomes; errors hit and fixes applied) / '
@@ -626,10 +711,10 @@ export async function compactAgentLoopMessages({ messages, model, abortSignal, l
       params: { max_tokens: 900, temperature: 0.2, chat_template_kwargs: { enable_thinking: false } },
       abortSignal,
     });
-    if (!brief?.trim()) return false;
+    if (!brief?.trim()) return { ok: false, compacted: 0, kept: rest.length };
     const bridge = {
       role: 'user',
-      content: `[Mid-run compaction (${reason}) — your older context was summarized to fit the window.\n`
+      content: `[Context compacted at a checkpoint (${reason}) — older context was summarized to keep the run lightweight.\n`
         + `Handover brief:\n${brief.trim()}\n\nContinue exactly where the work left off: do not re-create files `
         + 'that exist, do not restart the task, and do not summarize what you already did — make the next tool call.]',
     };
@@ -637,10 +722,10 @@ export async function compactAgentLoopMessages({ messages, model, abortSignal, l
     if (sys) messages.push(sys);
     messages.push(bridge, ...kept);
     log?.info({ compacted: middle.length, kept: kept.length }, 'mid-run agent compaction');
-    return true;
+    return { ok: true, compacted: middle.length, kept: kept.length, brief: brief.trim() };
   } catch (err) {
     log?.warn?.({ err }, 'mid-run compaction failed');
-    return false;
+    return { ok: false, compacted: 0, kept: rest.length };
   }
 }
 
@@ -775,12 +860,19 @@ export async function agentLoop({
   ctxBudget = null,
 }) {
   const declaredTools = tools;
-  const harness = createRunHarness({ maxSteps: MAX_STEPS, executionMode: run.agent_execution === 'edit' ? 'edit' : 'execute' });
-  if (run.agent_execution === 'edit') {
+  const initialMode = normalizeAgentMode(run.agent_execution);
+  if (run.user_execution == null) run.user_execution = initialMode === 'edit' ? 'edit' : 'build';
+  const harness = createRunHarness({ maxSteps: MAX_STEPS, executionMode: initialMode });
+  if (initialMode === 'edit') {
     tools = tools.filter(tool => !EDIT_ONLY_TOOLS.has(tool.function?.name));
+  }
+  applyModeInstruction(messages, initialMode);
+  if (initialMode === 'edit') {
     if (messages[0]?.role === 'system') messages[0] = { ...messages[0], content: `${messages[0].content}\n\n${EDIT_ONLY_INSTRUCTION}` };
     else messages.unshift({ role: 'system', content: EDIT_ONLY_INSTRUCTION });
   }
+  const modeNow = () => normalizeAgentMode(run.agent_execution);
+  const offeredTools = () => toolsForAgentMode(tools, modeNow());
   const finishLoop = result => {
     const status = result.status === 'final' ? 'done' : result.status === 'aborted' ? 'stopped' : 'error';
     const summary = harness.summary(status);
@@ -795,20 +887,32 @@ export async function agentLoop({
   }
   const remote = resolveRemote(model);
   const canSee = remote ? !!parseCaps(remote.model?.caps_json).vision : modelHasVision(model);
-  const callStream = () => streamChat({
-    model, messages,
-    params: { ...genParams, tools, tool_choice: 'auto' },
-    abortSignal,
-    onDelta: (text, meta) => {
-      if (text) emit(run.id, 'delta', { text }, { store: false });
-      else if (meta?.reasoning) emit(run.id, 'delta', { reasoning: meta.reasoning }, { store: false });
-      else if (meta?.toolFrag) emit(run.id, 'tool_delta', meta.toolFrag, { store: false });
-      if (meta?.timings) emit(run.id, 'tok_s', {
-        value: meta.timings.predicted_per_second ?? null, n: meta.timings.predicted_n ?? 0,
-        promptN: meta.timings.prompt_n, estimated: !!meta.timings.estimated,
-      }, { store: false });
-    },
-  });
+  const callStream = (estimate = null) => {
+    const offered = offeredTools();
+    const params = { ...genParams, tools: offered, tool_choice: 'auto' };
+    if (!remote && ctxBudget > 0) {
+      params.max_tokens = localOutputBudget({
+        ctxSize: ctxBudget,
+        promptTokens: estimate ?? estimateAgentPrompt(messages, offered),
+        requested: genParams.max_tokens,
+        thinking: params.chat_template_kwargs?.enable_thinking !== false && params.thinking !== 'none',
+      });
+    }
+    return streamChat({
+      model, messages,
+      params,
+      abortSignal,
+      onDelta: (text, meta) => {
+        if (text) emit(run.id, 'delta', { text }, { store: false });
+        else if (meta?.reasoning) emit(run.id, 'delta', { reasoning: meta.reasoning }, { store: false });
+        else if (meta?.toolFrag) emit(run.id, 'tool_delta', meta.toolFrag, { store: false });
+        if (meta?.timings) emit(run.id, 'tok_s', {
+          value: meta.timings.predicted_per_second ?? null, n: meta.timings.predicted_n ?? 0,
+          promptN: meta.timings.prompt_n, estimated: !!meta.timings.estimated,
+        }, { store: false });
+      },
+    });
+  };
   const emitContext = (res) => {
     const used = res?.usage?.prompt_tokens ?? res?.timings?.prompt_n ?? null;
     if (used != null && ctxBudget > 0) {
@@ -816,41 +920,48 @@ export async function agentLoop({
     }
     return used;
   };
-  // Compact BEFORE the wall when we can see it coming (>92%), and once after
-  // an actual overflow error — both keep the run mid-task instead of crashing.
+  // Compact BEFORE the wall when we can see it coming, and once after an
+  // actual overflow error — both keep the run mid-task instead of crashing.
   const maybeCompact = async (reason) => {
     emit(run.id, 'notice', { message: `Context ${reason} — compacting mid-run (progress kept, task continues)…` }, { store: true });
-    const ok = await compactAgentLoopMessages({ messages, model, abortSignal, log: null, reason });
+    const result = await compactAgentLoopMessages({ messages, model, abortSignal, log: null, reason });
     const currentPlan = harness.summary('running').plan;
-    if (ok && currentPlan.steps.length) messages.push({ role: 'user', content: `Current run plan (preserved across compaction):\n${JSON.stringify(currentPlan)}\nContinue the active step; update_plan when progress changes.` });
-    if (!ok) emit(run.id, 'notice', { message: 'Mid-run compaction produced nothing — continuing as-is.' }, { store: false });
-    return ok;
+    if (result.ok && currentPlan.steps.length) messages.push({ role: 'user', content: `Current run plan (preserved across compaction):\n${JSON.stringify(currentPlan)}\nContinue the active step; update_plan when progress changes.` });
+    if (!result.ok) emit(run.id, 'notice', { message: 'Mid-run compaction produced nothing — continuing as-is.' }, { store: false });
+    return result.ok;
   };
   let lastUsed = 0;
   let lastEstimate = 0;
-  const inputLimit = agentInputLimit(ctxBudget, genParams.max_tokens ?? genParams.max_completion_tokens);
+  let thinkingOnlyRetries = 0;
+  const thinkingOn = genParams.chat_template_kwargs?.enable_thinking !== false && genParams.thinking !== 'none';
+  const desiredForCompaction = desiredOutputTokens({
+    ctxSize: ctxBudget ?? 32_768,
+    requested: Math.min(Number(genParams.max_tokens) || 8192, 8192),
+    thinking: thinkingOn,
+  });
+  const inputLimit = agentInputLimit(ctxBudget, desiredForCompaction);
   try {
   for (let step = 0; step < MAX_STEPS; step++) {
     harness.setStep(step);
     if (abortSignal?.aborted) return finishLoop({ status: 'aborted' });
     emit(run.id, 'run_progress', harness.progress('thinking'), { store: false });
     trimAgentToolHistory(messages);
-    let estimate = estimateAgentPrompt(messages, tools);
+    let estimate = estimateAgentPrompt(messages, offeredTools());
     const projected = calibratedPromptEstimate(estimate, lastEstimate, lastUsed);
     if (ctxBudget > 0 && projected > inputLimit && !(step === 0 && firstResult)) {
       if (await maybeCompact('nearly full')) {
         lastUsed = 0;
         lastEstimate = 0;
-        estimate = estimateAgentPrompt(messages, tools);
+        estimate = estimateAgentPrompt(messages, offeredTools());
       }
     }
     let res;
     try {
-      res = (step === 0 && firstResult) ? firstResult : await callStream();
+      res = (step === 0 && firstResult) ? firstResult : await callStream(estimate);
     } catch (err) {
       if (!abortSignal?.aborted && isContextOverflow(err) && await maybeCompact('overflowed')) {
-        estimate = estimateAgentPrompt(messages, tools);
-        res = await callStream();
+        estimate = estimateAgentPrompt(messages, offeredTools());
+        res = await callStream(estimate);
       } else {
         throw err;
       }
@@ -859,6 +970,25 @@ export async function agentLoop({
     lastEstimate = estimate;
 
     if (!res.toolCalls?.length) {
+      // A thinking model can spend the entire step on reasoning and return
+      // neither an answer nor an action. Prompt it once to finish instead of
+      // ending the run with an empty bubble.
+      if (!String(res.content ?? '').trim() && res.reasoning?.trim()
+          && !abortSignal?.aborted && thinkingOnlyRetries < 2) {
+        thinkingOnlyRetries += 1;
+        emit(run.id, 'notice', {
+          message: 'The model used its output while thinking — asking it to continue with an answer or the next tool call…',
+        }, { store: true });
+        messages.push({
+          role: 'assistant',
+          content: `[Internal reasoning from the previous step]\n${res.reasoning.slice(-6000)}`,
+        });
+        messages.push({
+          role: 'user',
+          content: 'That step was only internal reasoning and produced no answer or tool call. Continue now: make the next tool call, or give the final answer. Do not repeat the reasoning.',
+        });
+        continue;
+      }
       return finishLoop({ status: 'final', content: res.content, reasoning: res.reasoning,
                timings: res.timings, usage: res.usage, step });
     }
@@ -870,12 +1000,24 @@ export async function agentLoop({
     });
     messages.push({ role: 'assistant', content: res.content ?? '', tool_calls: res.toolCalls });
     const screenshots = [];
+    const compactRequests = [];
     for (const tc of res.toolCalls) {
       if (abortSignal?.aborted) return finishLoop({ status: 'aborted' });
       const { args, error: argumentError } = parseAgentCall(tc.function.name, tc.function.arguments, declaredTools);
       emit(run.id, 'tool_call', { call_id: tc.id, name: tc.function.name, args: args ?? {}, step });
       emit(run.id, 'run_progress', { ...harness.progress('tool'), lastTool: tc.function.name }, { store: false });
       const startedAt = Date.now();
+      // Compaction rewrites the live transcript. Do it after every ordinary
+      // tool result is in place so the current assistant/tool pair is a safe
+      // checkpoint the summarizer can keep verbatim.
+      if (tc.function.name === 'compact_context' && !argumentError) {
+        compactRequests.push({ tc, args: args ?? {}, startedAt });
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: 'Context compaction requested at this checkpoint.',
+        });
+        continue;
+      }
       let result;
       let replayed = false;
       let blocked = false;
@@ -907,11 +1049,48 @@ export async function agentLoop({
       emit(run.id, 'run_progress', harness.progress('thinking'), { store: false });
       const hint = outcome !== 'success' && !blocked ? `\n\nRecovery guidance: ${recoveryHint(tc.function.name, outcome)}` : '';
       messages.push({ role: 'tool', tool_call_id: tc.id, content: result + hint });
+      if (outcome === 'success' && tc.function.name === 'set_agent_mode') {
+        // Update the prompt block and the summary so the very next step sees
+        // the new mode and the UI can report what the run was allowed to do.
+        applyModeInstruction(messages, run.agent_execution);
+        harness.setExecutionMode(run.agent_execution);
+        emit(run.id, 'run_progress', harness.progress('thinking'), { store: false });
+      }
       if (canSee && tc.function.name === 'browser') {
         try {
           const observation = JSON.parse(result);
           if (observation.screenshot) screenshots.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${readFileSync(projectPath(wsDir(ws.id), observation.screenshot)).toString('base64')}` } });
         } catch { /* an unsuccessful browser action has no screenshot */ }
+      }
+    }
+    for (const request of compactRequests) {
+      if (abortSignal?.aborted) return finishLoop({ status: 'aborted' });
+      const reason = String(request.args.reason ?? '').trim() || 'model-requested checkpoint';
+      emit(run.id, 'notice', { message: `Compacting context at this checkpoint — the run continues with a handover brief.` }, { store: true });
+      const compacted = await compactAgentLoopMessages({
+        messages, model, abortSignal, log: null,
+        reason, keep: request.args.keep_recent,
+      });
+      const result = compacted.ok
+        ? `Context compacted: ${compacted.compacted} older messages summarized, ${compacted.kept} recent messages kept. Continue the work from the handover brief; do not restart completed steps.`
+        : 'Nothing was compacted yet — the recent history is still small. Continue the work; you can try again at a later checkpoint.';
+      const outcome = harness.record(request.tc.function.name, request.args, result);
+      // The compaction may have kept or summarized the placeholder tool row.
+      // If it survived, replace it with the real outcome so the model sees it.
+      const placeholder = messages.find((m) => m.role === 'tool' && m.tool_call_id === request.tc.id);
+      if (placeholder) placeholder.content = result;
+      emit(run.id, 'tool_result', {
+        call_id: request.tc.id, name: request.tc.function.name, step,
+        result: truncateOutput(result, 4000, 2000).text,
+        outcome, durationMs: Math.max(0, Date.now() - request.startedAt),
+      });
+      emit(run.id, 'run_progress', harness.progress('thinking'), { store: false });
+      if (compacted.ok) {
+        const currentPlan = harness.summary('running').plan;
+        if (currentPlan.steps.length) messages.push({
+          role: 'user',
+          content: `Current run plan (preserved across compaction):\n${JSON.stringify(currentPlan)}\nContinue the active step; update_plan when progress changes.`,
+        });
       }
     }
     if (screenshots.length) {
@@ -943,16 +1122,19 @@ async function runAgent(run, ws, hooks = {}) {
   let releaseGpu = null;
   try {
     if (run.agent_execution !== 'edit') await ensureRunning(ws);
-    emit(run.id, 'status', { status: 'running', note: run.agent_execution === 'edit' ? 'edit-only mode' : 'sandbox up' });
+    const startMode = normalizeAgentMode(run.agent_execution);
+    emit(run.id, 'status', { status: 'running', note: startMode === 'edit' ? 'edit-only mode' : startMode === 'plan' ? 'plan mode · read-only' : 'build mode · sandbox up' });
     // hold the single GPU slot for the whole run — queue behind any chat/image job
     releaseGpu = await acquireGpu({
       signal: abort.signal,
       onQueued: (position) => emit(run.id, 'status', { status: 'queued', note: `waiting for the GPU… (${position} ahead)`, position }, { store: false }),
     });
+    const runCtx = Number(modelSettings(model).ctx_size) > 0 ? Number(modelSettings(model).ctx_size) : null;
     const r = await agentLoop({
       run, ws, messages, model,
       genParams: { temperature: 0.7, top_p: 0.8, max_tokens: 8192, chat_template_kwargs: { enable_thinking: false } },
       abortSignal: abort.signal,
+      ctxBudget: runCtx,
     });
     if (r.status === 'final') {
       emit(run.id, 'assistant', { content: r.content, thinking: r.reasoning || null, step: r.step, final: true });
@@ -1137,7 +1319,9 @@ export default async function agentRoutes(app) {
     let run;
     try { run = createRun(ws.id, req.user.id, req.body?.model ?? DEFAULT_AGENT_MODEL, task); }
     catch (err) { return reply.code(err.code === 409 ? 409 : 500).send({ error: err.message }); }
-    run.agent_execution = req.body?.agent_execution === 'edit' ? 'edit' : 'execute';
+    run.agent_execution = normalizeAgentMode(req.body?.agent_execution, 'build');
+    run.user_execution = run.agent_execution === 'edit' ? 'edit' : 'build';
+    try { db.prepare('UPDATE agent_runs SET agent_execution = ? WHERE id = ?').run(run.agent_execution, run.id); } catch { /* */ }
     runAgent(run, ws).catch((err) => app.log.error({ err, run: run.id }, 'agent run crashed'));
     return run;
   });

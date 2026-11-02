@@ -518,6 +518,15 @@
             <div class="shead"><span>Repeat penalty</span><span class="sval mono">{Number(form.repeat_penalty ?? 1.1).toFixed(2)}</span></div>
             <input type="range" min="1" max="1.6" step="0.01" bind:value={form.repeat_penalty} />
           </div>
+          <div class="srow">
+            <div class="shead"><span>Reply token limit</span><span class="sval mono">{form.max_tokens ?? 2048}</span></div>
+            <input type="range" min="256" max="8192" step="256" bind:value={form.max_tokens} />
+            <div class="hint">Minimum output headroom. On local thinking models the model may keep reasoning past this limit and use the rest of the context window; history is auto-compacted before it runs out.</div>
+          </div>
+          <div class="row">
+            <div class="rlabel"><div class="rt">Reuse prompt cache</div><div class="rd">skips reprocessing the unchanged beginning of local chats</div></div>
+            <input type="checkbox" bind:checked={form.cache_prompt} />
+          </div>
           <div class="row">
             <div class="rlabel">
               <div class="rt">Mirostat</div>

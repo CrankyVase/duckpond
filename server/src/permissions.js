@@ -31,6 +31,8 @@ export const RISK = { READ: 'read', WRITE: 'write', EXEC: 'exec', EXTERNAL: 'ext
 export const TOOL_RISK = {
   // read-only
   update_plan: RISK.READ,
+  set_agent_mode: RISK.READ,
+  compact_context: RISK.READ,
   list_files: RISK.READ,
   search_files: RISK.READ,
   server_status: RISK.READ,

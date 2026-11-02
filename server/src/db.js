@@ -650,5 +650,9 @@ export function nowSec() { return Math.floor(Date.now() / 1000); }
 if (!db.prepare('PRAGMA table_info(agent_runs)').all().some(c => c.name === 'project_key')) {
   db.exec('ALTER TABLE agent_runs ADD COLUMN project_key TEXT');
 }
+// Agent mode is plan/build/edit; older rows used execute for build.
+if (!db.prepare('PRAGMA table_info(agent_runs)').all().some(c => c.name === 'agent_execution')) {
+  db.exec("ALTER TABLE agent_runs ADD COLUMN agent_execution TEXT NOT NULL DEFAULT 'build'");
+}
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_active_project
   ON agent_runs(project_key) WHERE project_key IS NOT NULL AND status IN ('running','waiting_approval')`);

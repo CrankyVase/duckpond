@@ -26,6 +26,7 @@
     write_file: FilePenLine, edit_file: FilePenLine, read_file: FileText,
     list_files: Folder, search_files: Folder, start_server: TerminalIcon, server_status: TerminalIcon, stop_server: TerminalIcon, run_command: TerminalIcon, start_project: Rocket,
     web_search: Globe, fetch_page: Globe, generate_image: ImageIcon, update_plan: ListChecks,
+    set_agent_mode: ListChecks, compact_context: ListChecks,
   };
   const toolIcon = (name) => TOOL_ICONS[name] ?? Wrench;
 
@@ -62,7 +63,7 @@
 
   // friendlier chip label for the project-mode gate call
   function toolLabel(name) {
-    return ({ search_files: 'Find files', start_server: 'Start server', server_status: 'Check server', stop_server: 'Stop server', start_project: 'Start project', write_file: 'Write file', edit_file: 'Edit file', read_file: 'Read file', list_files: 'Browse files', run_command: 'Run command', web_search: 'Search the web', fetch_page: 'Read page', generate_image: 'Generate image', update_plan: 'Update plan' })[name] ?? name?.replaceAll('_', ' ') ?? 'Tool';
+    return ({ search_files: 'Find files', start_server: 'Start server', server_status: 'Check server', stop_server: 'Stop server', start_project: 'Start project', write_file: 'Write file', edit_file: 'Edit file', read_file: 'Read file', list_files: 'Browse files', run_command: 'Run command', web_search: 'Search the web', fetch_page: 'Read page', generate_image: 'Generate image', update_plan: 'Update plan', set_agent_mode: 'Switch mode', compact_context: 'Compact context' })[name] ?? name?.replaceAll('_', ' ') ?? 'Tool';
   }
 
   // keep the live-coding block pinned to its newest line
@@ -112,7 +113,7 @@
       {#if progress?.maxSteps && Number.isFinite(progress.step) && !settled}<div class="runbudget"><span>Step {Math.min(progress.maxSteps, progress.step + 1)} of {progress.maxSteps}</span><span class="budget-track"><span style:width={`${Math.min(100, Math.max(0, ((progress.step + 1) / progress.maxSteps) * 100))}%`}></span></span></div>{/if}
       {#if finalSummary?.verification}
         <div class="verification-summary" aria-label="Recorded verification activity">
-          <span>{finalSummary.executionMode === 'edit' ? 'Edit-only · runtime checks not run' : 'Verification activity'}</span>
+          <span>{finalSummary.executionMode === 'edit' ? 'Edit-only · runtime checks not run' : finalSummary.executionMode === 'plan' ? 'Plan only · no project changes' : 'Verification activity'}</span>
           <span>{finalSummary.verification.commandsPassed ?? 0} commands succeeded</span>
           <span class:has-failures={finalSummary.verification.commandsFailed > 0}>{finalSummary.verification.commandsFailed ?? 0} commands failed</span>
           {#if finalSummary.verification.browserObservations}<span>{finalSummary.verification.browserObservations} browser observations</span>{/if}
@@ -221,6 +222,8 @@
       <div class="err">{e.message}</div>
     {:else if e.type === 'notice'}
       <div class="runnotice">{e.message}</div>
+    {:else if e.type === 'mode'}
+      <div class="runnotice">Mode switched to <strong>{e.mode}</strong>{e.reason ? ` · ${e.reason}` : ''}</div>
     {/if}
   {/each}
 
